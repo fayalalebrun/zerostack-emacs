@@ -60,6 +60,9 @@ dnf install bubblewrap
 pacman -S bubblewrap
 ```
 
+Once installed, run `/prompt autoconfig` inside zerostack to explore the
+documentation and configure the tool interactively.
+
 ## Quick start
 
 ```bash
