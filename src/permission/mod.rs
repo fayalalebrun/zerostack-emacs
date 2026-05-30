@@ -62,7 +62,8 @@ impl From<PermissionConfig> for PermissionConfigs {
 pub enum SecurityMode {
     Standard,
     Restrictive,
-    Accept,
+    ReadOnly,
+    Guarded,
     Yolo,
 }
 
@@ -71,7 +72,8 @@ impl std::fmt::Display for SecurityMode {
         match self {
             SecurityMode::Standard => write!(f, "standard"),
             SecurityMode::Restrictive => write!(f, "restrictive"),
-            SecurityMode::Accept => write!(f, "accept"),
+            SecurityMode::ReadOnly => write!(f, "readonly"),
+            SecurityMode::Guarded => write!(f, "guarded"),
             SecurityMode::Yolo => write!(f, "yolo"),
         }
     }

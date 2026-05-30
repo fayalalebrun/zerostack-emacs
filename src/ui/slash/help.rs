@@ -39,7 +39,7 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     );
     write_result(
         ctx.renderer,
-        "  /mode <mode>           set mode (standard|restrictive|accept|yolo)",
+        "  /mode <mode>           set mode (standard|restrictive|readonly|guarded|yolo)",
     );
     #[cfg(feature = "mcp")]
     {

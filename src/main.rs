@@ -32,13 +32,16 @@ fn resolve_mode(cli: &cli::Cli, cfg: &config::Config) -> SecurityMode {
     if cli.yolo || cfg.yolo.unwrap_or(false) {
         SecurityMode::Yolo
     } else if cli.accept_all || cfg.accept_all.unwrap_or(false) {
-        SecurityMode::Accept
+        SecurityMode::Standard
     } else if cli.restrictive || cfg.restrictive.unwrap_or(false) {
         SecurityMode::Restrictive
     } else if let Some(m) = &cfg.default_permission_mode {
         match m.as_str() {
             "yolo" => SecurityMode::Yolo,
-            "accept" => SecurityMode::Accept,
+            "accept" => SecurityMode::Standard,
+            "standard" => SecurityMode::Standard,
+            "guarded" => SecurityMode::Guarded,
+            "readonly" => SecurityMode::ReadOnly,
             "restrictive" => SecurityMode::Restrictive,
             _ => SecurityMode::Standard,
         }
@@ -60,10 +63,15 @@ fn build_permission_checker(
         return (None, None, None);
     }
 
+    if cli.dangerously_skip_permissions {
+        return (None, None, None);
+    }
+
     let perm_config = cfg.build_permission_config();
 
     let mode = resolve_mode(cli, cfg);
-    let checker = PermissionChecker::new(&perm_config, mode, None);
+    let permission_modes = cfg.permission_modes.clone();
+    let checker = PermissionChecker::new(&perm_config, mode, None, permission_modes);
     let perm: PermCheck = std::sync::Arc::new(std::sync::Mutex::new(checker));
 
     let (ask_tx, ask_rx) = tokio::sync::mpsc::channel(64);
@@ -296,10 +304,12 @@ fn print_config(cli: &cli::Cli, cfg: &config::Config) {
     let edit_system = cli.resolve_edit_system(cfg);
     let compact = cfg.resolve_compact_enabled();
 
-    let mode = if cli.yolo || cfg.yolo.unwrap_or(false) {
+    let mode = if cli.dangerously_skip_permissions {
+        "dangerously-skip-permissions"
+    } else if cli.yolo || cfg.yolo.unwrap_or(false) {
         "yolo"
     } else if cli.accept_all || cfg.accept_all.unwrap_or(false) {
-        "accept"
+        "standard"
     } else if cli.restrictive || cfg.restrictive.unwrap_or(false) {
         "restrictive"
     } else {

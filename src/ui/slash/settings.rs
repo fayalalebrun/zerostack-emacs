@@ -50,27 +50,29 @@ async fn handle_mode(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<(
         write_result(ctx.renderer, "");
         write_result(
             ctx.renderer,
-            "  /mode standard      use configured permission rules",
+            "  /mode standard      allow within CWD, ask for external",
+        );
+        write_result(ctx.renderer, "  /mode restrictive   ask for all operations");
+        write_result(
+            ctx.renderer,
+            "  /mode readonly      allow reads, deny everything else",
         );
         write_result(
             ctx.renderer,
-            "  /mode restrictive   default all tools to ask",
+            "  /mode guarded       allow reads, ask for everything else",
         );
         write_result(
             ctx.renderer,
-            "  /mode accept        auto-accept within working directory",
-        );
-        write_result(
-            ctx.renderer,
-            "  /mode yolo          auto-accept ALL operations",
+            "  /mode yolo          allow all, ask for destructive bash",
         );
         return Ok(());
     }
     match parts[1] {
         "standard" => set_mode(ctx, SecurityMode::Standard, "standard").await,
         "restrictive" => set_mode(ctx, SecurityMode::Restrictive, "restrictive").await,
-        "accept" => set_mode(ctx, SecurityMode::Accept, "accept (auto-allow within CWD)").await,
-        "yolo" => set_mode(ctx, SecurityMode::Yolo, "YOLO (all operations allowed)").await,
+        "readonly" => set_mode(ctx, SecurityMode::ReadOnly, "readonly").await,
+        "guarded" => set_mode(ctx, SecurityMode::Guarded, "guarded").await,
+        "yolo" => set_mode(ctx, SecurityMode::Yolo, "yolo").await,
         _ => write_error(ctx.renderer, format!("unknown mode: {}", parts[1])),
     }
     Ok(())

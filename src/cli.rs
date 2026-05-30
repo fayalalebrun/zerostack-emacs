@@ -58,11 +58,7 @@ pub struct Cli {
     #[arg(long = "no-color", help = "Disable colored TUI output")]
     pub no_color: bool,
 
-    #[arg(
-        long = "restrictive",
-        short = 'R',
-        help = "Default all tools to ask for approval"
-    )]
+    #[arg(long = "restrictive", short = 'R', help = "Ask for all operations")]
     pub restrictive: bool,
 
     #[arg(
@@ -73,9 +69,15 @@ pub struct Cli {
 
     #[arg(
         long = "yolo",
-        help = "Auto-accept ALL operations without any restriction"
+        help = "Allow all operations except destructive bash commands"
     )]
     pub yolo: bool,
+
+    #[arg(
+        long = "dangerously-skip-permissions",
+        help = "Skip all permission checks (allow everything without any guard)"
+    )]
+    pub dangerously_skip_permissions: bool,
 
     #[arg(
         long = "sandbox",

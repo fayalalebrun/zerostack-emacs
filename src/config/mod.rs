@@ -70,6 +70,8 @@ pub struct Config {
     pub allow_all_mcp_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "permission-modes")]
+    pub permission_modes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_tool_details: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
