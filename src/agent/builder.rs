@@ -82,7 +82,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     }
     #[cfg(feature = "memory")]
     {
-        crate::agent::memory::append_memory_block(&mut preamble, context.memory.as_deref());
+        crate::extras::memory::append_memory_block(&mut preamble, context.memory.as_deref());
         preamble.push_str(crate::agent::prompt::MEMORY_TOOLS_PROMPT);
     }
 
@@ -135,7 +135,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         let mut builder = builder.tools(base_tools.into_vec());
         #[cfg(feature = "memory")]
         {
-            use crate::agent::memory::{MemoryRead, MemorySearch, MemoryWrite};
+            use crate::extras::memory::{MemoryRead, MemorySearch, MemoryWrite};
             builder = builder
                 .tool(MemoryWrite::new(permission.clone(), ask_tx.clone()))
                 .tool(MemoryRead::new(permission.clone(), ask_tx.clone()))

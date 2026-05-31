@@ -77,7 +77,7 @@ impl ContextFiles {
         self.current_theme_name = crate::session::storage::load_theme_name();
         #[cfg(feature = "memory")]
         {
-            self.memory = crate::agent::memory::Mem::open().context_block();
+            self.memory = crate::extras::memory::Mem::open().context_block();
         }
     }
 }
@@ -94,7 +94,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let theme_map = themes::load();
     let theme_name = crate::session::storage::load_theme_name();
     #[cfg(feature = "memory")]
-    let memory = crate::agent::memory::Mem::open().context_block();
+    let memory = crate::extras::memory::Mem::open().context_block();
     ContextFiles {
         agents,
         prompts: prompt_map,

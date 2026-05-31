@@ -193,8 +193,8 @@ pub async fn handle_compress(
         .sum();
 
     #[cfg(feature = "memory")]
-    crate::agent::memory::flush_compaction_summary(
-        &crate::agent::memory::Mem::open(),
+    crate::extras::memory::flush_compaction_summary(
+        &crate::extras::memory::Mem::open(),
         &summary,
         Some(cut_idx), // = first_kept_index: how many messages were summarized
     );

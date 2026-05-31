@@ -302,7 +302,7 @@ async fn handle_agent_done(
     let loop_running = false;
 
     #[cfg(feature = "memory")]
-    let reserve = crate::agent::memory::effective_reserve(
+    let reserve = crate::extras::memory::effective_reserve(
         cfg.resolve_reserve_tokens(),
         context.memory.as_deref(),
     );

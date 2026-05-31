@@ -8,7 +8,7 @@
 //! can write files directly. Paths are built from the public `root`/`project`
 //! fields (Mem's own helpers are private).
 
-use crate::agent::memory::{
+use crate::extras::memory::{
     MAX_INJECT_BYTES, Mem, WriteMode, WriteTarget, append_memory_block, compaction_heading,
     effective_reserve, flush_compaction_summary,
 };
