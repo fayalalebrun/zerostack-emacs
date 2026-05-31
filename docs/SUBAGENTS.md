@@ -2,9 +2,14 @@
 
 ## Overview
 
-Subagents let the main agent delegate open-ended codebase exploration to a
-**read-only child agent**. This keeps the main agent's context focused while
-allowing thorough investigation of the codebase.
+Subagents let the main agent delegate **precise read-only investigations** to a
+**read-only child agent**. Each subagent receives a specific technical question
+(e.g. "Where is MCP support implemented?") and returns a focused answer.
+This keeps the main agent's context clean while enabling thorough lookups.
+
+Subagents are designed for **highly specific questions**, not wide exploration.
+Avoid broad instructions like "check all documentation" — instead ask precise
+questions that can be answered with a few file reads and searches.
 
 When the main agent calls the `task` tool, one subagent is spawned per prompt.
 If multiple prompts are given, they run in **parallel**. Each subagent has
@@ -159,9 +164,10 @@ Key files:
 
 ## Subagent System Prompt
 
-The subagent receives its own system prompt focused on exploration
-(`src/extras/subagents/prompt.rs`). It tells the subagent to be thorough,
-use the available tools, and report findings concisely without preamble.
+The subagent receives its own system prompt focused on answering specific
+technical questions (`src/extras/subagents/prompt.rs`). It instructs the
+subagent to focus on the question given, use the available tools, and report
+findings concisely without preamble or wandering.
 
 ## Parallel Execution
 

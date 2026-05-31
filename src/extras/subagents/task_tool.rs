@@ -48,11 +48,16 @@ impl Tool for TaskTool {
     async fn definition(&self, _p: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Delegate read-only codebase exploration to a subagent. \
-Provide one or more prompts describing what to investigate. \
-Multiple prompts are explored in parallel. \
+            description: "Delegate a MULTI-STEP read-only investigation to a subagent. \
+Use ONLY when answering a question requires searching several files, cross-referencing, \
+and synthesizing findings (e.g. \"Where is MCP support implemented?\", \
+\"What does the function get_signature do?\"). \
+Do NOT use for single-step operations: listing a directory, grepping for one pattern, \
+reading a known file — just call the tool directly. \
+Do NOT use for wide/vague tasks (e.g. \"check all documentation\", \"explore the codebase\"). \
+Multiple prompts run in parallel. \
 The subagent can read, grep, find_files, list directories, and access memory. \
-Returns a summary of findings for each prompt."
+Returns a summary of findings."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -60,7 +65,7 @@ Returns a summary of findings for each prompt."
                     "prompts": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "One or more exploration tasks (parallel when multiple)"
+                        "description": "Investigation prompts requiring multiple tool calls to answer (parallel when multiple). NOT for single-step operations like listing a directory or reading one file."
                     }
                 },
                 "required": ["prompts"]

@@ -24,6 +24,7 @@ acp = ["dep:agent-client-protocol"]
 memory = []
 subagents = []
 archmd = []
+multithread = ["tokio/rt-multi-thread"]
 
 [dependencies]
 rig = { version = "0.37", features = ["rmcp"] }

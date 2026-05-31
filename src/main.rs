@@ -82,7 +82,11 @@ fn build_permission_checker(
     (Some(perm), Some(ask_tx), Some(ask_rx))
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[cfg_attr(
+    feature = "multithread",
+    tokio::main(flavor = "multi_thread", worker_threads = 4)
+)]
+#[cfg_attr(not(feature = "multithread"), tokio::main(flavor = "current_thread"))]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -137,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "memory")]
             caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
         #[cfg(feature = "subagents")]
-            caps.push("- **Subagents**: delegate read-only exploration to parallel subagents via the `task` tool");
+            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
 
         if !caps.is_empty() {
             prompt_text.push_str("\n\n## Available Capabilities\n\n");
