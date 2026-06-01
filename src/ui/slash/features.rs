@@ -150,7 +150,7 @@ async fn handle_wt_merge(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
         ),
     );
     Err(anyhow::anyhow!(
-        "DEFER_WT_MERGE:{}:{}:{}:{}:{}",
+        "DEFER_WT_MERGE\x1F{}\x1F{}\x1F{}\x1F{}\x1F{}",
         info.branch,
         target,
         main_path,
@@ -179,7 +179,7 @@ async fn handle_wt_exit(_parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
         format!("returning to main repo at {}", main_path),
     );
     Err(anyhow::anyhow!(
-        "DEFER_WT_EXIT:{}:{}",
+        "DEFER_WT_EXIT\x1F{}\x1F{}",
         main_path,
         info.worktree_path.display()
     ))

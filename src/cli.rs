@@ -16,11 +16,7 @@ pub struct Cli {
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
 
-    #[arg(
-        short = 'r',
-        long = "resume",
-        help = "List recent sessions"
-    )]
+    #[arg(short = 'r', long = "resume", help = "List recent sessions")]
     pub resume: bool,
 
     #[arg(long = "session", help = "Load session by ID prefix")]

@@ -749,9 +749,9 @@ pub async fn run_interactive(
                                         let _ = crate::session::storage::save_session(session);
                                     }
                                     #[cfg(feature = "git-worktree")]
-                                    Err(e) if e.to_string().starts_with("DEFER_WT_MERGE:") => {
+                                    Err(e) if e.to_string().starts_with("DEFER_WT_MERGE\u{1F}") => {
                                         let err_msg = e.to_string();
-                                        let parts: Vec<&str> = err_msg.strip_prefix("DEFER_WT_MERGE:").unwrap_or("").splitn(5, ':').collect();
+                                        let parts: Vec<&str> = err_msg.strip_prefix("DEFER_WT_MERGE\u{1F}").unwrap_or("").splitn(5, '\u{1F}').collect();
                                         if parts.len() == 5 {
                                             let branch = parts[0];
                                             let target = parts[1];
@@ -808,9 +808,9 @@ pub async fn run_interactive(
                                         }
                                     }
                                     #[cfg(feature = "git-worktree")]
-                                    Err(e) if e.to_string().starts_with("DEFER_WT_EXIT:") => {
+                                    Err(e) if e.to_string().starts_with("DEFER_WT_EXIT\u{1F}") => {
                                         let err_msg = e.to_string();
-                                        let parts: Vec<&str> = err_msg.strip_prefix("DEFER_WT_EXIT:").unwrap_or("").splitn(2, ':').collect();
+                                        let parts: Vec<&str> = err_msg.strip_prefix("DEFER_WT_EXIT\u{1F}").unwrap_or("").splitn(2, '\u{1F}').collect();
                                         if parts.len() == 2 {
                                             let main_path = parts[0];
                                             std::env::set_current_dir(main_path)

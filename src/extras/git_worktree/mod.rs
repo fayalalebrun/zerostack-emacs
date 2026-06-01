@@ -222,25 +222,19 @@ pub fn try_merge(info: &WorktreeInfo, target: &str) -> (MergeState, MergeOutcome
     };
 
     if let Err(e) = run_git(["fetch", "--all"]) {
-        return (
-            working_state.clone(),
-            cleanup_early(&mut working_state, format!("fetch failed: {}", e)),
-        );
+        let outcome = cleanup_early(&mut working_state, format!("fetch failed: {}", e));
+        return (working_state.clone(), outcome);
     }
 
     if let Err(e) = run_git(["checkout", target]) {
-        return (
-            working_state.clone(),
-            cleanup_early(&mut working_state, format!("checkout failed: {}", e)),
-        );
+        let outcome = cleanup_early(&mut working_state, format!("checkout failed: {}", e));
+        return (working_state.clone(), outcome);
     }
 
     if let Err(e) = run_git(["pull", "--no-edit"]) {
         let _ = run_git_quiet(["checkout", &original_branch]);
-        return (
-            working_state.clone(),
-            cleanup_early(&mut working_state, format!("pull failed: {}", e)),
-        );
+        let outcome = cleanup_early(&mut working_state, format!("pull failed: {}", e));
+        return (working_state.clone(), outcome);
     }
 
     match run_git(["merge", "--no-edit", &info.branch]) {
@@ -295,7 +289,7 @@ fn complete_merge_with_force(state: &MergeState, force: bool) -> Result<(), Stri
                 "remove",
                 &state.info.worktree_path.to_string_lossy(),
             ])?;
-            run_git(["branch", "-D", &state.info.branch])?;
+            run_git(["branch", "-d", &state.info.branch])?;
         }
         Ok::<(), String>(())
     })();
@@ -309,6 +303,12 @@ fn complete_merge_with_force(state: &MergeState, force: bool) -> Result<(), Stri
                     "worktree complete_merge: failed to pop stash; \
                      changes may be lost; try `git stash pop` manually"
                 );
+                let _ = std::env::set_current_dir(&state.orig_dir);
+                return Err(format!(
+                    "merge succeeded but stash pop failed: {}. \
+                     Your changes are in the stash; run `git stash pop` manually.",
+                    e
+                ));
             }
         }
         let _ = std::env::set_current_dir(&state.orig_dir);
