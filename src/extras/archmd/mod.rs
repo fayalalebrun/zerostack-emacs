@@ -38,6 +38,7 @@ with the full picture. Keep the document under ~300 lines
 // Public API (uses global asked_path)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub fn has_been_asked(dir: &Path) -> bool {
     has_been_asked_with_path(dir, &dirs_asked_path())
 }

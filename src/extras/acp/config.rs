@@ -15,6 +15,7 @@ pub enum AcpServerConfig {
 }
 
 impl AcpServerConfig {
+    #[allow(dead_code)]
     pub fn transport_type(&self) -> &str {
         match self {
             AcpServerConfig::Tcp { .. } => "tcp",
