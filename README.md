@@ -23,6 +23,8 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Integrated Git Worktrees integration**: Use `/worktree` to move the agent from one worktree to another.
 - **ACP support** (gated): Agent Communication Protocol server — lets editors (Zed, etc.) connect to zerostack as an ACP agent
 - **Persistent memory** (gated): plain-Markdown memory across sessions: a global MEMORY.md plus per-project daily logs, scratchpad, and notes, injected into the system prompt each session
+- **Subagents**: Parallel and fast, used for exploring the codebase
+- **ARCHITECTURE.md**: Our own companion file for AGENTS.md, it allows to offer a shared core knowledge for all agents working on the same codebase
 
 **NOTE**: Windows support is not tested is any way, but feel free to try and open an issue if you encounter any bugs!
 
@@ -48,6 +50,9 @@ cargo install zerostack --features acp
 
 # With Memory support
 cargo install zerostack --features memory
+
+# With experimental multi-threaded subagents
+cargo install zerostack --features multithread
 ```
 
 You are now ready to work with a lightweight coding agent! (You can also find pre-built binaries on Github Releases)
