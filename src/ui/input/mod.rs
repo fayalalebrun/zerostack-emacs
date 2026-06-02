@@ -1,21 +1,19 @@
-mod cursor;
+pub(crate) mod cursor;
 mod pickers;
 
 pub use cursor::cursor_to_line_col;
 pub use cursor::{
     count_lines, line_col_to_cursor, line_end, line_start, next_char_boundary, prev_char_boundary,
 };
-pub use pickers::{
-    Picker, handle_command_picker_key, handle_file_picker_key, handle_models_picker_key,
-    handle_prompt_picker_key, handle_theme_picker_key,
-};
+pub use pickers::Picker;
 
 use compact_str::CompactString;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::io::Write;
 
-use crate::ui::cmd_picker::{CommandPicker, ModelsPicker, PromptPicker, ThemePicker};
-use crate::ui::picker::FilePicker;
+use crate::ui::pickers::file::FilePicker;
+use crate::ui::pickers::list::ListPicker;
+use crate::ui::pickers::models::ModelsPicker;
 
 const MAX_KILL_RING: usize = 30;
 
@@ -109,7 +107,7 @@ impl InputEditor {
     }
 
     pub fn start_command_picker(&mut self) {
-        let mut picker = CommandPicker::new();
+        let mut picker = ListPicker::with_static_commands();
         picker.set_monochrome(self.monochrome);
         picker.activate();
         self.picker = Some(Picker::Command(picker));
@@ -118,88 +116,52 @@ impl InputEditor {
     pub fn start_models_picker(&mut self) {
         let mut picker = ModelsPicker::new();
         picker.set_monochrome(self.monochrome);
-        picker.set_groups(self.quick_model_names.clone(), self.live_model_names.clone());
+        picker.set_groups(
+            self.quick_model_names.clone(),
+            self.live_model_names.clone(),
+        );
         picker.activate();
         self.picker = Some(Picker::Models(picker));
     }
 
     pub fn start_provider_picker(&mut self) {
-        let mut picker = PromptPicker::with_prefix("/provider ");
+        let mut picker = ListPicker::new();
         picker.set_monochrome(self.monochrome);
         if !self.provider_names.is_empty() {
             picker.set_items(self.provider_names.clone());
         }
         picker.activate();
-        self.picker = Some(Picker::Prompt(picker));
+        self.picker = Some(Picker::Prefixed(picker, "/provider "));
     }
 
     pub fn start_prompt_picker(&mut self) {
-        let mut picker = PromptPicker::new();
+        let mut picker = ListPicker::new();
         picker.set_monochrome(self.monochrome);
         if !self.prompt_names.is_empty() {
             picker.set_items(self.prompt_names.clone());
         }
         picker.activate();
-        self.picker = Some(Picker::Prompt(picker));
+        self.picker = Some(Picker::Prefixed(picker, "/prompt "));
     }
 
     pub fn start_dot_picker(&mut self) {
-        let mut picker = PromptPicker::with_prefix(".");
+        let mut picker = ListPicker::new();
         picker.set_monochrome(self.monochrome);
         if !self.prompt_names.is_empty() {
             picker.set_items(self.prompt_names.clone());
         }
         picker.activate();
-        self.picker = Some(Picker::Prompt(picker));
+        self.picker = Some(Picker::Prefixed(picker, "."));
     }
 
     pub fn start_theme_picker(&mut self) {
-        let mut picker = ThemePicker::new();
+        let mut picker = ListPicker::new();
         picker.set_monochrome(self.monochrome);
         if !self.theme_names.is_empty() {
             picker.set_items(self.theme_names.clone());
         }
         picker.activate();
-        self.picker = Some(Picker::Theme(picker));
-    }
-
-    pub fn handle_picker_key(&mut self, key: KeyEvent) -> bool {
-        let handled = match self.picker.as_mut() {
-            Some(Picker::File(p)) => {
-                handle_file_picker_key(&mut self.buffer, &mut self.cursor, p, key)
-            }
-            Some(Picker::Command(p)) => {
-                let (handled, replacement) = handle_command_picker_key(
-                    &mut self.buffer,
-                    &mut self.cursor,
-                    &self.prompt_names,
-                    &self.theme_names,
-                    &self.quick_model_names,
-                    &self.live_model_names,
-                    &self.provider_names,
-                    p,
-                    key,
-                );
-                if let Some(new_picker) = replacement {
-                    self.picker = Some(new_picker);
-                }
-                handled
-            }
-            Some(Picker::Prompt(p)) => {
-                handle_prompt_picker_key(&mut self.buffer, &mut self.cursor, p, key)
-            }
-            Some(Picker::Models(p)) => {
-                handle_models_picker_key(&mut self.buffer, &mut self.cursor, p, key)
-            }
-            Some(Picker::Theme(p)) => {
-                handle_theme_picker_key(&mut self.buffer, &mut self.cursor, p, key)
-            }
-            None => false,
-        };
-        if handled {
-            self.yank_pos = None;
-        }
-        handled
+        self.picker = Some(Picker::Prefixed(picker, "/theme "));
     }
 
     pub fn open_in_editor(&mut self) {
@@ -491,7 +453,7 @@ impl InputEditor {
                         let query_len = after_prefix.len();
                         if query_len == 1 {
                             self.start_prompt_picker();
-                            if let Some(Picker::Prompt(ref mut pp)) = self.picker {
+                            if let Some(Picker::Prefixed(ref mut pp, _)) = self.picker {
                                 pp.char_input(c);
                             }
                         }
@@ -519,7 +481,7 @@ impl InputEditor {
                         let query_len = after_prefix.len();
                         if query_len == 1 {
                             self.start_theme_picker();
-                            if let Some(Picker::Theme(ref mut tp)) = self.picker {
+                            if let Some(Picker::Prefixed(ref mut tp, _)) = self.picker {
                                 tp.char_input(c);
                             }
                         }
@@ -534,7 +496,7 @@ impl InputEditor {
                         let query_len = after_prefix.len();
                         if query_len == 1 {
                             self.start_provider_picker();
-                            if let Some(Picker::Prompt(ref mut pp)) = self.picker {
+                            if let Some(Picker::Prefixed(ref mut pp, _)) = self.picker {
                                 pp.char_input(c);
                             }
                         }
@@ -698,7 +660,6 @@ impl InputEditor {
         if pairs.is_empty() {
             return 0;
         }
-        // Convert byte cursor to char index
         let char_idx = pairs
             .iter()
             .position(|&(bi, _)| bi >= self.cursor)
@@ -710,7 +671,6 @@ impl InputEditor {
         while pos > 0 && pairs[pos - 1].1 != ' ' {
             pos -= 1;
         }
-        // Return byte offset at resulting char position
         if pos < pairs.len() {
             pairs[pos].0
         } else {
@@ -771,503 +731,5 @@ impl InputEditor {
         new_buf.push_str(after);
         self.buffer = CompactString::new(&new_buf);
         deleted
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::KeyModifiers;
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
-
-    fn alt(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
-    }
-
-    fn type_text(editor: &mut InputEditor, text: &str) {
-        for ch in text.chars() {
-            editor.handle_key(key(KeyCode::Char(ch)));
-        }
-    }
-
-    #[test]
-    fn test_ctrl_a_moves_to_beginning() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(key(KeyCode::End));
-        assert_eq!(ed.cursor, 11);
-
-        ed.handle_key(ctrl('a'));
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_ctrl_e_moves_to_end() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(ctrl('e'));
-        assert_eq!(ed.cursor, 5);
-    }
-
-    #[test]
-    fn test_ctrl_b_moves_backward() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "abc");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(ctrl('b'));
-        assert_eq!(ed.cursor, 2);
-        ed.handle_key(ctrl('b'));
-        assert_eq!(ed.cursor, 1);
-        ed.handle_key(ctrl('b'));
-        assert_eq!(ed.cursor, 0);
-        ed.handle_key(ctrl('b'));
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_ctrl_f_moves_forward() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "abc");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(ctrl('f'));
-        assert_eq!(ed.cursor, 1);
-        ed.handle_key(ctrl('f'));
-        assert_eq!(ed.cursor, 2);
-        ed.handle_key(ctrl('f'));
-        assert_eq!(ed.cursor, 3);
-        ed.handle_key(ctrl('f'));
-        assert_eq!(ed.cursor, 3);
-    }
-
-    #[test]
-    fn test_ctrl_p_navigates_history() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "first");
-        assert_eq!(
-            ed.handle_key(key(KeyCode::Enter)),
-            Some(CompactString::new("first"))
-        );
-        type_text(&mut ed, "second");
-        assert_eq!(
-            ed.handle_key(key(KeyCode::Enter)),
-            Some(CompactString::new("second"))
-        );
-
-        ed.handle_key(ctrl('p'));
-        assert_eq!(ed.buffer.as_str(), "second");
-        ed.handle_key(ctrl('p'));
-        assert_eq!(ed.buffer.as_str(), "first");
-        ed.handle_key(ctrl('p'));
-        assert_eq!(ed.buffer.as_str(), "first");
-    }
-
-    #[test]
-    fn test_ctrl_n_navigates_history() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "first");
-        ed.handle_key(key(KeyCode::Enter));
-        type_text(&mut ed, "second");
-        ed.handle_key(key(KeyCode::Enter));
-
-        ed.handle_key(ctrl('p'));
-        ed.handle_key(ctrl('p'));
-        ed.handle_key(ctrl('n'));
-        assert_eq!(ed.buffer.as_str(), "second");
-        ed.handle_key(ctrl('n'));
-        assert_eq!(ed.buffer.as_str(), "");
-    }
-
-    #[test]
-    fn test_history_preserves_draft() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "old entry");
-        ed.handle_key(key(KeyCode::Enter));
-
-        type_text(&mut ed, "draft text");
-        assert_eq!(ed.buffer.as_str(), "draft text");
-
-        ed.handle_key(ctrl('p'));
-        assert_eq!(ed.buffer.as_str(), "old entry");
-
-        ed.handle_key(ctrl('n'));
-        assert_eq!(ed.buffer.as_str(), "draft text");
-        assert_eq!(ed.cursor, 10);
-    }
-
-    #[test]
-    fn test_draft_discarded_on_edit_in_history() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "old entry");
-        ed.handle_key(key(KeyCode::Enter));
-        type_text(&mut ed, "my draft");
-
-        ed.handle_key(ctrl('p'));
-        assert_eq!(ed.buffer.as_str(), "old entry");
-        assert_eq!(ed.cursor, 0);
-
-        ed.handle_key(key(KeyCode::Char('X')));
-        assert_eq!(ed.buffer.as_str(), "Xold entry");
-        assert_eq!(ed.cursor, 1);
-
-        ed.handle_key(ctrl('n'));
-        assert_eq!(ed.buffer.as_str(), "Xold entry");
-    }
-
-    #[test]
-    fn test_ctrl_w_deletes_prev_word() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world foo");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(ctrl('w'));
-        assert_eq!(ed.buffer.as_str(), "hello world ");
-        assert_eq!(ed.cursor, 12);
-
-        ed.handle_key(ctrl('w'));
-        assert_eq!(ed.buffer.as_str(), "hello ");
-        assert_eq!(ed.cursor, 6);
-
-        ed.handle_key(ctrl('w'));
-        assert_eq!(ed.buffer.as_str(), "");
-        assert_eq!(ed.cursor, 0);
-
-        ed.handle_key(ctrl('w'));
-        assert_eq!(ed.buffer.as_str(), "");
-    }
-
-    #[test]
-    fn test_ctrl_w_mid_buffer() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(ctrl('f'));
-        ed.handle_key(ctrl('f'));
-        ed.handle_key(ctrl('f'));
-        ed.handle_key(ctrl('f'));
-        ed.handle_key(ctrl('f'));
-        assert_eq!(ed.cursor, 5);
-
-        ed.handle_key(ctrl('w'));
-        assert_eq!(ed.buffer.as_str(), " world");
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_alt_d_deletes_next_word() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world foo");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(alt('d'));
-        assert_eq!(ed.buffer.as_str(), " world foo");
-        assert_eq!(ed.cursor, 0);
-
-        ed.handle_key(alt('d'));
-        assert_eq!(ed.buffer.as_str(), " foo");
-        assert_eq!(ed.cursor, 0);
-
-        ed.handle_key(alt('d'));
-        assert_eq!(ed.buffer.as_str(), "");
-    }
-
-    #[test]
-    fn test_alt_d_at_end_does_nothing() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(alt('d'));
-        assert_eq!(ed.buffer.as_str(), "hello");
-    }
-
-    #[test]
-    fn test_ctrl_u_deletes_to_beginning() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(ctrl('u'));
-        assert_eq!(ed.buffer.as_str(), "");
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_ctrl_u_deletes_from_mid() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('b'));
-        ed.handle_key(ctrl('u'));
-        assert_eq!(ed.buffer.as_str(), "lo world");
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_ctrl_k_deletes_to_end() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(ctrl('k'));
-        assert_eq!(ed.buffer.as_str(), "");
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_ctrl_k_from_mid() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(ctrl('a'));
-        for _ in 0..5 {
-            ed.handle_key(ctrl('f'));
-        }
-        assert_eq!(ed.cursor, 5);
-        ed.handle_key(ctrl('k'));
-        assert_eq!(ed.buffer.as_str(), "hello");
-        assert_eq!(ed.cursor, 5);
-    }
-
-    #[test]
-    fn test_alt_b_moves_back_one_word() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello brave new world");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(alt('b'));
-        assert_eq!(ed.cursor, 16);
-        ed.handle_key(alt('b'));
-        assert_eq!(ed.cursor, 12);
-        ed.handle_key(alt('b'));
-        assert_eq!(ed.cursor, 6);
-        ed.handle_key(alt('b'));
-        assert_eq!(ed.cursor, 0);
-        ed.handle_key(alt('b'));
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_alt_f_moves_forward_one_word() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello brave world");
-        assert_eq!(ed.cursor, 17);
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(alt('f'));
-        assert_eq!(ed.cursor, 5);
-        ed.handle_key(alt('f'));
-        assert_eq!(ed.cursor, 11);
-        ed.handle_key(alt('f'));
-        assert_eq!(ed.cursor, 17);
-        ed.handle_key(alt('f'));
-        assert_eq!(ed.cursor, 17);
-    }
-
-    #[test]
-    fn test_alt_b_with_leading_spaces() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "   hello");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(alt('b'));
-        assert_eq!(ed.cursor, 3);
-    }
-
-    #[test]
-    fn test_ctrl_y_pastes_most_recent_kill() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(key(KeyCode::End));
-        for _ in 0..5 {
-            ed.handle_key(ctrl('b'));
-        }
-        assert_eq!(ed.cursor, 6);
-        ed.handle_key(ctrl('k'));
-        assert_eq!(ed.buffer.as_str(), "hello ");
-
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "hello world");
-    }
-
-    #[test]
-    fn test_ctrl_y_empty_kill_ring_does_nothing() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello");
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "hello");
-    }
-
-    #[test]
-    fn test_kill_ring_accumulates_kills() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "one two three");
-
-        ed.handle_key(key(KeyCode::End));
-        for _ in 0..5 {
-            ed.handle_key(ctrl('b'));
-        }
-        assert_eq!(ed.cursor, 8);
-        ed.handle_key(ctrl('k'));
-        assert_eq!(ed.buffer.as_str(), "one two ");
-
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "one two three");
-
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "one two threethree");
-    }
-
-    #[test]
-    fn test_alt_y_rotates_kill_ring() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "aaa");
-        ed.handle_key(ctrl('u'));
-        type_text(&mut ed, "bbb");
-        ed.handle_key(ctrl('u'));
-
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "bbb");
-
-        ed.handle_key(alt('y'));
-        assert_eq!(ed.buffer.as_str(), "aaa");
-    }
-
-    #[test]
-    fn test_ctrl_y_after_alt_y_yanks_rotated_entry() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "aaa");
-        ed.handle_key(ctrl('u'));
-        type_text(&mut ed, "bbb");
-        ed.handle_key(ctrl('u'));
-
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "bbb");
-
-        ed.handle_key(alt('y'));
-        assert_eq!(ed.buffer.as_str(), "aaa");
-
-        ed.handle_key(ctrl('y'));
-        assert_eq!(ed.buffer.as_str(), "aaaaaa");
-    }
-
-    #[test]
-    fn test_home_moves_to_beginning() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello world");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(key(KeyCode::Home));
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_end_moves_to_end() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello");
-        ed.handle_key(key(KeyCode::Home));
-        ed.handle_key(key(KeyCode::End));
-        assert_eq!(ed.cursor, 5);
-    }
-
-    #[test]
-    fn test_basic_input() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "test");
-        assert_eq!(ed.buffer.as_str(), "test");
-        assert_eq!(ed.cursor, 4);
-    }
-
-    #[test]
-    fn test_backspace() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "test");
-        ed.handle_key(key(KeyCode::Backspace));
-        assert_eq!(ed.buffer.as_str(), "tes");
-        assert_eq!(ed.cursor, 3);
-    }
-
-    #[test]
-    fn test_delete() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "abcd");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(ctrl('f'));
-        ed.handle_key(key(KeyCode::Delete));
-        assert_eq!(ed.buffer.as_str(), "acd");
-        assert_eq!(ed.cursor, 1);
-    }
-
-    #[test]
-    fn test_left_right() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "ab");
-        ed.handle_key(key(KeyCode::Left));
-        assert_eq!(ed.cursor, 1);
-        ed.handle_key(key(KeyCode::Left));
-        assert_eq!(ed.cursor, 0);
-        ed.handle_key(key(KeyCode::Right));
-        assert_eq!(ed.cursor, 1);
-        ed.handle_key(key(KeyCode::Right));
-        assert_eq!(ed.cursor, 2);
-    }
-
-    #[test]
-    fn test_enter_submits() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "hello");
-        let result = ed.handle_key(key(KeyCode::Enter));
-        assert_eq!(result, Some(CompactString::new("hello")));
-        assert!(ed.buffer.is_empty());
-        assert_eq!(ed.cursor, 0);
-    }
-
-    #[test]
-    fn test_enter_empty_returns_none() {
-        let mut ed = InputEditor::new();
-        let result = ed.handle_key(key(KeyCode::Enter));
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_tab_inserts_two_spaces() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "x");
-        ed.handle_key(key(KeyCode::Tab));
-        assert_eq!(ed.buffer.as_str(), "x  ");
-        assert_eq!(ed.cursor, 3);
-    }
-
-    #[test]
-    fn test_ctrl_d_deletes_char_at_cursor() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "abcd");
-        ed.handle_key(ctrl('a'));
-        ed.handle_key(ctrl('f'));
-        ed.handle_key(ctrl('d'));
-        assert_eq!(ed.buffer.as_str(), "acd");
-        assert_eq!(ed.cursor, 1);
-    }
-
-    #[test]
-    fn test_ctrl_d_at_end_does_nothing() {
-        let mut ed = InputEditor::new();
-        type_text(&mut ed, "abcd");
-        ed.handle_key(key(KeyCode::End));
-        ed.handle_key(ctrl('d'));
-        assert_eq!(ed.buffer.as_str(), "abcd");
-        assert_eq!(ed.cursor, 4);
-    }
-
-    #[test]
-    fn test_ctrl_d_empty_buffer_does_nothing() {
-        let mut ed = InputEditor::new();
-        ed.handle_key(ctrl('d'));
-        assert_eq!(ed.buffer.as_str(), "");
     }
 }

@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Component, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossterm::ExecutableCommand;
@@ -7,7 +8,7 @@ use crossterm::cursor::MoveTo;
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use crossterm::terminal::Clear;
 
-use super::utils::resolve_color;
+use super::super::utils::resolve_color;
 
 pub struct FilePicker {
     pub active: bool,
@@ -17,6 +18,8 @@ pub struct FilePicker {
     pub selected: usize,
     file_cache: Arc<Mutex<Vec<PathBuf>>>,
     monochrome: bool,
+    loading: bool,
+    walk_done: Arc<AtomicBool>,
 }
 
 impl FilePicker {
@@ -29,6 +32,8 @@ impl FilePicker {
             selected: 0,
             file_cache: Arc::new(Mutex::new(Vec::new())),
             monochrome: false,
+            loading: false,
+            walk_done: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -46,7 +51,25 @@ impl FilePicker {
         self.cursor = 0;
         self.matches.clear();
         self.selected = 0;
-        self.load_files();
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            self.loading = true;
+            self.walk_done.store(false, Ordering::Relaxed);
+            let cache = self.file_cache.clone();
+            let done = self.walk_done.clone();
+            handle.spawn_blocking(move || {
+                let files = walk_files(".");
+                *cache.lock().unwrap_or_else(|e| e.into_inner()) = files;
+                done.store(true, Ordering::Relaxed);
+            });
+        } else {
+            self.load_files_sync();
+        }
+    }
+
+    fn load_files_sync(&mut self) {
+        let files = walk_files(".");
+        *self.file_cache.lock().unwrap_or_else(|e| e.into_inner()) = files;
         self.filter();
     }
 
@@ -54,13 +77,17 @@ impl FilePicker {
         self.active = false;
     }
 
-    fn load_files(&mut self) {
-        let files = walk_files(".");
-        *self.file_cache.lock().unwrap_or_else(|e| e.into_inner()) = files;
+    pub fn try_finish_loading(&mut self) -> bool {
+        if self.loading && self.walk_done.load(Ordering::Relaxed) {
+            self.loading = false;
+            self.filter();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn char_input(&mut self, c: char) {
-        // Convert char-index cursor to byte index for String::insert
         let byte_pos = self
             .query
             .char_indices()
@@ -69,13 +96,14 @@ impl FilePicker {
             .unwrap_or(self.query.len());
         self.query.insert(byte_pos, c);
         self.cursor += 1;
-        self.filter();
+        if !self.loading {
+            self.filter();
+        }
     }
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 && !self.query.is_empty() {
             self.cursor -= 1;
-            // Convert char-index cursor to byte index for String::remove
             let byte_pos = self
                 .query
                 .char_indices()
@@ -83,7 +111,9 @@ impl FilePicker {
                 .map(|(i, _)| i)
                 .unwrap_or(self.query.len());
             self.query.remove(byte_pos);
-            self.filter();
+            if !self.loading {
+                self.filter();
+            }
         }
     }
 
@@ -129,16 +159,34 @@ impl FilePicker {
     #[cfg(test)]
     pub fn test_set_cache(&mut self, files: Vec<PathBuf>) {
         *self.file_cache.lock().unwrap_or_else(|e| e.into_inner()) = files;
+        self.loading = false;
     }
 
-    pub fn draw(&self) -> std::io::Result<()> {
+    pub fn draw(&mut self) -> std::io::Result<()> {
         if !self.active {
             return Ok(());
         }
+
+        self.try_finish_loading();
+
         let (cols, rows) = crossterm::terminal::size()?;
         let mut stdout = std::io::stdout();
 
         let max_items = (rows.saturating_sub(4)).min(10) as usize;
+
+        if self.loading {
+            let r = rows.saturating_sub(3);
+            stdout.execute(MoveTo(0, r))?;
+            write!(
+                stdout,
+                "{}",
+                SetForegroundColor(self.color(Color::DarkGrey))
+            )?;
+            write!(stdout, "scanning files...")?;
+            write!(stdout, "{}", ResetColor)?;
+            stdout.flush()?;
+            return Ok(());
+        }
 
         if self.matches.is_empty() {
             let r = rows.saturating_sub(3);

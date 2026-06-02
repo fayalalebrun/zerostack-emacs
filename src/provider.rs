@@ -247,19 +247,45 @@ impl ModelEntry {
 pub fn is_agent_model(m: &ModelEntry) -> bool {
     if let Some(t) = m.kind.as_deref() {
         let t = t.to_lowercase();
-        if ["embed", "image", "audio", "video", "moderation", "rerank", "tts", "speech"]
-            .iter()
-            .any(|k| t.contains(k))
+        if [
+            "embed",
+            "image",
+            "audio",
+            "video",
+            "moderation",
+            "rerank",
+            "tts",
+            "speech",
+        ]
+        .iter()
+        .any(|k| t.contains(k))
         {
             return false;
         }
     }
     let id = m.id.to_lowercase();
     const DENY: &[&str] = &[
-        "embedding", "embed-", "text-embedding", "gemini-embedding",
-        "whisper", "transcribe", "tts", "-audio", "realtime", "speech",
-        "dall-e", "gpt-image", "image-generation", "imagen", "sora", "veo",
-        "moderation", "rerank", "aqa", "davinci-002", "babbage-002",
+        "embedding",
+        "embed-",
+        "text-embedding",
+        "gemini-embedding",
+        "whisper",
+        "transcribe",
+        "tts",
+        "-audio",
+        "realtime",
+        "speech",
+        "dall-e",
+        "gpt-image",
+        "image-generation",
+        "imagen",
+        "sora",
+        "veo",
+        "moderation",
+        "rerank",
+        "aqa",
+        "davinci-002",
+        "babbage-002",
     ];
     !DENY.iter().any(|d| id.contains(d))
 }
