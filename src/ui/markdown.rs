@@ -365,20 +365,7 @@ pub fn markdown_to_styled(text: &str, max_width: usize) -> Vec<LineEntry> {
                 if in_table_cell {
                     table_cell.push_str(&format!("`{}`", t));
                 } else {
-                    let color = if in_blockquote {
-                        Color::DarkGrey
-                    } else {
-                        Color::White
-                    };
-                    flush_acc(&acc, color, max_width, &mut result);
-                    acc.clear();
-                    let code_text = format!("`{}`", t);
-                    for chunk in word_wrap(&code_text, max_width) {
-                        result.push(LineEntry {
-                            text: chunk,
-                            color: Color::Yellow,
-                        });
-                    }
+                    acc.push_str(&format!("`{}`", t));
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -650,11 +637,22 @@ mod tests {
     #[test]
     fn inline_code_styled() {
         let styled = markdown_to_styled("Hello `code` world", 80);
-        let yellow_lines: Vec<_> = styled.iter().filter(|e| e.color == Color::Yellow).collect();
-        assert!(!yellow_lines.is_empty(), "inline code should be Yellow");
+        let joined: String = styled
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            yellow_lines[0].text.contains('`'),
-            "inline code should have backticks"
+            joined.contains("`code`"),
+            "inline code should have backticks: {joined}"
+        );
+        assert!(
+            joined.contains("Hello"),
+            "prose before code should be present: {joined}"
+        );
+        assert!(
+            joined.contains("world"),
+            "prose after code should be present: {joined}"
         );
     }
 
@@ -685,12 +683,22 @@ mod tests {
         );
     }
 
-
     #[test]
     fn inline_code_in_blockquote() {
         let styled = markdown_to_styled("> Some `code` here", 80);
-        let yellow_lines: Vec<_> = styled.iter().filter(|e| e.color == Color::Yellow).collect();
-        assert!(!yellow_lines.is_empty());
+        let joined: String = styled
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains('`'),
+            "inline code backticks should appear in blockquote: {joined}"
+        );
+        assert!(
+            joined.contains("Some"),
+            "prose before code should appear in blockquote: {joined}"
+        );
     }
 
     // ── markdown_to_styled: links ───────────────────────────────────────
