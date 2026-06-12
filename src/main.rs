@@ -343,7 +343,7 @@ async fn main() -> anyhow::Result<()> {
     // ── Interactive prompts (last thing before TUI dispatch) ──
 
     // Version-change prompts: defer to here so all heavy setup completes first.
-    if version_changed && is_interactive {
+    if version_changed && is_interactive && !is_first_startup {
         let prompts_dir = context::prompts::global_dir();
         let themes_dir = context::themes::global_dir();
         let mut regenerated = false;
