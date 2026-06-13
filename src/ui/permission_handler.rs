@@ -34,6 +34,13 @@ pub async fn handle_permission_request(
         C_PERM,
     )?;
 
+    renderer.permission_prompt = Some(super::renderer::PermissionPrompt {
+        tool: format!("[permission] {}: {}", ask_req.tool, ask_req.input).into(),
+        options: "  (y) allow once  (a) allow always  (n) deny  (ESC) abort".into(),
+    });
+    renderer.render_viewport()?;
+    renderer.draw_bottom("", 0, "[Permission]", false)?;
+
     let decision = loop {
         tokio::select! {
             Some(ev) = user_rx.recv() => {
@@ -55,6 +62,8 @@ pub async fn handle_permission_request(
             }
         }
     };
+
+    renderer.permission_prompt = None;
 
     let allow_pattern = match &decision {
         crate::permission::ask::UserDecision::AllowAlways(p) => Some(p.clone()),
