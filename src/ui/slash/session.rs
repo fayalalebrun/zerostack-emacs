@@ -136,6 +136,7 @@ async fn handle_sessions(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
 async fn handle_clear(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     ctx.session.messages.clear();
     ctx.session.total_estimated_tokens = 0;
+    ctx.session.reset_calibration();
     ctx.session.compactions.clear();
     ctx.context.chain_declined.clear();
     render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;

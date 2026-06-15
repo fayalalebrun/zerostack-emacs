@@ -178,7 +178,7 @@ pub async fn handle_compress(
     let keep_recent = cfg.resolve_keep_recent_tokens();
     let max_tokens = session.context_window.saturating_sub(reserve);
 
-    if session.total_estimated_tokens <= max_tokens {
+    if session.effective_context_tokens() <= max_tokens {
         renderer.write_line("context within limits, no compression needed", C_AGENT)?;
         return Ok(());
     }

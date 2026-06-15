@@ -55,6 +55,34 @@ fn estimate_tokens_pure_ascii_matches_old_formula() {
     assert_eq!(Session::estimate_tokens(text), text.len() as u64 / 4);
 }
 
+#[test]
+fn effective_context_falls_back_without_calibration() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, "hello world this is a test message");
+    assert_eq!(s.effective_context_tokens(), s.total_estimated_tokens);
+}
+
+#[test]
+fn effective_context_uses_calibration_anchor_plus_delta() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, "first user message");
+    s.add_message(MessageRole::Assistant, "assistant reply");
+    s.set_calibration(5000, 200); // anchor = 5200, covers 2 messages
+    assert_eq!(s.calibrated_msg_count, 2);
+
+    s.add_message(MessageRole::User, "a follow up question");
+    let delta = Session::estimate_tokens("a follow up question");
+    assert_eq!(s.effective_context_tokens(), 5200 + delta);
+}
+
+#[test]
+fn calibration_ignores_zero_usage() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, "msg");
+    s.set_calibration(0, 0);
+    assert_eq!(s.calibrated_tokens, 0);
+    assert_eq!(s.effective_context_tokens(), s.total_estimated_tokens);
+}
 
 #[test]
 fn new_session_has_id() {

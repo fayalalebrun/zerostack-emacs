@@ -365,6 +365,9 @@ async fn handle_agent_done(
         session.input_token_cost,
         session.output_token_cost,
     );
+    // Anchor context-size accounting to the provider's real usage.
+    // Must come after add_message so the anchor includes the just-appended response.
+    session.set_calibration(input_tokens, output_tokens);
     *agent_line_started = false;
     response_buf.clear();
     *response_start_line = None;

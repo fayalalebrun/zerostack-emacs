@@ -40,7 +40,7 @@ impl StatusLine {
 
         let ctx = session.context_window;
         let pct = if ctx > 0 {
-            (session.total_estimated_tokens * 100) / ctx
+            (session.effective_context_tokens() * 100) / ctx
         } else {
             0
         };

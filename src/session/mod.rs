@@ -50,6 +50,10 @@ pub struct Session {
     pub total_cost: f64,
     pub total_estimated_tokens: u64,
     #[serde(default)]
+    pub calibrated_tokens: u64,
+    #[serde(default)]
+    pub calibrated_msg_count: usize,
+    #[serde(default)]
     pub input_token_cost: f64,
     #[serde(default)]
     pub output_token_cost: f64,
@@ -104,6 +108,8 @@ impl Session {
             total_output_tokens: 0,
             total_cost: 0.0,
             total_estimated_tokens: 0,
+            calibrated_tokens: 0,
+            calibrated_msg_count: 0,
             input_token_cost: 0.0,
             output_token_cost: 0.0,
             context_window,
@@ -134,11 +140,36 @@ impl Session {
         std::mem::take(&mut self.pending_media)
     }
 
+    pub fn set_calibration(&mut self, input_tokens: u64, output_tokens: u64) {
+        if input_tokens == 0 {
+            return;
+        }
+        self.calibrated_tokens = input_tokens.saturating_add(output_tokens);
+        self.calibrated_msg_count = self.messages.len();
+    }
+
+    pub fn reset_calibration(&mut self) {
+        self.calibrated_tokens = 0;
+        self.calibrated_msg_count = 0;
+    }
+
+    pub fn effective_context_tokens(&self) -> u64 {
+        if self.calibrated_tokens == 0 {
+            return self.total_estimated_tokens;
+        }
+        let start = self.calibrated_msg_count.min(self.messages.len());
+        let delta: u64 = self.messages[start..]
+            .iter()
+            .map(|m| m.estimated_tokens)
+            .sum();
+        self.calibrated_tokens.saturating_add(delta)
+    }
+
     pub fn needs_compaction(&self, reserve_tokens: u64) -> bool {
         if self.context_window == 0 {
             return false;
         }
-        self.total_estimated_tokens > self.context_window.saturating_sub(reserve_tokens)
+        self.effective_context_tokens() > self.context_window.saturating_sub(reserve_tokens)
     }
 
     pub fn update_context_window(&mut self, cw: u64) {
@@ -178,6 +209,10 @@ impl Session {
             token_savings,
             created_at: CompactString::new(chrono::Utc::now().to_rfc3339()),
         });
+
+        // Compaction reindexes messages, so the calibration anchor no longer
+        // lines up. Drop it; the next completed turn re-anchors.
+        self.reset_calibration();
 
         // Adjust all compaction first_kept indices for the removed messages
         // (since we never have >1 compaction with the current simple approach, this is fine)
