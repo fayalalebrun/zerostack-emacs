@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use crate::session::storage;
 
 pub mod prompts;
+pub mod skills;
 pub mod themes;
 
 pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, String)> {
@@ -60,6 +61,7 @@ pub struct ContextFiles {
     pub current_prompt: Option<String>,
     pub current_prompt_name: Option<String>,
     pub themes: HashMap<String, String>,
+    pub skills: Vec<skills::Skill>,
     pub current_theme_name: Option<String>,
     pub extra_files: Vec<std::path::PathBuf>,
     pub one_shot_restore: Option<String>,
@@ -82,6 +84,7 @@ impl ContextFiles {
             self.current_prompt = self.prompts.get(name).cloned();
         }
         self.themes = themes::load();
+        self.skills = skills::load();
         self.current_theme_name = crate::session::storage::load_theme_name();
         #[cfg(feature = "memory")]
         {
@@ -104,6 +107,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let _ = arch_candidate;
     let prompt_map = prompts::load();
     let theme_map = themes::load();
+    let skills = skills::load();
     let theme_name = crate::session::storage::load_theme_name();
     #[cfg(feature = "memory")]
     let memory = crate::extras::memory::Mem::open().context_block();
@@ -113,6 +117,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
         current_prompt: None,
         current_prompt_name: None,
         themes: theme_map,
+        skills,
         current_theme_name: theme_name,
         extra_files: Vec::new(),
         one_shot_restore: None,
