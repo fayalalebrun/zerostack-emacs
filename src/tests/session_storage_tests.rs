@@ -1,7 +1,7 @@
 use crate::session::MessageRole;
 use crate::session::Session;
 use crate::session::storage::{
-    delete_session, find_sessions_by_prefix, load_suffix, save_session, suffix_path,
+    delete_session, find_all_sessions, find_sessions_by_prefix, load_suffix, save_session, suffix_path,
 };
 use std::env;
 use std::sync::Mutex;
@@ -85,6 +85,9 @@ fn save_session_preserves_messages() {
     drop(env);
 }
 
+>>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
+fn find_all_sessions_returns_saved_sessions_newest_first() {
+=======
 #[test]
 fn save_session_preserves_tool_messages() {
     let env = setup_test_env();
@@ -109,6 +112,9 @@ fn save_session_preserves_tool_messages() {
 
 #[test]
 fn find_all_sessions_returns_saved_sessions_newest_first() {
+=======
+>>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
+fn find_all_sessions_returns_saved_sessions_newest_first() {
     let env = setup_test_env();
     let mut older = Session::new("openai", "gpt-4", 128000);
     older.updated_at = "2026-01-01T00:00:00Z".into();
@@ -122,7 +128,13 @@ fn find_all_sessions_returns_saved_sessions_newest_first() {
     newer.updated_at = "2026-01-02T00:00:00Z".into();
     save_session(&newer).unwrap();
 
-    let found = find_sessions_by_prefix("").unwrap();
+    let found = find_all_sessions().unwrap();
+>>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
+=======
+    let found = find_all_sessions().unwrap();
+=======
+    let found = find_all_sessions().unwrap();
+>>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
     assert_eq!(found.len(), 2);
     assert_eq!(found[0].id, newer.id);
     assert_eq!(found[1].id, older.id);

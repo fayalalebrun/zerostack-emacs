@@ -34,6 +34,12 @@ pub struct Cli {
     )]
     pub emacs_list: bool,
 
+    #[arg(
+        long = "emacs-board",
+        help = "Print an Emacs-readable project/worktree/session board snapshot"
+    )]
+    pub emacs_board: bool,
+
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
 

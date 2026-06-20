@@ -117,6 +117,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if cli.emacs_board {
+        extras::emacs_board::print_board()?;
+        return Ok(());
+    }
+
     if cli.resume && cli.session.is_none() {
         print_sessions();
         return Ok(());

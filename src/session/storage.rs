@@ -101,6 +101,27 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
     Ok(sessions)
 }
 
+pub fn find_all_sessions() -> anyhow::Result<Vec<Session>> {
+    let dir = session_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json")
+            && let Ok(json) = std::fs::read_to_string(&path)
+            && let Ok(session) = serde_json::from_str::<Session>(&json)
+        {
+            sessions.push(session);
+        }
+    }
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(sessions)
+}
+
 pub fn agents_path() -> PathBuf {
     config_path().join("agent").join("AGENTS.md")
 }
