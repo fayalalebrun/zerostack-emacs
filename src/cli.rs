@@ -22,6 +22,18 @@ pub struct Cli {
     #[arg(long = "print-config", help = "Print resolved configuration and exit")]
     pub print_config: bool,
 
+    #[arg(
+        long = "emacs",
+        help = "Run the native Emacs Unix socket protocol for this session"
+    )]
+    pub emacs: bool,
+
+    #[arg(
+        long = "emacs-list",
+        help = "List running native Emacs protocol sessions"
+    )]
+    pub emacs_list: bool,
+
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
 

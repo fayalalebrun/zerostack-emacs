@@ -8763,6 +8763,7 @@ version = "1.5.1-rc1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "base64 0.22.1",
  "blocking",
  "chrono",
  "clap",

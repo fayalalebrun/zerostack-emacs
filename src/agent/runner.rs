@@ -2,7 +2,9 @@ use compact_str::CompactString;
 use futures::StreamExt;
 use rig::agent::{Agent, MultiTurnStreamItem, StreamingResult};
 #[cfg(feature = "multimodal")]
-use rig::completion::message::{AudioMediaType, DocumentMediaType, ImageMediaType};
+use rig::completion::message::{
+    AudioMediaType, Document, DocumentMediaType, DocumentSourceKind, ImageMediaType,
+};
 use rig::completion::{CompletionModel, Message};
 use rig::message::ToolResultContent;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
@@ -162,6 +164,8 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
 
 #[cfg(feature = "multimodal")]
 pub fn media_to_messages(media: &[crate::extras::multimodal::MediaAttachment]) -> Vec<Message> {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use rig::OneOrMany;
     use rig::completion::message::UserContent;
 
@@ -169,24 +173,25 @@ pub fn media_to_messages(media: &[crate::extras::multimodal::MediaAttachment]) -
         .iter()
         .map(|m| match m {
             crate::extras::multimodal::MediaAttachment::Image { data, mime, .. } => Message::User {
-                content: OneOrMany::one(UserContent::image_raw(
-                    data.clone(),
+                content: OneOrMany::one(UserContent::image_base64(
+                    BASE64_STANDARD.encode(data),
                     Some(image_media_type(mime)),
                     None,
                 )),
             },
             crate::extras::multimodal::MediaAttachment::Audio { data, mime, .. } => Message::User {
-                content: OneOrMany::one(UserContent::audio_raw(
-                    data.clone(),
+                content: OneOrMany::one(UserContent::audio(
+                    BASE64_STANDARD.encode(data),
                     Some(audio_media_type(mime)),
                 )),
             },
             crate::extras::multimodal::MediaAttachment::Document { data, mime, .. } => {
                 Message::User {
-                    content: OneOrMany::one(UserContent::document_raw(
-                        data.clone(),
-                        Some(document_media_type(mime)),
-                    )),
+                    content: OneOrMany::one(UserContent::Document(Document {
+                        data: DocumentSourceKind::Base64(BASE64_STANDARD.encode(data)),
+                        media_type: Some(document_media_type(mime)),
+                        additional_params: None,
+                    })),
                 }
             }
         })

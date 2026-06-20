@@ -112,16 +112,22 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if cli.emacs_list {
+        extras::emacs::print_sessions()?;
+        return Ok(());
+    }
+
     if cli.resume && cli.session.is_none() {
         print_sessions();
         return Ok(());
     }
 
     let version_changed = docs::ensure_global()?;
+    let emacs_mode = cli.emacs;
     #[cfg(feature = "acp")]
-    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode;
+    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode && !emacs_mode;
     #[cfg(not(feature = "acp"))]
-    let is_interactive = !cli.print && !cli.loop_mode;
+    let is_interactive = !cli.print && !cli.loop_mode && !emacs_mode;
 
     // Load context first so prompts/themes are available early.
     // (Version-change / ARCHITECTURE.md prompts are deferred to right before
@@ -462,7 +468,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ARCHITECTURE.md prompt: defer to here so all heavy setup completes first.
     #[cfg(feature = "archmd")]
-    let arch_created = if !cli.resolve_no_context_files(&cfg) {
+    let arch_created = if is_interactive && !cli.resolve_no_context_files(&cfg) {
         let cwd = std::env::current_dir().ok();
         if let Some(ref cwd) = cwd {
             crate::extras::archmd::ask_and_create(cwd).unwrap_or_else(|e| {
@@ -566,6 +572,22 @@ async fn main() -> anyhow::Result<()> {
                 guard.set_prompt_mode(mode);
             }
         }
+    }
+
+    if cli.emacs {
+        return extras::emacs::serve(
+            client,
+            cli,
+            cfg,
+            context,
+            session,
+            permission,
+            ask_tx,
+            ask_rx,
+            sandbox,
+            status_signals,
+        )
+        .await;
     }
 
     // Build the auto-trigger message for ARCHITECTURE.md creation
