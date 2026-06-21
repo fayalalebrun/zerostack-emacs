@@ -18,6 +18,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Permission system**: five configurable modes with per-tool patterns, session allowlists, and configurable mode-to-rule application policies
 - **Session management**: save/load/resume sessions, auto-compaction to stay within context windows
 - **Terminal UI**: crossterm-based, markdown rendering, mouse selection/copy, scrollback, reasoning visibility toggle
+- **Native Emacs client/protocol**: ERC-style Emacs client, project/worktree/session board, per-session Unix sockets, rendered markdown S-expression events, ephemeral artifacts, and Rust-rendered inline LaTeX SVGs
 - **Prompts system**: switch between system prompt modes at runtime (`code`, `plan`, `review`, `debug`, etc.) to tailor the agent's behavior to the task without having to manage Skills.
 - **MCP support**: connect MCP servers for extended tooling (exposed as an optional compile-time feature)
 - **Integrated Exa search**: allows for WebFetch and WebSearch tools
@@ -144,12 +145,147 @@ zerostack -c
 
 # Explicit provider/model
 zerostack --provider openrouter --model deepseek/deepseek-v4-flash
+
+# ChatGPT Codex subscription auth
+zerostack auth login codex
+zerostack --provider openai-codex --model gpt-5.1-codex
+
+# Native Emacs socket session
+zerostack --emacs
+zerostack --emacs-list
+zerostack --emacs-board
+
+# Isolated native Emacs demo, no API key required
+nix run .#demo
 ```
+
+The demo flake app provides a graphical Emacs build with SVG image support plus
+TeX/dvisvgm.
+
+## Native Emacs Client
+
+The checkout includes an ERC-style Emacs client in `emacs/zerostack.el`.
+
+```elisp
+(add-to-list 'load-path "/path/to/zerostack/emacs")
+(require 'zerostack)
+```
+
+Use `M-x zerostack` to start and connect to `zerostack --emacs`, or
+`M-x zerostack-connect` to attach to an existing Unix socket. Normal input sends
+prompts. The small Hydra command menu on `C-c C-m` or `C-c /` contains only the
+actions that need an explicit client UI: skills, attaching files/clipboard
+content, provider/model switching, compaction, loop control, render width, and
+latest artifact. Permission requests render as inline buttons below the input
+prompt. Chat buffers are named from the session title and worktree directory, and
+the client reuses the existing chat buffer when the same session is opened again
+from the board, socket, or `--session` startup path. The chat transcript only contains server-rendered conversation lines; routine
+client notices like ready/tool/done events are not inserted into the buffer.
+Thinking and actionable status are kept on the single prompt line.
+
+Use `C-c / -> attach` to queue files for the next prompt. File paths are sent to
+the native worker for validation; text files become extra context and, when built
+with the `multimodal` feature, recognized image/audio/PDF files become model
+media attachments for the next turn. The same menu can paste from the clipboard:
+if the clipboard contains a plain path, `file://` URI, `text/uri-list`, or
+desktop copied-file target it attaches that file; if it contains image data it
+writes a temporary image file first; otherwise it writes clipboard text to a
+temporary text file and attaches that. Clipboard reads use Emacs GUI selection
+targets first and fall back to common platform commands such as `wl-paste`,
+`xclip`, `pbpaste`, and `pngpaste` when available.
+For screenshots and other image clipboard data, `zerostack-mode` also registers
+an Emacs `yank-media` handler, so `M-x yank-media` and `C-c / -> attach ->
+clipboard` use Emacs' native media clipboard path before the lower-level
+fallbacks.
+
+Use `M-x zerostack-board` for a project tree grouped by canonical Git repo,
+worktree, and session. It is backed by `zerostack --emacs-board`, a lightweight
+command that prints one Emacs-readable S-expression and exits. Sessions whose
+working directory is not inside a Git repo are shown under a separate "other
+workspaces" section. Each worktree/workspace initially shows the first five
+sessions, sorted with live sessions first and then by most-recent update; press
+RET on the `show 5 more` row to expand more. The board keeps actions pragmatic:
+`c` creates a worktree from a project or a new session from a worktree, `p` and
+`m` update the persisted default provider/model in zerostack config, `s` stops a
+live session process, and `x` moves a worktree/session to trash after
+confirmation.
+
+The Nix dev shell includes Emacs with SVG image support plus TeX/dvisvgm.
+LaTeX spans are rendered by zerostack into ephemeral SVG artifacts and displayed
+strictly in-place in the chat buffer. The source `.tex` artifact remains
+available only when explicitly opened via an artifact link, `C-c C-o`, or the
+latest-artifact command menu action:
+
+```bash
+nix develop --no-write-lock-file -c emacs --batch -Q -L emacs -l zerostack -l zerostack-test -f ert-run-tests-batch-and-exit
+```
+
+The ERT suite covers the command menu, attachment UI, board rendering/actions, every
+native protocol command/event the client currently sends or receives,
+artifact/LaTeX handling, and a local Unix-socket end-to-end round trip against a
+mock native server.
+
+For a live no-API-key demo, run `nix run .#demo` from a checkout. The flake app
+uses a Nix-built demo runner, graphical Emacs, TeX/dvisvgm, and a regular
+`zerostack` binary built with the `multimodal` feature enabled. The example
+creates isolated data/runtime/config dirs, dummy Git projects and worktrees,
+saved sessions, a local OpenAI-compatible mock provider, starts ordinary
+`zerostack --emacs` workers, opens graphical Emacs on `zerostack-board`, connects
+to a live session, and sends a delayed multi-tool prompt. The dummy projects seed
+project-local skills under `.claude/skills` and `.opencode/skills`, so the workers
+exercise the same skill discovery path as normal sessions. The board data also
+includes a single huge saved transcript, a crowded worktree with more than ten
+sessions to demonstrate `show 5 more`, and non-Git workspaces so the separate
+category is visible. The mock provider
+streams visible reasoning, cycles through the built-in tools it is offered
+(`read`, `list_dir`, `find_files`, `grep`, `task` subagent, `write`, `edit`,
+`bash`, and `write_todo_list`), then returns rendered Markdown and Rust-rendered inline LaTeX
+SVGs. The auto-opened live worker runs in restrictive permission mode, so the
+first tool call requests permission; the remaining built-in demo tools are
+pre-allowed in that isolated seeded session so the demo only shows one permission
+request. Answer it with the inline buttons below the prompt. Press `C-c C-c` in the chat buffer while the delayed turn is running
+to test interruption. Demo-generated write/edit tool paths are unique per logical
+prompt, so retrying after an abort does not collide with partially-created files.
+If you manually use `C-c / -> attach` and send a prompt, the demo
+provider detects the incoming media attachment, writes it under the isolated demo
+environment's attachment dump directory, and responds with the saved paths instead
+of entering the normal multi-tool loop. Set
+`ZEROSTACK_DEMO_DELAY_MS=<ms>` to tune provider delay, set
+`ZEROSTACK_BIN=/path/to/zerostack` only to override the Nix-built demo binary,
+set `EMACS=/path/to/emacs` to override the graphical Emacs from the flake app, or
+set `ZEROSTACK_DEMO_KEEP=1` to keep the temporary environment after exit for
+debugging.
 
 ## Configuration
 
 See [docs/CONFIG.md](docs/CONFIG.md) for config file location, accepted keys, provider
 aliases, permission rules, and MCP server configuration.
+
+## Codex Subscription Auth
+
+Use `zerostack auth login codex` to store ChatGPT Codex subscription credentials
+in `auth.json` under the zerostack config directory. `zerostack auth login codex
+--device` uses the device-code flow, `zerostack auth status` shows what is
+stored, and `zerostack auth logout codex` removes it.
+
+Run subscription-backed requests with `--provider openai-codex`. Codex requests
+read and refresh `auth.json` at request time, so a long-lived Emacs/TUI session
+can pick up a relogin performed by a separate `zerostack auth login codex`
+invocation on the next provider request.
+
+## Skills
+
+Zerostack discovers skills in the same prompt-list style as Pi: it injects an
+`<available_skills>` block into the model context with each skill's name,
+description, and `SKILL.md` path, and tells the model to use the `read` tool to
+load a matching skill file. This list is omitted when tools are disabled.
+
+Skill roots are discovered from home-level directories such as
+`~/.config/opencode/skills`, `~/.opencode/skills`, `~/.claude/skills`,
+`~/.pi/agent/skills`, and `~/.agents/skills`, plus project/ancestor directories
+like `.opencode/skills`, `.claude/skills`, `.pi/skills`, and `.agents/skills` up
+to the Git root. Each skill is a directory containing `SKILL.md` with frontmatter
+including `description`; `name` is optional and defaults to the directory name.
 
 You can run `/prompt autoconfig` in order to use a specialized agent that allows to navigate the documentation and customize your zerostack setup.
 
@@ -306,6 +442,13 @@ _zerostack_ includes an iterative coding loop for long-horizon tasks. The agent 
 
 Each iteration includes the original task, the evolving `LOOP_PLAN.md`, a summary of the previous iteration, and any validation output. Non-slash input is blocked while a loop is active.
 
+In the native Emacs client, open `C-c /` and choose `loop` to start or stop the
+same loop system over the socket protocol. Starting a loop prompts for the loop
+objective, optional max iteration count, and optional validation command. While a
+loop is active the prompt shows `zs loop>` / `zs loop thinking>`, one-off prompts
+are rejected by the worker, and `C-c C-c` aborts the current turn and stops the
+loop.
+
 ### Headless loops via CLI
 
 ```
@@ -357,7 +500,7 @@ worktree branch before exiting.
   - `a` – abort the merge, restore clean state, do not delete the worktree.
   - `l` – leave the conflict state in the main repo for manual `git mergetool`.
   - `h` – abort the merge, then spawn the agent to redo the merge with
-    interactive conflict-resolution guidance (same as `/wt-merge`).
+  interactive conflict-resolution guidance (same as `/wt-merge`).
 
 | Flag | Description |
 |------|-------------|
@@ -409,6 +552,7 @@ and API key env vars apply). Without it, zerostack cannot process prompts.
 
 - OpenRouter (default)
 - OpenAI-compatible (vLLM, LiteLLM, etc.)
+- OpenAI Codex subscription (`openai-codex`)
 - Anthropic
 - Gemini
 - Ollama
