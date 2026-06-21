@@ -112,6 +112,21 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(cli::Command::Auth { command }) = &cli.command {
+        match command {
+            cli::AuthCommand::Login { provider, device } => {
+                auth::login_provider(provider, *device).await?;
+            }
+            cli::AuthCommand::Logout { provider } => {
+                auth::logout_provider(provider)?;
+            }
+            cli::AuthCommand::Status { provider } => {
+                auth::print_auth_status(provider.as_deref())?;
+            }
+        }
+        return Ok(());
+    }
+
     if cli.emacs_list {
         extras::emacs::print_sessions()?;
         return Ok(());

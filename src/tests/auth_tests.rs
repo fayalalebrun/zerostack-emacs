@@ -121,6 +121,14 @@ fn provider_kind_from_name_recognizes_all() {
         Some(ProviderKind::OpenAI)
     );
     assert_eq!(
+        ProviderKind::from_name("openai-codex"),
+        Some(ProviderKind::OpenAICodex)
+    );
+    assert_eq!(
+        ProviderKind::from_name("codex"),
+        Some(ProviderKind::OpenAICodex)
+    );
+    assert_eq!(
         ProviderKind::from_name("anthropic"),
         Some(ProviderKind::Anthropic)
     );
