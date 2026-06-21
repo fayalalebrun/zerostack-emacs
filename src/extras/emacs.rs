@@ -1582,6 +1582,10 @@ mod imp {
                     }
                     response_buf.clear();
                     response_start_line = None;
+                    // A later model call may emit a new reasoning stream after this
+                    // tool result. Start that as a new rendered segment so replacing
+                    // `thinking: ...` does not delete the tool rows appended below.
+                    reset_reasoning_render_segment(&mut reasoning_start_line);
                     let summary = format_tool_call_summary(&name, &args);
                     server
                         .append_lines(
@@ -2375,6 +2379,10 @@ mod imp {
         WireLine::new(String::new(), "zs-normal")
     }
 
+    fn reset_reasoning_render_segment(reasoning_start_line: &mut Option<usize>) {
+        *reasoning_start_line = None;
+    }
+
     fn runtime_root() -> PathBuf {
         if let Some(dir) = std::env::var_os("ZS_RUNTIME_DIR") {
             return PathBuf::from(dir);
@@ -3012,6 +3020,13 @@ mod imp {
                 lines_to_sexp(&lines),
                 "((:text \"  output: bash (12 B)\" :face zs-link :artifact (:kind tool-output :path \"/tmp/zs/artifacts/turn-1/0001-bash.txt\" :mime \"text/plain; charset=utf-8\" :bytes 12 :preview \"hello world\" :ephemeral t :expires process-exit)))"
             );
+        }
+
+        #[test]
+        fn tool_calls_start_a_new_reasoning_render_segment() {
+            let mut reasoning_start_line = Some(4);
+            reset_reasoning_render_segment(&mut reasoning_start_line);
+            assert_eq!(reasoning_start_line, None);
         }
 
         #[test]
