@@ -14,6 +14,7 @@
 (require 'button)
 (require 'subr-x)
 (require 'url-util nil t)
+(require 'project nil t)
 (require 'hydra nil t)
 (require 'yank-media nil t)
 
@@ -36,6 +37,15 @@
 (defcustom zerostack-board-buffer-name "*zerostack board*"
   "Default zerostack project board buffer name."
   :type 'string)
+
+(defcustom zerostack-board-directories nil
+  "Extra directories to show on `zerostack-board'.
+
+These are Emacs-side pins for directories that may not have any saved
+zerostack sessions yet.  They are hidden automatically when the Rust board
+snapshot already contains the directory as a project, worktree, workspace, or
+session cwd."
+  :type '(repeat directory))
 
 (defcustom zerostack-auctex-preview t
   "When non-nil, render LaTeX spans in place with AUCTeX helpers.
@@ -161,6 +171,12 @@ math macros while keeping the original LaTeX source and artifact link intact."
     (define-key map [mouse-2] #'zerostack-board-open-at-point)
     map)
   "Keymap for `zerostack-board-mode'.")
+
+(defvar zerostack-global-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c z") #'zerostack-board-add-current-directory)
+    map)
+  "Global keymap for zerostack convenience commands.")
 
 (defvar-local zerostack--process nil)
 (defvar-local zerostack--server-process nil)
@@ -427,6 +443,40 @@ With prefix argument, read extra command-line ARGS."
     (pop-to-buffer buffer)))
 
 ;;;###autoload
+(defun zerostack-board-add-current-directory ()
+  "Add the current project or directory to `zerostack-board' and show it.
+
+The root is resolved with Projectile when available, then `project.el', then
+`default-directory'.  Existing board entries are not duplicated."
+  (interactive)
+  (let* ((dir (zerostack-board--current-directory-root))
+         (snapshot (ignore-errors (zerostack-board--fetch)))
+         (already (and snapshot (zerostack-board--snapshot-has-directory-p snapshot dir)))
+         (added (and (not already) (zerostack-board--remember-directory dir)))
+         (buffer (get-buffer-create zerostack-board-buffer-name)))
+    (cond
+     (already (message "zerostack board already contains %s" dir))
+     (added (message "Added %s to zerostack board" dir))
+     (t (message "zerostack board already has %s pinned" dir)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'zerostack-board-mode)
+        (zerostack-board-mode))
+      (if snapshot
+          (progn
+            (setq zerostack-board--snapshot snapshot)
+            (zerostack-board--render snapshot))
+        (zerostack-board-refresh)))
+    (pop-to-buffer buffer)))
+
+;;;###autoload
+(define-minor-mode zerostack-global-mode
+  "Global zerostack keybindings."
+  :global t
+  :keymap zerostack-global-mode-map)
+
+(zerostack-global-mode 1)
+
+;;;###autoload
 (define-derived-mode zerostack-board-mode special-mode "zerostack-board"
   "Major mode for the zerostack project/worktree/session board."
   (setq truncate-lines t)
@@ -464,20 +514,22 @@ With prefix argument, read extra command-line ARGS."
   "Render board SNAPSHOT as a tree."
   (unless (eq (car-safe snapshot) 'zerostack-board)
     (error "not a zerostack board snapshot: %S" snapshot))
-  (let ((projects (plist-get (cdr snapshot) :projects))
-        (loose-workspaces (plist-get (cdr snapshot) :loose-workspaces))
-        (inhibit-read-only t))
+  (let* ((projects (plist-get (cdr snapshot) :projects))
+         (loose-workspaces (plist-get (cdr snapshot) :loose-workspaces))
+         (pinned-workspaces (zerostack-board--pinned-workspaces snapshot))
+         (all-workspaces (append loose-workspaces pinned-workspaces))
+         (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
     (insert (propertize "g refresh, RET open, c create, s stop, x trash\n\n" 'face 'zerostack-muted-face))
-    (if (or projects loose-workspaces)
+    (if (or projects all-workspaces)
         (progn
           (dolist (project projects)
             (zerostack-board--insert-project project))
-          (when loose-workspaces
+          (when all-workspaces
             (insert "\n")
             (insert (propertize "other workspaces\n" 'face 'zerostack-heading-face))
-            (dolist (workspace loose-workspaces)
+            (dolist (workspace all-workspaces)
               (zerostack-board--insert-loose-workspace workspace))))
       (insert (propertize "no saved sessions\n" 'face 'zerostack-muted-face)))))
 
@@ -495,34 +547,34 @@ With prefix argument, read extra command-line ARGS."
      (if (plist-get project :alive)
          'zerostack-board-alive-face
        'zerostack-board-project-face)
-      item))
+     item))
   (dolist (worktree (plist-get project :worktrees))
     (zerostack-board--insert-worktree project worktree)))
 
 (defun zerostack-board--insert-worktree (project worktree)
   "Insert one WORKTREE node and its session children."
   (let* ((branch (plist-get worktree :branch))
-          (description (zerostack-board--one-line (plist-get worktree :description)))
-          (path (or (plist-get worktree :path) ""))
-          (path-marker (zerostack-board--path-marker path))
-          (label (format "  %s %s  %s  %s"
-                         (zerostack-board--alive-marker (plist-get worktree :alive))
-                         (if (and description (not (string-empty-p description)))
-                             description
-                           "(no description)")
-                         (if (and branch (not (string-empty-p branch))) branch "-")
-                         path-marker))
-          (item (list :type 'worktree
-                      :path path
-                      :project-path (plist-get project :path)
-                      :repo (plist-get project :repo)
-                      :branch branch)))
+         (description (zerostack-board--one-line (plist-get worktree :description)))
+         (path (or (plist-get worktree :path) ""))
+         (path-marker (zerostack-board--path-marker path))
+         (label (format "  %s %s  %s  %s"
+                        (zerostack-board--alive-marker (plist-get worktree :alive))
+                        (if (and description (not (string-empty-p description)))
+                            description
+                          "(no description)")
+                        (if (and branch (not (string-empty-p branch))) branch "-")
+                        path-marker))
+         (item (list :type 'worktree
+                     :path path
+                     :project-path (plist-get project :path)
+                     :repo (plist-get project :repo)
+                     :branch branch)))
     (zerostack-board--insert-row
      label
      (if (plist-get worktree :alive)
          'zerostack-board-alive-face
        'zerostack-board-worktree-face)
-      item)
+     item)
     (zerostack-board--insert-session-list
      (format "worktree:%s" path)
      (plist-get worktree :sessions)
@@ -587,13 +639,13 @@ With prefix argument, read extra command-line ARGS."
          (updated-at (or (plist-get session :updated-at) ""))
          (age (zerostack-board--relative-time updated-at))
          (item (list :type 'session
-                       :id (plist-get session :id)
-                       :title title
-                       :cwd (plist-get session :cwd)
-                       :worktree-path worktree-path
-                       :pid (plist-get session :pid)
-                       :socket (plist-get session :socket)
-                       :alive alive)))
+                     :id (plist-get session :id)
+                     :title title
+                     :cwd (plist-get session :cwd)
+                     :worktree-path worktree-path
+                     :pid (plist-get session :pid)
+                     :socket (plist-get session :socket)
+                     :alive alive)))
     (zerostack-board--insert-row
      (format "    %s %s  %s"
              (zerostack-board--alive-marker alive)
@@ -609,16 +661,89 @@ With prefix argument, read extra command-line ARGS."
     (add-text-properties
      start (point)
      `(face ,face
-       mouse-face highlight
-       help-echo "RET opens this zerostack board item"
-       keymap ,zerostack-board-mode-map
-       follow-link t
-       zerostack-board-item ,item))
+	    mouse-face highlight
+	    help-echo "RET opens this zerostack board item"
+	    keymap ,zerostack-board-mode-map
+	    follow-link t
+	    zerostack-board-item ,item))
     (insert "\n")))
 
 (defun zerostack-board--alive-marker (alive)
   "Return the board marker for ALIVE state."
   (if alive "*" " "))
+
+(defun zerostack-board--current-directory-root ()
+  "Return the current Projectile/project root, or `default-directory'."
+  (zerostack-board--normalize-directory
+   (or (and (fboundp 'projectile-project-root)
+            (ignore-errors (projectile-project-root)))
+       (and (fboundp 'project-current)
+            (when-let ((project (project-current nil)))
+              (car (project-roots project))))
+       default-directory)))
+
+(defun zerostack-board--normalize-directory (directory)
+  "Return canonical DIRECTORY without a trailing slash."
+  (directory-file-name
+   (if (and directory (file-directory-p directory))
+       (file-truename directory)
+     (expand-file-name (or directory default-directory)))))
+
+(defun zerostack-board--remember-directory (directory)
+  "Remember DIRECTORY as an Emacs-side board pin.
+
+Return non-nil when DIRECTORY was newly added."
+  (let* ((dir (zerostack-board--normalize-directory directory))
+         (existing (mapcar #'zerostack-board--normalize-directory
+                           zerostack-board-directories)))
+    (unless (member dir existing)
+      (setq zerostack-board-directories
+            (append zerostack-board-directories (list dir)))
+      t)))
+
+(defun zerostack-board--snapshot-has-directory-p (snapshot directory)
+  "Return non-nil if SNAPSHOT already contains DIRECTORY."
+  (let ((key (zerostack-board--normalize-directory directory))
+        (keys (zerostack-board--snapshot-directory-keys snapshot)))
+    (gethash key keys)))
+
+(defun zerostack-board--snapshot-directory-keys (snapshot)
+  "Return hash table of normalized directories visible in board SNAPSHOT."
+  (let ((keys (make-hash-table :test 'equal))
+        (projects (plist-get (cdr snapshot) :projects))
+        (workspaces (plist-get (cdr snapshot) :loose-workspaces)))
+    (cl-labels ((add (path)
+                  (when (and (stringp path) (not (string-empty-p path)))
+                    (puthash (zerostack-board--normalize-directory path) t keys)))
+                (add-session (session)
+                  (add (plist-get session :cwd))))
+      (dolist (project projects)
+        (add (plist-get project :path))
+        (dolist (worktree (plist-get project :worktrees))
+          (add (plist-get worktree :path))
+          (dolist (session (plist-get worktree :sessions))
+            (add-session session))))
+      (dolist (workspace workspaces)
+        (add (plist-get workspace :path))
+        (dolist (session (plist-get workspace :sessions))
+          (add-session session))))
+    keys))
+
+(defun zerostack-board--pinned-workspaces (snapshot)
+  "Return pinned workspace plists not already present in SNAPSHOT."
+  (let ((keys (zerostack-board--snapshot-directory-keys snapshot))
+        result)
+    (dolist (directory zerostack-board-directories)
+      (let ((dir (zerostack-board--normalize-directory directory)))
+        (unless (gethash dir keys)
+          (puthash dir t keys)
+          (push (list :path dir
+                      :alive nil
+                      :updated-at ""
+                      :sessions nil
+                      :pinned t)
+                result))))
+    (nreverse result)))
 
 (defun zerostack-board--one-line (value)
   "Return VALUE as compact one-line text for board rows."
@@ -660,7 +785,7 @@ With prefix argument, read extra command-line ARGS."
       ('project
        (dired (plist-get item :path)))
       ('worktree
-        (dired (plist-get item :path)))
+       (dired (plist-get item :path)))
       ('workspace
        (dired (plist-get item :path)))
       ('session
@@ -671,7 +796,7 @@ With prefix argument, read extra command-line ARGS."
                               (plist-get item :worktree-path)
                               (plist-get item :id))
          (let ((default-directory (file-name-as-directory
-                                    (or (plist-get item :cwd) default-directory))))
+                                   (or (plist-get item :cwd) default-directory))))
            (zerostack (list "--session" (plist-get item :id))
                       (plist-get item :title)
                       (plist-get item :cwd)
@@ -703,8 +828,10 @@ With prefix argument, read extra command-line ARGS."
        (zerostack-board--create-worktree item))
       ('worktree
        (zerostack-board--create-session item))
-       (_
-        (message "Press c on a project to create a worktree, or a worktree to create a session")))))
+      ('workspace
+       (zerostack-board--create-session item))
+      (_
+       (message "Press c on a project to create a worktree, or a worktree/workspace to create a session")))))
 
 (defun zerostack-board-stop-at-point (&optional event)
   "Stop the live zerostack session process at point."
@@ -728,7 +855,7 @@ With prefix argument, read extra command-line ARGS."
       ('session
        (let ((title (or (plist-get item :title) (plist-get item :id))))
          (when (yes-or-no-p (format "Move session %s to trash? " title))
-            (zerostack-board--trash-session item))))
+           (zerostack-board--trash-session item))))
       (_
        (message "Press x on a worktree or session to move it to trash")))))
 
@@ -904,7 +1031,7 @@ With prefix argument, read extra command-line ARGS."
                :name "zerostack"
                :buffer (current-buffer)
                :family 'local
-                :service zerostack--socket
+               :service zerostack--socket
                :coding 'utf-8-unix
                :filter #'zerostack--process-filter
                :sentinel #'zerostack--process-sentinel
@@ -1019,7 +1146,7 @@ With prefix argument, read extra command-line ARGS."
     (if (and instructions (not (string-empty-p instructions)))
         (zerostack--send-command 'compact
                                  :request request
-                                  :instructions instructions)
+                                 :instructions instructions)
       (zerostack--send-command 'compact :request request))))
 
 (defun zerostack-loop ()
@@ -1373,15 +1500,15 @@ When BINARY is non-nil, DATA is written with binary coding."
   (interactive)
   (zerostack--ensure-prompt)
   (let ((text (string-trim-right
-                (buffer-substring-no-properties
-                 (marker-position zerostack--input-marker)
-                 (marker-position zerostack--controls-start-marker)))))
+               (buffer-substring-no-properties
+                (marker-position zerostack--input-marker)
+                (marker-position zerostack--controls-start-marker)))))
     (zerostack--clear-input)
     (cond
      ((string-empty-p text)
-       (zerostack--append-local-line "empty input" 'zs-muted))
-      (t
-       (zerostack-send-prompt text)))))
+      (zerostack--append-local-line "empty input" 'zs-muted))
+     (t
+      (zerostack-send-prompt text)))))
 
 (when (featurep 'hydra)
   (defhydra zerostack-command-hydra (:hint nil :color blue)
@@ -1406,7 +1533,7 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
   (let* ((commands '("skill" "attach" "compact" "loop" "view" "artifact"))
-          (choice (completing-read "Zerostack command: " commands nil t)))
+         (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
       ("attach" (zerostack-attachment-menu))
@@ -1510,11 +1637,11 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
       ((or "/compact" "/compress") (zerostack-compact rest))
       ("/permission" (zerostack--slash-permission args))
       ("/allow" (zerostack--slash-permission
-                  (append (list (car args) "allow-once") (cdr args))))
+                 (append (list (car args) "allow-once") (cdr args))))
       ("/allow-always" (zerostack--slash-permission
-                         (append (list (car args) "allow-always") (cdr args))))
+                        (append (list (car args) "allow-always") (cdr args))))
       ("/deny" (zerostack--slash-permission
-                 (append (list (car args) "deny") (cdr args))))
+                (append (list (car args) "deny") (cdr args))))
       ("/artifact" (zerostack-open-last-artifact))
       ("/latex" (zerostack-open-last-latex-artifact))
       ("/loop"
@@ -1872,11 +1999,22 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
   (when (< start end)
     (add-text-properties
      start end
-     `(mouse-face highlight
-       help-echo ,(format "Open artifact: %s" (plist-get artifact :path))
-       keymap ,zerostack-artifact-map
-       follow-link t
-       zerostack-artifact ,artifact))))
+     `(face ,(zerostack--artifact-region-face start)
+	    mouse-face highlight
+	    help-echo ,(format "Open artifact: %s" (plist-get artifact :path))
+	    keymap ,zerostack-artifact-map
+	    follow-link t
+	    zerostack-artifact ,artifact))))
+
+(defun zerostack--artifact-region-face (pos)
+  "Return face for an artifact link at POS, preserving its base styling."
+  (let ((face (get-text-property pos 'face)))
+    (cond
+     ((null face) 'zerostack-link-face)
+     ((eq face 'zerostack-link-face) face)
+     ((and (listp face) (memq 'zerostack-link-face face)) face)
+     ((listp face) (cons 'zerostack-link-face face))
+     (t (list 'zerostack-link-face face)))))
 
 (defun zerostack--remember-artifact (artifact)
   "Remember ARTIFACT if non-nil."
@@ -2026,13 +2164,13 @@ inserted into the transcript."
 (defun zerostack--ensure-prompt ()
   "Ensure the input prompt exists in the current buffer."
   (unless (and (markerp zerostack--notice-start-marker)
-                (markerp zerostack--prompt-start-marker)
-                (markerp zerostack--input-marker)
-                (markerp zerostack--controls-start-marker)
-                (marker-position zerostack--notice-start-marker)
-                (marker-position zerostack--prompt-start-marker)
-                (marker-position zerostack--input-marker)
-                (marker-position zerostack--controls-start-marker))
+               (markerp zerostack--prompt-start-marker)
+               (markerp zerostack--input-marker)
+               (markerp zerostack--controls-start-marker)
+               (marker-position zerostack--notice-start-marker)
+               (marker-position zerostack--prompt-start-marker)
+               (marker-position zerostack--input-marker)
+               (marker-position zerostack--controls-start-marker))
     (let ((inhibit-read-only t))
       (erase-buffer)
       (setq zerostack--notice-start-marker (copy-marker (point-max) nil))
@@ -2053,14 +2191,14 @@ inserted into the transcript."
                         'front-sticky t
                         'rear-nonsticky t)))
   (insert (propertize (cond
-                        ((zerostack--pending-permissions-p)
-                         "zs waiting for permission> ")
-                        ((and zerostack--loop-active zerostack--thinking)
-                         "zs loop thinking> ")
-                        (zerostack--loop-active
-                         "zs loop> ")
-                        (zerostack--thinking
-                         "zs thinking> ")
+                       ((zerostack--pending-permissions-p)
+                        "zs waiting for permission> ")
+                       ((and zerostack--loop-active zerostack--thinking)
+                        "zs loop thinking> ")
+                       (zerostack--loop-active
+                        "zs loop> ")
+                       (zerostack--thinking
+                        "zs thinking> ")
                        (t
                         zerostack-prompt))
                       'face 'zerostack-prompt-face
@@ -2098,12 +2236,12 @@ inserted into the transcript."
 (defun zerostack--refresh-prompt ()
   "Refresh prompt text while preserving current input."
   (let* ((start (marker-position zerostack--prompt-start-marker))
-          (input-start (marker-position zerostack--input-marker))
-          (input-end (marker-position zerostack--controls-start-marker))
-          (saved-point (copy-marker (point) nil))
-          (input-offset (and (>= (point) input-start)
-                             (<= (point) input-end)
-                             (- (point) input-start)))
+         (input-start (marker-position zerostack--input-marker))
+         (input-end (marker-position zerostack--controls-start-marker))
+         (saved-point (copy-marker (point) nil))
+         (input-offset (and (>= (point) input-start)
+                            (<= (point) input-end)
+                            (- (point) input-start)))
          (inhibit-read-only t))
     (unwind-protect
         (progn
@@ -2111,14 +2249,14 @@ inserted into the transcript."
           (delete-region start input-start)
           (set-marker zerostack--prompt-start-marker start)
           (goto-char start)
-           (zerostack--insert-prompt-text)
-           (set-marker zerostack--input-marker (point))
-           (set-marker-insertion-type zerostack--prompt-start-marker t)
-           (if input-offset
-               (goto-char (min (marker-position zerostack--controls-start-marker)
-                               (+ (marker-position zerostack--input-marker)
-                                  input-offset)))
-             (goto-char saved-point)))
+          (zerostack--insert-prompt-text)
+          (set-marker zerostack--input-marker (point))
+          (set-marker-insertion-type zerostack--prompt-start-marker t)
+          (if input-offset
+              (goto-char (min (marker-position zerostack--controls-start-marker)
+                              (+ (marker-position zerostack--input-marker)
+                                 input-offset)))
+            (goto-char saved-point)))
       (set-marker saved-point nil))))
 
 (defun zerostack--goto-line-column (line column)
