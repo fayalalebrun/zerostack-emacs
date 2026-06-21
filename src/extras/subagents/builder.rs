@@ -111,6 +111,18 @@ pub(crate) async fn build_explore_agent(
                 #[cfg(feature = "archmd")]
                 arch_ref,
             )),
+            OpenAiModel::Codex(m) => OpenAiAgent::Codex(build_explore_agent_inner(
+                m,
+                max_turns,
+                max_text_file_size,
+                max_read_lines,
+                max_grep_results,
+                max_find_results,
+                max_list_dir_entries,
+                None,
+                #[cfg(feature = "archmd")]
+                arch_ref,
+            )),
         }),
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(build_explore_agent_inner(
             m,

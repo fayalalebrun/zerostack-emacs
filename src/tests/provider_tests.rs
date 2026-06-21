@@ -1,13 +1,47 @@
 use crate::auth::ProviderKind;
+use crate::cli::Cli;
 use crate::config::{ApiStyle, CustomProviderConfig};
 use crate::provider::ModelEntry;
+use crate::provider::{AnyClient, OpenAiClient};
 use crate::provider::{
-    expand_env, is_agent_model, merge_extra_body, openrouter_anthropic_routing, resolve_api_style,
-    resolve_provider_config, serialize_conversation,
+    create_client, expand_env, is_agent_model, merge_extra_body, openrouter_anthropic_routing,
+    resolve_api_style, resolve_provider_config, serialize_conversation,
 };
 use crate::session::{MessageRole, SessionMessage};
 use compact_str::CompactString;
 use std::collections::HashMap;
+
+#[test]
+fn explicit_provider_gets_provider_default_model_over_config_default() {
+    let cfg = crate::config::Config {
+        provider: Some(CompactString::new("openrouter")),
+        model: Some(CompactString::new("deepseek/deepseek-v4-pro")),
+        ..Default::default()
+    };
+    let cli = Cli {
+        provider: Some("openai-codex".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(cli.resolve_provider(&cfg), "openai-codex");
+    assert_eq!(cli.resolve_model(&cfg), "gpt-5.5");
+}
+
+#[test]
+fn explicit_model_still_overrides_explicit_provider_default() {
+    let cfg = crate::config::Config {
+        provider: Some(CompactString::new("openrouter")),
+        model: Some(CompactString::new("deepseek/deepseek-v4-pro")),
+        ..Default::default()
+    };
+    let cli = Cli {
+        provider: Some("openai-codex".to_string()),
+        model: Some("gpt-5.3-codex-spark".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(cli.resolve_model(&cfg), "gpt-5.3-codex-spark");
+}
 
 fn cfg(api_style: Option<ApiStyle>) -> CustomProviderConfig {
     CustomProviderConfig {
@@ -200,6 +234,38 @@ fn resolve_builtin_ollama() {
 fn resolve_builtin_openrouter() {
     let cfg = resolve_provider_config("openrouter", &HashMap::new()).unwrap();
     assert_eq!(cfg.kind, ProviderKind::OpenRouter);
+}
+
+#[test]
+fn resolve_builtin_openai_codex() {
+    let cfg = resolve_provider_config("openai-codex", &HashMap::new()).unwrap();
+    assert_eq!(cfg.kind, ProviderKind::OpenAICodex);
+    assert!(cfg.base_url.is_none());
+}
+
+#[test]
+fn openai_codex_client_builds_without_static_api_key() {
+    let client = create_client("openai-codex", None, &HashMap::new(), None).unwrap();
+    assert_eq!(client.provider_name(), "openai-codex");
+    assert!(matches!(client, AnyClient::OpenAI(OpenAiClient::Codex(_))));
+}
+
+#[tokio::test]
+async fn openai_codex_lists_static_zerostack_defaults() {
+    let client = create_client("openai-codex", None, &HashMap::new(), None).unwrap();
+    let models = client.list_models().await.unwrap();
+    let openai_catalog = crate::models_catalog::catalog_entries("openai").unwrap();
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    let openai_ids: Vec<_> = openai_catalog.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, openai_ids);
+    let gpt55 = models.iter().find(|m| m.id == "gpt-5.5").unwrap();
+    assert_eq!(gpt55.display, "GPT-5.5");
+    assert_eq!(gpt55.context_length, Some(1_050_000));
+    let spark = models
+        .iter()
+        .find(|m| m.id == "gpt-5.3-codex-spark")
+        .unwrap();
+    assert_eq!(spark.context_length, Some(128_000));
 }
 
 #[test]

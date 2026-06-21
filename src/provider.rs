@@ -6,6 +6,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rig::agent::Agent;
 use rig::client::{CompletionClient, ModelListingClient};
 use rig::completion::{CompletionModel, Message};
+use rig::http_client;
+use rig::http_client::{HttpClientExt, MultipartForm};
 use rig::providers::{anthropic, gemini, ollama, openai, openrouter};
 use rig::streaming::StreamingChat;
 use tokio::sync::mpsc;
@@ -24,6 +26,8 @@ use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 use crate::sandbox::Sandbox;
 use crate::session::SessionMessage;
+
+const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 pub struct ProviderConfig {
     pub kind: ProviderKind,
@@ -48,7 +52,7 @@ pub fn resolve_provider_config(
     }
     let kind = ProviderKind::from_name(name).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: '{}'. Supported: openrouter, openai, anthropic, gemini, ollama",
+            "Unknown provider: '{}'. Supported: openrouter, openai, openai-codex, anthropic, gemini, ollama",
             name
         )
     })?;
@@ -98,6 +102,7 @@ pub(crate) fn default_model_for_provider(
     let m = match provider {
         "anthropic" => "claude-sonnet-4-6",
         "openai" => "gpt-5.1",
+        "openai-codex" | "codex" => "gpt-5.5",
         "gemini" | "google" => "gemini-2.5-pro",
         "openrouter" => "openrouter/auto", // OpenRouter's always-valid auto-router
         "ollama" => "llama3.1",
@@ -124,6 +129,7 @@ fn resolve_base_url(config: &ProviderConfig) -> Option<String> {
 pub enum OpenAiClient {
     Responses(openai::Client),
     Completions(openai::CompletionsClient),
+    Codex(openai::Client<CodexHttpClient>),
 }
 
 impl OpenAiClient {
@@ -131,6 +137,7 @@ impl OpenAiClient {
         match self {
             OpenAiClient::Responses(c) => OpenAiModel::Responses(c.completion_model(name)),
             OpenAiClient::Completions(c) => OpenAiModel::Completions(c.completion_model(name)),
+            OpenAiClient::Codex(c) => OpenAiModel::Codex(c.completion_model(name)),
         }
     }
 }
@@ -138,12 +145,226 @@ impl OpenAiClient {
 pub enum OpenAiModel {
     Responses(openai::responses_api::ResponsesCompletionModel),
     Completions(openai::completion::CompletionModel),
+    Codex(openai::responses_api::ResponsesCompletionModel<CodexHttpClient>),
 }
 
 #[derive(Clone)]
 pub enum OpenAiAgent {
     Responses(Agent<openai::responses_api::ResponsesCompletionModel>),
     Completions(Agent<openai::completion::CompletionModel>),
+    Codex(Agent<openai::responses_api::ResponsesCompletionModel<CodexHttpClient>>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CodexHttpClient {
+    inner: reqwest::Client,
+}
+
+impl CodexHttpClient {
+    fn new(inner: reqwest::Client) -> Self {
+        Self { inner }
+    }
+
+    async fn authorize_headers(&self, headers: &mut HeaderMap) -> http_client::Result<()> {
+        let auth = crate::auth::codex_request_auth()
+            .await
+            .map_err(to_http_error)?;
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", auth.access_token))?,
+        );
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            HeaderValue::from_str(&auth.account_id)?,
+        );
+        headers.insert(
+            HeaderName::from_static("originator"),
+            HeaderValue::from_static("zerostack"),
+        );
+        headers.insert(
+            HeaderName::from_static("openai-beta"),
+            HeaderValue::from_static("responses=experimental"),
+        );
+        Ok(())
+    }
+
+    async fn prepare_request_body(
+        &self,
+        headers: &mut HeaderMap,
+        body: bytes::Bytes,
+    ) -> http_client::Result<bytes::Bytes> {
+        self.authorize_headers(headers).await?;
+        let patched = ensure_codex_instructions(body)?;
+        headers.remove(reqwest::header::CONTENT_LENGTH);
+        Ok(patched)
+    }
+}
+
+fn ensure_codex_instructions(body: bytes::Bytes) -> http_client::Result<bytes::Bytes> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Ok(body);
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(body);
+    };
+    let needs_instructions = object
+        .get("instructions")
+        .is_none_or(serde_json::Value::is_null);
+    object.insert("store".to_string(), serde_json::Value::Bool(false));
+    object.remove("max_output_tokens");
+    if needs_instructions {
+        let instructions = take_system_instructions(object.get_mut("input"))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+        object.insert(
+            "instructions".to_string(),
+            serde_json::Value::String(instructions),
+        );
+    }
+    normalize_codex_input_content(object.get_mut("input"));
+    serde_json::to_vec(&value)
+        .map(bytes::Bytes::from)
+        .map_err(|e| http_client::Error::Instance(Box::new(e)))
+}
+
+fn normalize_codex_input_content(input: Option<&mut serde_json::Value>) {
+    let Some(items) = input.and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        let role = item.get("role").and_then(|role| role.as_str());
+        let expected_text_type = match role {
+            Some("assistant") => "output_text",
+            Some("user") | Some("developer") | Some("system") => "input_text",
+            _ => continue,
+        };
+        let Some(content_items) = item
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for content in content_items {
+            let Some(kind) = content.get_mut("type") else {
+                continue;
+            };
+            if matches!(kind.as_str(), Some("input_text" | "output_text")) {
+                *kind = serde_json::Value::String(expected_text_type.to_string());
+            }
+        }
+    }
+}
+
+fn take_system_instructions(input: Option<&mut serde_json::Value>) -> Option<String> {
+    let input = input?;
+    let items = input.as_array_mut()?;
+    let index = items
+        .iter()
+        .position(|item| item.get("role").and_then(|role| role.as_str()) == Some("system"))?;
+    let text = input_item_text(&items[index])?;
+    items.remove(index);
+    Some(text)
+}
+
+fn input_item_text(item: &serde_json::Value) -> Option<String> {
+    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+        return Some(text.to_string());
+    }
+    let content = item.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(items) = content.as_array() {
+        let parts: Vec<&str> = items
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| part.get("content").and_then(|v| v.as_str()))
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("\n"));
+        }
+    }
+    None
+}
+
+#[derive(Debug)]
+struct CodexHttpError(String);
+
+impl std::fmt::Display for CodexHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CodexHttpError {}
+
+fn to_http_error(error: anyhow::Error) -> http_client::Error {
+    http_client::Error::Instance(Box::new(CodexHttpError(format!("{error:#}"))))
+}
+
+impl HttpClientExt for CodexHttpClient {
+    fn send<T, U>(
+        &self,
+        req: http_client::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + Send
+    + 'static
+    where
+        T: Into<bytes::Bytes> + Send,
+        U: From<bytes::Bytes> + Send + 'static,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        let body = body.into();
+        async move {
+            let body = this.prepare_request_body(&mut parts.headers, body).await?;
+            let req = http_client::Request::from_parts(parts, body);
+            this.inner.send(req).await
+        }
+    }
+
+    fn send_multipart<U>(
+        &self,
+        req: http_client::Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + Send
+    + 'static
+    where
+        U: From<bytes::Bytes> + Send + 'static,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        async move {
+            this.authorize_headers(&mut parts.headers).await?;
+            let req = http_client::Request::from_parts(parts, body);
+            this.inner.send_multipart(req).await
+        }
+    }
+
+    fn send_streaming<T>(
+        &self,
+        req: http_client::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>> + Send
+    where
+        T: Into<bytes::Bytes> + Send,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        let body = body.into();
+        async move {
+            let body = this.prepare_request_body(&mut parts.headers, body).await?;
+            let req = http_client::Request::from_parts(parts, body);
+            let mut response = this.inner.send_streaming(req).await?;
+            response.headers_mut().insert(
+                reqwest::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            Ok(response)
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -202,6 +423,7 @@ impl AnyClient {
     pub fn provider_name(&self) -> &'static str {
         match self {
             AnyClient::OpenRouter(_) => "openrouter",
+            AnyClient::OpenAI(OpenAiClient::Codex(_)) => "openai-codex",
             AnyClient::OpenAI(_) => "openai",
             AnyClient::Anthropic(_) => "anthropic",
             AnyClient::Gemini(_) => "gemini",
@@ -325,9 +547,16 @@ impl AnyClient {
             AnyClient::OpenAI(OpenAiClient::Completions(_)) => {
                 anyhow::bail!("rig model listing unavailable for this client")
             }
+            AnyClient::OpenAI(OpenAiClient::Codex(_)) => return Ok(codex_model_entries()),
         };
         Ok(list.iter().map(ModelEntry::from_rig).collect())
     }
+}
+
+fn codex_model_entries() -> Vec<ModelEntry> {
+    crate::models_catalog::catalog_entries("openai-codex")
+        .unwrap_or(&[])
+        .to_vec()
 }
 
 /// Custom / OpenAI-compatible gateway: best-effort GET {base}/models.
@@ -383,6 +612,7 @@ async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result
         AnyModel::OpenAI(m) => match m {
             OpenAiModel::Responses(m) => run_summarizer(m, prompt).await,
             OpenAiModel::Completions(m) => run_summarizer(m, prompt).await,
+            OpenAiModel::Codex(m) => run_summarizer(m, prompt).await,
         },
         AnyModel::Anthropic(m) => run_summarizer(m, prompt).await,
         AnyModel::Gemini(m) => run_summarizer(m, prompt).await,
@@ -490,6 +720,7 @@ impl AnyAgent {
                 OpenAiAgent::Completions(a) => {
                     runner::run_print(a, prompt, max_turns, pure_stdout).await
                 }
+                OpenAiAgent::Codex(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             },
             AnyAgent::Anthropic(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             AnyAgent::Gemini(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
@@ -513,6 +744,7 @@ impl AnyAgent {
                 OpenAiAgent::Completions(a) => {
                     runner::run_subagent(a, prompt, max_turns, event_tx).await
                 }
+                OpenAiAgent::Codex(a) => runner::run_subagent(a, prompt, max_turns, event_tx).await,
             },
             AnyAgent::Anthropic(a) => runner::run_subagent(a, prompt, max_turns, event_tx).await,
             AnyAgent::Gemini(a) => runner::run_subagent(a, prompt, max_turns, event_tx).await,
@@ -526,6 +758,7 @@ impl AnyAgent {
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => runner::spawn_agent(a, prompt, history),
                 OpenAiAgent::Completions(a) => runner::spawn_agent(a, prompt, history),
+                OpenAiAgent::Codex(a) => runner::spawn_agent(a, prompt, history),
             },
             AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history),
             AnyAgent::Gemini(a) => runner::spawn_agent(a, prompt, history),
@@ -545,6 +778,7 @@ impl AnyAgent {
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
                 OpenAiAgent::Completions(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+                OpenAiAgent::Codex(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             },
             AnyAgent::Anthropic(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             AnyAgent::Gemini(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
@@ -688,6 +922,13 @@ pub fn create_client(
     let config = resolve_provider_config(provider_name, custom_providers)?;
     let base_url = resolve_base_url(&config);
 
+    if config.kind == ProviderKind::OpenAICodex {
+        let custom = custom_providers.get(provider_name);
+        let http_client =
+            build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+        return Ok(AnyClient::OpenAI(build_codex_client(http_client)?));
+    }
+
     let resolver = AuthResolver::new(config.kind)
         .with_cli_key(api_key)
         .with_env_override(config.api_key_env.as_deref())
@@ -711,7 +952,17 @@ pub fn create_client(
         ProviderKind::Gemini => build_gemini_client(&key, base_url.as_deref()),
         ProviderKind::Ollama => build_ollama_client(&key, base_url.as_deref()),
         ProviderKind::OpenRouter => build_openrouter_client(&key, base_url.as_deref()),
+        ProviderKind::OpenAICodex => unreachable!("handled before static API-key resolution"),
     }
+}
+
+fn build_codex_client(http_client: reqwest::Client) -> anyhow::Result<OpenAiClient> {
+    let client = openai::Client::builder()
+        .api_key("dynamic-codex-auth")
+        .base_url(OPENAI_CODEX_BASE_URL)
+        .http_client(CodexHttpClient::new(http_client))
+        .build()?;
+    Ok(OpenAiClient::Codex(client))
 }
 
 macro_rules! build_provider_client {
@@ -802,6 +1053,23 @@ async fn build_openai_agent(
                 reasoning_enabled,
                 temperature,
                 extra_body,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        OpenAiModel::Codex(m) => OpenAiAgent::Codex(
+            builder::build_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                sandbox,
+                reasoning_enabled,
+                temperature,
+                None,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -963,6 +1231,17 @@ pub fn build_btw_agent(
                     extra_body,
                 ))
             }
+            OpenAiModel::Codex(m) => OpenAiAgent::Codex(builder::build_btw_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                reasoning_enabled,
+                temperature,
+                None,
+            )),
         }),
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(builder::build_btw_agent_inner(
             m,
@@ -997,5 +1276,97 @@ pub fn build_btw_agent(
             temperature,
             extra_body,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_codex_instructions, openrouter_anthropic_routing};
+    use bytes::Bytes;
+    use serde_json::json;
+
+    #[test]
+    fn pins_anthropic_namespaced_openrouter_models() {
+        for id in [
+            "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-opus-4.8",
+            "anthropic/claude-3.5-haiku",
+        ] {
+            let extra = openrouter_anthropic_routing(id).expect("should pin {id}");
+            assert_eq!(extra["provider"]["order"][0], "Anthropic");
+            assert_eq!(extra["provider"]["allow_fallbacks"], true);
+        }
+    }
+
+    #[test]
+    fn pins_tilde_prefixed_latest_aliases() {
+        // OpenRouter floating aliases carry a leading `~` that is part of the
+        // real slug; they must still be pinned to the Anthropic route.
+        for id in [
+            "~anthropic/claude-sonnet-latest",
+            "~anthropic/claude-opus-latest",
+            "~anthropic/claude-haiku-latest",
+        ] {
+            assert!(
+                openrouter_anthropic_routing(id).is_some(),
+                "{id} should be pinned"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_non_anthropic_openrouter_models_untouched() {
+        for id in [
+            "openai/gpt-4o",
+            "deepseek/deepseek-chat",
+            "google/gemini-2.5-pro",
+            "openrouter/auto",
+            // A non-Anthropic model that merely mentions claude in its path
+            // is not in the anthropic namespace and must not be pinned.
+            "somegateway/not-claude",
+        ] {
+            assert!(
+                openrouter_anthropic_routing(id).is_none(),
+                "{id} should not be pinned"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_request_body_promotes_system_message_to_instructions() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "instructions": null,
+            "max_output_tokens": 128,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{ "type": "input_text", "text": "Follow project rules." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Hello" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "input_text", "text": "Hi there" }]
+                }
+            ]
+        });
+
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(value["instructions"], json!("Follow project rules."));
+        assert_eq!(value["store"], json!(false));
+        assert!(value.get("max_output_tokens").is_none());
+        let input = value["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], json!("user"));
+        assert_eq!(input[0]["content"][0]["type"], json!("input_text"));
+        assert_eq!(input[1]["role"], json!("assistant"));
+        assert_eq!(input[1]["content"][0]["type"], json!("output_text"));
     }
 }
