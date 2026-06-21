@@ -112,16 +112,47 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(cli::Command::Config { command }) = &cli.command {
+        handle_config_command(&mut cfg, command)?;
+        return Ok(());
+    }
+
+    if let Some(cli::Command::Auth { command }) = &cli.command {
+        match command {
+            cli::AuthCommand::Login { provider, device } => {
+                auth::login_provider(provider, *device).await?;
+            }
+            cli::AuthCommand::Logout { provider } => {
+                auth::logout_provider(provider)?;
+            }
+            cli::AuthCommand::Status { provider } => {
+                auth::print_auth_status(provider.as_deref())?;
+            }
+        }
+        return Ok(());
+    }
+
+    if cli.emacs_list {
+        extras::emacs::print_sessions()?;
+        return Ok(());
+    }
+
+    if cli.emacs_board {
+        extras::emacs_board::print_board()?;
+        return Ok(());
+    }
+
     if cli.resume && cli.session.is_none() {
         print_sessions();
         return Ok(());
     }
 
     let version_changed = docs::ensure_global()?;
+    let emacs_mode = cli.emacs;
     #[cfg(feature = "acp")]
-    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode;
+    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode && !emacs_mode;
     #[cfg(not(feature = "acp"))]
-    let is_interactive = !cli.print && !cli.loop_mode;
+    let is_interactive = !cli.print && !cli.loop_mode && !emacs_mode;
 
     // Load context first so prompts/themes are available early.
     // (Version-change / ARCHITECTURE.md prompts are deferred to right before
@@ -462,7 +493,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ARCHITECTURE.md prompt: defer to here so all heavy setup completes first.
     #[cfg(feature = "archmd")]
-    let arch_created = if !cli.resolve_no_context_files(&cfg) {
+    let arch_created = if is_interactive && !cli.resolve_no_context_files(&cfg) {
         let cwd = std::env::current_dir().ok();
         if let Some(ref cwd) = cwd {
             crate::extras::archmd::ask_and_create(cwd).unwrap_or_else(|e| {
@@ -566,6 +597,22 @@ async fn main() -> anyhow::Result<()> {
                 guard.set_prompt_mode(mode);
             }
         }
+    }
+
+    if cli.emacs {
+        return extras::emacs::serve(
+            client,
+            cli,
+            cfg,
+            context,
+            session,
+            permission,
+            ask_tx,
+            ask_rx,
+            sandbox,
+            status_signals,
+        )
+        .await;
     }
 
     // Build the auto-trigger message for ARCHITECTURE.md creation
@@ -731,6 +778,42 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
+    Ok(())
+}
+
+fn handle_config_command(
+    cfg: &mut config::Config,
+    command: &cli::ConfigCommand,
+) -> anyhow::Result<()> {
+    match command {
+        cli::ConfigCommand::Providers => {
+            for provider in config::commands::provider_names(cfg) {
+                println!("{provider}");
+            }
+        }
+        cli::ConfigCommand::Models { provider } => {
+            let provider = provider
+                .as_deref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| config::commands::default_provider_name(cfg));
+            config::commands::validate_provider(cfg, &provider)?;
+            for model in config::commands::model_ids_for_provider(&provider) {
+                println!("{model}");
+            }
+        }
+        cli::ConfigCommand::SetProvider { provider } => {
+            let (provider, model) = config::commands::set_default_provider(cfg, provider)?;
+            config::save_config(cfg)?;
+            println!("provider {provider}");
+            println!("model {model}");
+        }
+        cli::ConfigCommand::SetModel { model } => {
+            let (provider, model) = config::commands::set_default_model(cfg, model)?;
+            config::save_config(cfg)?;
+            println!("provider {provider}");
+            println!("model {model}");
+        }
+    }
     Ok(())
 }
 

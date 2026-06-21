@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use compact_str::CompactString;
 
 use crate::config;
@@ -21,6 +21,24 @@ pub struct Cli {
 
     #[arg(long = "print-config", help = "Print resolved configuration and exit")]
     pub print_config: bool,
+
+    #[arg(
+        long = "emacs",
+        help = "Run the native Emacs Unix socket protocol for this session"
+    )]
+    pub emacs: bool,
+
+    #[arg(
+        long = "emacs-list",
+        help = "List running native Emacs protocol sessions"
+    )]
+    pub emacs_list: bool,
+
+    #[arg(
+        long = "emacs-board",
+        help = "Print an Emacs-readable project/worktree/session board snapshot"
+    )]
+    pub emacs_board: bool,
 
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
@@ -244,6 +262,65 @@ pub struct Cli {
 
     #[arg(help = "Prompt message(s)")]
     pub message: Vec<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    #[command(about = "Manage stored provider authentication")]
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    #[command(about = "Inspect or update configuration defaults")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigCommand {
+    #[command(about = "List configured provider names")]
+    Providers,
+    #[command(about = "List known model ids for a provider")]
+    Models {
+        #[arg(help = "Provider name; defaults to the configured provider")]
+        provider: Option<String>,
+    },
+    #[command(about = "Persist the default provider and reset model to its default")]
+    SetProvider {
+        #[arg(help = "Provider name")]
+        provider: String,
+    },
+    #[command(about = "Persist the default model for the current default provider")]
+    SetModel {
+        #[arg(help = "Model id")]
+        model: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthCommand {
+    #[command(about = "Log in to a provider")]
+    Login {
+        #[arg(help = "Provider to log in to: codex or openai-codex")]
+        provider: String,
+        #[arg(long = "device", help = "Use the device-code login flow")]
+        device: bool,
+    },
+    #[command(about = "Log out from a provider")]
+    Logout {
+        #[arg(help = "Provider to log out from: codex or openai-codex")]
+        provider: String,
+    },
+    #[command(about = "Show stored authentication status")]
+    Status {
+        #[arg(help = "Optional provider to show: codex or openai-codex")]
+        provider: Option<String>,
+    },
 }
 
 impl Cli {
@@ -256,7 +333,16 @@ impl Cli {
     }
 
     pub fn resolve_model(&self, cfg: &config::Config) -> CompactString {
-        if let Some(m) = self.model.as_deref().or(cfg.model.as_deref()) {
+        if let Some(m) = self.model.as_deref() {
+            return CompactString::new(m);
+        }
+        if self.provider.is_some()
+            && let Some((model, _)) =
+                crate::provider::default_model_for_provider(&self.resolve_provider(cfg), cfg)
+        {
+            return CompactString::new(model);
+        }
+        if let Some(m) = cfg.model.as_deref() {
             return CompactString::new(m);
         }
         // No explicit model. If a provider was chosen explicitly, default to a

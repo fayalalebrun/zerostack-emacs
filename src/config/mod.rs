@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod load;
 pub mod types;
 
