@@ -53,7 +53,7 @@ mod imp {
     }
 
     struct Server {
-        client: AnyClient,
+        client: Mutex<AnyClient>,
         cli: Cli,
         cfg: Config,
         context: Mutex<ContextFiles>,
@@ -223,7 +223,7 @@ mod imp {
             render_session_lines(&session, &cli, &cfg, &context, DEFAULT_COLS).len();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let server = Arc::new(Server {
-            client,
+            client: Mutex::new(client),
             cli,
             cfg,
             context: Mutex::new(context),
@@ -561,6 +561,8 @@ mod imp {
             "file-list" => handle_file_list(&server, &cmd, out).await,
             "prompt" => handle_prompt(server.clone(), &cmd, out).await,
             "compact" => handle_compact(&server, &cmd, out).await,
+            "provider" => handle_provider(&server, &cmd, out).await,
+            "model" => handle_model(&server, &cmd, out).await,
             "loop-start" => handle_loop_start(server.clone(), &cmd, out).await,
             "loop-stop" => handle_loop_stop(&server, &cmd, out).await,
             "loop-status" => handle_loop_status(&server, &cmd, out).await,
@@ -727,6 +729,198 @@ mod imp {
         )
         .await;
         Ok(())
+    }
+
+    async fn handle_provider(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        ensure_idle_for_switch(server, "provider").await?;
+        let raw_provider = string_arg(cmd, "provider")
+            .or_else(|| atom_arg(cmd, "provider"))
+            .context("provider requires :provider")?;
+        config::commands::validate_provider(&server.cfg, &raw_provider)?;
+        let provider = config::commands::canonical_provider_name(&raw_provider);
+        let model = if let Some((model, _)) =
+            crate::provider::default_model_for_provider(&provider, &server.cfg)
+        {
+            model
+        } else {
+            let session = server.session.lock().await;
+            session.model.to_string()
+        };
+
+        let client = crate::provider::create_client(
+            &provider,
+            server.cli.api_key.as_deref(),
+            &server.cfg.custom_providers_map(),
+            server.cfg.api_keys.as_ref(),
+        )?;
+
+        ensure_idle_for_switch(server, "provider").await?;
+        {
+            let mut current = server.client.lock().await;
+            *current = client.clone();
+        }
+        update_session_provider_model(server, &provider, &model).await?;
+        sync_subagent_with_main(server, &client, &provider, &model).await;
+
+        let message = format!("switched to provider: {provider} (model: {model})");
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :provider {} :model {} :message {}",
+                sexp_quote(&provider),
+                sexp_quote(&model),
+                sexp_quote(&message),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn handle_model(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        ensure_idle_for_switch(server, "model").await?;
+        let model = string_arg(cmd, "model")
+            .or_else(|| atom_arg(cmd, "model"))
+            .context("model requires :model")?;
+        if model.trim().is_empty() {
+            anyhow::bail!("model cannot be empty");
+        }
+        let provider = {
+            let session = server.session.lock().await;
+            session.provider.to_string()
+        };
+        update_session_provider_model(server, &provider, &model).await?;
+        let client = server.client.lock().await.clone();
+        sync_subagent_with_main(server, &client, &provider, &model).await;
+
+        let message = format!("switched to model: {model}");
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :provider {} :model {} :message {}",
+                sexp_quote(&provider),
+                sexp_quote(&model),
+                sexp_quote(&message),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn ensure_idle_for_switch(server: &Arc<Server>, kind: &str) -> anyhow::Result<()> {
+        let mutable = server.mutable.lock().await;
+        if mutable.running {
+            anyhow::bail!("cannot switch {kind} while a prompt is running");
+        }
+        #[cfg(feature = "loop")]
+        if mutable
+            .loop_state
+            .as_ref()
+            .map(|state| state.active)
+            .unwrap_or(false)
+        {
+            anyhow::bail!("cannot switch {kind} while a loop is active");
+        }
+        Ok(())
+    }
+
+    async fn update_session_provider_model(
+        server: &Arc<Server>,
+        provider: &str,
+        model: &str,
+    ) -> anyhow::Result<()> {
+        {
+            let mut session = server.session.lock().await;
+            session.provider = CompactString::new(provider);
+            session.model = CompactString::new(model);
+            session.update_context_window(server.cfg.resolve_context_window(provider, model));
+            apply_quick_model_costs(&mut session, &server.cfg, provider, model);
+            session.reset_calibration();
+            session.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
+            if !server.cli.no_session {
+                crate::session::storage::save_session(&session)?;
+            }
+        }
+        server.update_meta_from_session().await;
+        Ok(())
+    }
+
+    fn apply_quick_model_costs(session: &mut Session, cfg: &Config, provider: &str, model: &str) {
+        let qm = config::quick_models_map(cfg);
+        if let Some(q) = qm
+            .values()
+            .find(|q| q.provider.as_str() == provider && q.model.as_str() == model)
+        {
+            session.input_token_cost = q.input_token_cost;
+            session.output_token_cost = q.output_token_cost;
+        } else {
+            session.input_token_cost = 0.0;
+            session.output_token_cost = 0.0;
+        }
+    }
+
+    #[cfg(feature = "subagents")]
+    async fn sync_subagent_with_main(
+        server: &Arc<Server>,
+        client: &AnyClient,
+        provider: &str,
+        model: &str,
+    ) {
+        use crate::extras::subagents;
+
+        if server.cfg.subagent_model.is_some() {
+            return;
+        }
+
+        let sub_provider = server
+            .cfg
+            .subagent_provider
+            .as_deref()
+            .unwrap_or(provider)
+            .to_string();
+        let sub_model = server
+            .cfg
+            .subagent_model
+            .as_deref()
+            .unwrap_or(model)
+            .to_string();
+
+        if sub_provider == client.provider_name() {
+            subagents::set_client_and_model(client.clone(), sub_model);
+            return;
+        }
+
+        match crate::provider::create_client(
+            &sub_provider,
+            server.cli.api_key.as_deref(),
+            &server.cfg.custom_providers_map(),
+            server.cfg.api_keys.as_ref(),
+        ) {
+            Ok(client) => subagents::set_client_and_model(client, sub_model),
+            Err(e) => tracing::warn!(
+                "Could not propagate Emacs provider/model switch to subagent provider '{}' ({}); keeping previous subagent config",
+                sub_provider,
+                e,
+            ),
+        }
+    }
+
+    #[cfg(not(feature = "subagents"))]
+    async fn sync_subagent_with_main(
+        _server: &Arc<Server>,
+        _client: &AnyClient,
+        _provider: &str,
+        _model: &str,
+    ) {
     }
 
     async fn resolve_session_path(server: &Arc<Server>, raw_path: &str) -> PathBuf {
@@ -1181,8 +1375,8 @@ mod imp {
         };
 
         let (model, cut_idx, messages, previous_summary, saved_tokens) = plan;
-        let summary = server
-            .client
+        let client = server.client.lock().await.clone();
+        let summary = client
             .compress_messages(&model, &messages, previous_summary.as_deref(), instructions)
             .await?;
 
@@ -1463,7 +1657,8 @@ mod imp {
             ss.send_start();
         }
 
-        let model = server.client.completion_model({
+        let client = server.client.lock().await.clone();
+        let model = client.completion_model({
             let session = server.session.lock().await;
             session.model.to_string()
         });
@@ -2964,6 +3159,23 @@ mod imp {
                 attachment_items_to_sexp(&items),
                 "((:index 0 :kind context-file :path \"/tmp/notes.txt\" :bytes 12))",
             );
+        }
+
+        #[test]
+        fn provider_and_model_commands_read_values() {
+            let provider =
+                parse_command("(provider :request 5 :provider \"openai-codex\")").unwrap();
+            assert_eq!(provider.name, "provider");
+            assert_eq!(request_arg(&provider).as_deref(), Some("5"));
+            assert_eq!(
+                string_arg(&provider, "provider").as_deref(),
+                Some("openai-codex")
+            );
+
+            let model = parse_command("(model :request 6 :model \"gpt-5.5\")").unwrap();
+            assert_eq!(model.name, "model");
+            assert_eq!(request_arg(&model).as_deref(), Some("6"));
+            assert_eq!(string_arg(&model, "model").as_deref(), Some("gpt-5.5"));
         }
 
         #[cfg(feature = "loop")]

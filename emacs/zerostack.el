@@ -165,6 +165,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "g") #'zerostack-board-refresh)
     (define-key map (kbd "c") #'zerostack-board-create-at-point)
+    (define-key map (kbd "p") #'zerostack-board-set-default-provider)
+    (define-key map (kbd "m") #'zerostack-board-set-default-model)
     (define-key map (kbd "s") #'zerostack-board-stop-at-point)
     (define-key map (kbd "x") #'zerostack-board-trash-at-point)
     (define-key map (kbd "RET") #'zerostack-board-open-at-point)
@@ -187,6 +189,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--session-title nil)
 (defvar-local zerostack--cwd nil)
 (defvar-local zerostack--worktree-dir nil)
+(defvar-local zerostack--provider nil)
+(defvar-local zerostack--model nil)
 (defvar-local zerostack--protocol nil)
 (defvar-local zerostack--cols nil)
 (defvar-local zerostack--metadata-status-request nil)
@@ -211,6 +215,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack-board--snapshot nil)
 (defvar-local zerostack-board--fetch-function nil)
 (defvar-local zerostack-board--session-limits nil)
+(defvar zerostack--config-command-function nil
+  "Optional test hook used instead of invoking `zerostack-command config'.")
 
 ;;;###autoload
 (define-derived-mode zerostack-mode fundamental-mode "zerostack"
@@ -219,6 +225,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--session-title nil)
   (setq-local zerostack--cwd default-directory)
   (setq-local zerostack--worktree-dir default-directory)
+  (setq-local zerostack--provider nil)
+  (setq-local zerostack--model nil)
   (setq-local zerostack--metadata-status-request nil)
   (setq-local zerostack--line-markers nil)
   (setq-local zerostack--notice-start-marker nil)
@@ -510,6 +518,56 @@ The root is resolved with Projectile when available, then `project.el', then
       (goto-char (point-min))
       (read (current-buffer)))))
 
+(defun zerostack--config-command (&rest args)
+  "Run `zerostack config' with ARGS and return trimmed stdout."
+  (if zerostack--config-command-function
+      (string-trim (apply zerostack--config-command-function args))
+    (with-temp-buffer
+      (let ((status (apply #'call-process zerostack-command nil t nil "config" args)))
+        (unless (zerop status)
+          (user-error "zerostack config %s exited with %s: %s"
+                      (string-join args " ")
+                      status
+                      (string-trim (buffer-string)))))
+      (string-trim (buffer-string)))))
+
+(defun zerostack--config-lines (&rest args)
+  "Run `zerostack config' with ARGS and return non-empty output lines."
+  (split-string (apply #'zerostack--config-command args) "\n" t "[[:space:]]+"))
+
+(defun zerostack--read-provider (&optional prompt default)
+  "Read a provider name using zerostack config completion."
+  (let ((providers (zerostack--config-lines "providers")))
+    (unless providers
+      (user-error "No zerostack providers available"))
+    (completing-read (or prompt "Provider: ") providers nil t nil nil default)))
+
+(defun zerostack--read-model (&optional provider default)
+  "Read a model id for PROVIDER, allowing manual entry."
+  (let ((models (if (and provider (not (string-empty-p provider)))
+                    (zerostack--config-lines "models" provider)
+                  (zerostack--config-lines "models"))))
+    (completing-read (if (and provider (not (string-empty-p provider)))
+                         (format "Model for %s: " provider)
+                       "Model: ")
+                     models nil nil nil nil default)))
+
+(defun zerostack-board-set-default-provider ()
+  "Switch the persisted default zerostack provider."
+  (interactive)
+  (let* ((provider (zerostack--read-provider "Default provider: "))
+         (output (zerostack--config-command "set-provider" provider)))
+    (zerostack-board-refresh)
+    (message "zerostack default %s" (replace-regexp-in-string "\n" ", " output))))
+
+(defun zerostack-board-set-default-model ()
+  "Switch the persisted default zerostack model."
+  (interactive)
+  (let* ((model (zerostack--read-model nil nil))
+         (output (zerostack--config-command "set-model" model)))
+    (zerostack-board-refresh)
+    (message "zerostack default %s" (replace-regexp-in-string "\n" ", " output))))
+
 (defun zerostack-board--render (snapshot)
   "Render board SNAPSHOT as a tree."
   (unless (eq (car-safe snapshot) 'zerostack-board)
@@ -521,7 +579,7 @@ The root is resolved with Projectile when available, then `project.el', then
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
-    (insert (propertize "g refresh, RET open, c create, s stop, x trash\n\n" 'face 'zerostack-muted-face))
+    (insert (propertize "g refresh, RET open, c create, p provider, m model, s stop, x trash\n\n" 'face 'zerostack-muted-face))
     (if (or projects all-workspaces)
         (progn
           (dolist (project projects)
@@ -1127,8 +1185,23 @@ Return non-nil when DIRECTORY was newly added."
   (interactive "nColumns: ")
   (setq zerostack--cols (max 20 cols))
   (zerostack--send-command 'set-view
-                           :request (zerostack--next-request)
-                           :cols zerostack--cols))
+                            :request (zerostack--next-request)
+                            :cols zerostack--cols))
+
+(defun zerostack-provider-menu (provider)
+  "Switch the current zerostack session to PROVIDER."
+  (interactive (list (zerostack--read-provider "Session provider: " zerostack--provider)))
+  (zerostack--send-command 'provider
+                            :request (zerostack--next-request)
+                            :provider provider))
+
+(defun zerostack-model-menu (model)
+  "Switch the current zerostack session to MODEL."
+  (interactive
+   (list (zerostack--read-model zerostack--provider zerostack--model)))
+  (zerostack--send-command 'model
+                            :request (zerostack--next-request)
+                            :model model))
 
 (defun zerostack-send-prompt (text)
   "Send TEXT as a zerostack prompt."
@@ -1514,12 +1587,14 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
+_k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view  _o_ artifact
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
     ("c" zerostack-compact)
     ("l" zerostack-loop)
+    ("p" zerostack-provider-menu)
+    ("m" zerostack-model-menu)
     ("v" zerostack-set-view)
     ("o" zerostack-open-last-artifact)))
 
@@ -1532,13 +1607,15 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "loop" "view" "artifact"))
-         (choice (completing-read "Zerostack command: " commands nil t)))
+  (let* ((commands '("skill" "attach" "compact" "loop" "provider" "model" "view" "artifact"))
+          (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
       ("attach" (zerostack-attachment-menu))
       ("compact" (call-interactively #'zerostack-compact))
       ("loop" (call-interactively #'zerostack-loop))
+      ("provider" (call-interactively #'zerostack-provider-menu))
+      ("model" (call-interactively #'zerostack-model-menu))
       ("view" (call-interactively #'zerostack-set-view))
       ("artifact" (zerostack-open-last-artifact)))))
 
@@ -1676,7 +1753,7 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
   (zerostack--set-status
-   "commands: C-c / opens skill, attach, compact, loop, view, artifact"))
+   "commands: C-c / opens skill, attach, compact, loop, provider, model, view, artifact"))
 
 (defun zerostack-disconnect ()
   "Disconnect from zerostack and stop a server process started by this buffer."
@@ -1709,10 +1786,18 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
   "Handle ok PLIST."
   (when-let ((cols (plist-get plist :cols)))
     (setq zerostack--cols cols))
+  (zerostack--update-provider-model plist)
   (when (plist-member plist :active)
     (zerostack--update-loop-state plist))
   (when-let ((message (plist-get plist :message)))
     (zerostack--append-local-line message 'zs-muted)))
+
+(defun zerostack--update-provider-model (plist)
+  "Update provider/model buffer-local state from PLIST."
+  (when-let ((provider (plist-get plist :provider)))
+    (setq zerostack--provider (format "%s" provider)))
+  (when-let ((model (plist-get plist :model)))
+    (setq zerostack--model (format "%s" model))))
 
 (defun zerostack--handle-error (plist)
   "Handle error PLIST."
@@ -1738,8 +1823,9 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _v_ view  _o_ artifact
          (internal (and zerostack--metadata-status-request
                         (equal request zerostack--metadata-status-request))))
     (zerostack--set-session-metadata (plist-get session :title)
-                                     (plist-get session :cwd)
-                                     (plist-get session :cwd))
+                                      (plist-get session :cwd)
+                                      (plist-get session :cwd))
+    (zerostack--update-provider-model session)
     (when internal
       (setq zerostack--metadata-status-request nil))
     (unless internal

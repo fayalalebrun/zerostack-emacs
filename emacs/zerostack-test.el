@@ -586,6 +586,33 @@
        (should (equal signals '((123 term))))
        (should refreshed)))))
 
+(ert-deftest zerostack-test-board-default-provider-model-actions ()
+  (zerostack-test--with-board-buffer
+   (let ((choices '("openai-codex" "gpt-5.5"))
+         calls
+         (refreshes 0))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (&rest _) (pop choices)))
+               ((symbol-function 'zerostack-board-refresh)
+                (lambda () (cl-incf refreshes))))
+       (let ((zerostack--config-command-function
+              (lambda (&rest args)
+                (push args calls)
+                (pcase args
+                  ('("providers") "anthropic\nopenai-codex\nopenrouter\n")
+                  ('("models") "gpt-5.5\ngpt-5.1\n")
+                  ('("set-provider" "openai-codex") "provider openai-codex\nmodel gpt-5.5\n")
+                  ('("set-model" "gpt-5.5") "provider openai-codex\nmodel gpt-5.5\n")
+                  (_ (error "unexpected config args: %S" args))))))
+         (zerostack-board-set-default-provider)
+         (zerostack-board-set-default-model)))
+     (should (equal (nreverse calls)
+                    '(("providers")
+                      ("set-provider" "openai-codex")
+                      ("models")
+                      ("set-model" "gpt-5.5"))))
+     (should (= refreshes 2)))))
+
 (ert-deftest zerostack-test-sends-all-protocol-commands ()
   (zerostack-test--with-buffer
    (let (sent)
@@ -596,6 +623,8 @@
      (zerostack-attach)
      (zerostack-render)
      (zerostack-set-view 120)
+     (zerostack-provider-menu "openai-codex")
+     (zerostack-model-menu "gpt-5.5")
      (zerostack-send-prompt "hello")
      (zerostack-compact)
      (zerostack-compact "keep recent tool output")
@@ -613,36 +642,38 @@
 
      (let ((forms (zerostack-test--sent-forms sent)))
        (should (equal (mapcar #'car forms)
-                      '(hello attach render set-view prompt compact compact loop-start
+                      '(hello attach render set-view provider model prompt compact compact loop-start
                               loop-status loop-stop file-add file-list file-drop-all abort
                               permission-answer list-sessions status)))
        (should (equal (nth 0 forms) '(hello :request 1 :protocol 1 :cols 100)))
        (should (equal (nth 1 forms) '(attach :request 2 :cols 100)))
        (should (equal (nth 2 forms) '(render :request 3 :cols 100)))
        (should (equal (nth 3 forms) '(set-view :request 4 :cols 120)))
-       (should (equal (nth 4 forms) '(prompt :request 5 :text "hello")))
-       (should (equal (nth 5 forms) '(compact :request 6)))
-       (should (equal (nth 6 forms)
-                      '(compact :request 7 :instructions "keep recent tool output")))
-       (should (equal (nth 7 forms)
-                      '(loop-start :request 8 :prompt "fix bugs" :max 2
+       (should (equal (nth 4 forms) '(provider :request 5 :provider "openai-codex")))
+       (should (equal (nth 5 forms) '(model :request 6 :model "gpt-5.5")))
+       (should (equal (nth 6 forms) '(prompt :request 7 :text "hello")))
+       (should (equal (nth 7 forms) '(compact :request 8)))
+       (should (equal (nth 8 forms)
+                      '(compact :request 9 :instructions "keep recent tool output")))
+       (should (equal (nth 9 forms)
+                      '(loop-start :request 10 :prompt "fix bugs" :max 2
                                    :run "cargo test")))
-       (should (equal (nth 8 forms) '(loop-status :request 9)))
-       (should (equal (nth 9 forms) '(loop-stop :request 10)))
-       (should (equal (nth 10 forms) '(file-add :request 11 :path "/tmp/photo.png")))
-       (should (equal (nth 11 forms) '(file-list :request 12)))
-       (should (equal (nth 12 forms) '(file-drop-all :request 13)))
-       (should (equal (nth 13 forms) '(abort :request 14)))
-       (should (equal (nth 14 forms)
+       (should (equal (nth 10 forms) '(loop-status :request 11)))
+       (should (equal (nth 11 forms) '(loop-stop :request 12)))
+       (should (equal (nth 12 forms) '(file-add :request 13 :path "/tmp/photo.png")))
+       (should (equal (nth 13 forms) '(file-list :request 14)))
+       (should (equal (nth 14 forms) '(file-drop-all :request 15)))
+       (should (equal (nth 15 forms) '(abort :request 16)))
+       (should (equal (nth 16 forms)
                       '(permission-answer :request 42 :decision allow-always
                                           :pattern "bash cargo test")))
-       (should (equal (nth 15 forms) '(list-sessions :request 15 :limit 7)))
-       (should (equal (nth 16 forms) '(status :request 16)))))))
+       (should (equal (nth 17 forms) '(list-sessions :request 17 :limit 7)))
+       (should (equal (nth 18 forms) '(status :request 18)))))))
 
 (ert-deftest zerostack-test-command-menu-fallback-dispatches-to-protocol ()
   (zerostack-test--with-buffer
    (let (dispatched)
-     (let ((choices '("attach" "compact" "loop" "view")))
+     (let ((choices '("attach" "compact" "loop" "provider" "model" "view")))
        (cl-letf (((symbol-function 'completing-read)
                   (lambda (&rest _) (pop choices)))
                  ((symbol-function 'zerostack-attachment-menu)
@@ -651,11 +682,15 @@
                   (lambda () (interactive) (push 'compact dispatched)))
                  ((symbol-function 'zerostack-loop)
                   (lambda () (interactive) (push 'loop dispatched)))
+                 ((symbol-function 'zerostack-provider-menu)
+                  (lambda (&optional _) (interactive) (push 'provider dispatched)))
+                 ((symbol-function 'zerostack-model-menu)
+                  (lambda (&optional _) (interactive) (push 'model dispatched)))
                  ((symbol-function 'zerostack-set-view)
                   (lambda () (interactive) (push 'view dispatched))))
-         (dotimes (_ 4)
+         (dotimes (_ 6)
            (zerostack--command-menu-fallback))))
-     (should (equal (nreverse dispatched) '(attach compact loop view))))))
+     (should (equal (nreverse dispatched) '(attach compact loop provider model view))))))
 
 (ert-deftest zerostack-test-command-menu-permission-selection ()
   (zerostack-test--with-buffer
@@ -881,8 +916,11 @@
     '(ready :protocol 1 :session "s" :pid 123 :socket "/tmp/sock"))
    (should (equal zerostack--session "s"))
    (zerostack--handle-form
-    '(ok :request 1 :protocol 1 :session "s" :pid 123 :cols 111 :socket "/tmp/sock"))
+    '(ok :request 1 :protocol 1 :session "s" :pid 123 :cols 111 :socket "/tmp/sock"
+         :provider "openai-codex" :model "gpt-5.5"))
    (should (= zerostack--cols 111))
+   (should (equal zerostack--provider "openai-codex"))
+   (should (equal zerostack--model "gpt-5.5"))
    (zerostack--handle-form '(error :request 2 :message "bad request"))
    (should (string-match-p "bad request" zerostack--last-notice))
    (zerostack--handle-form
@@ -896,6 +934,8 @@
              :session (:session "s" :pid 123 :cwd "/repo" :model "m"
 				:provider "p" :created-at "c" :updated-at "u"
 				:title "t" :protocol 1 :socket "/tmp/sock")))
+   (should (equal zerostack--provider "p"))
+   (should (equal zerostack--model "m"))
    (zerostack--handle-form
     '(event :seq 0 :session "s" :type loop-started :turn 1
             :active t :iteration 1 :label "LOOP 1/2" :max 2
