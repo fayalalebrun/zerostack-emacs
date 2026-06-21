@@ -472,6 +472,33 @@
           (when (buffer-live-p buffer)
             (kill-buffer buffer)))))))
 
+(ert-deftest zerostack-test-startup-error-surfaces-stderr ()
+  (let ((script (make-temp-file "zerostack-fail" nil nil
+                                "#!/bin/sh\nprintf '%s\n' 'Error: missing key' >&2\nexit 1\n"))
+        process
+        stderr-buffer)
+    (set-file-modes script #o700)
+    (unwind-protect
+        (zerostack-test--with-buffer
+          (let ((zerostack-command script))
+            (zerostack--start-server nil)
+            (setq process zerostack--server-process)
+            (setq stderr-buffer (process-get process 'zerostack-stderr-buffer))
+            (zerostack-test--wait-until
+             (lambda ()
+               (and (not (process-live-p process))
+                    (not zerostack--startup-timer)
+                    zerostack--status
+                    (string-match-p "Error: missing key" zerostack--status))))
+            (should (string-match-p "server .*Error: missing key" zerostack--status))
+            (should-not zerostack--startup-timer)
+            (should-not zerostack--server-process)))
+      (when (and process (process-live-p process))
+        (delete-process process))
+      (when (buffer-live-p stderr-buffer)
+        (kill-buffer stderr-buffer))
+      (delete-file script))))
+
 (ert-deftest zerostack-test-ready-removes-stale-duplicate-session-buffer ()
   (let ((stale (generate-new-buffer " *zerostack-stale*"))
         (current (generate-new-buffer " *zerostack-current*")))

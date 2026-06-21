@@ -1040,18 +1040,20 @@ Return non-nil when DIRECTORY was newly added."
   "Start a zerostack server with ARGS in the current buffer."
   (let* ((client-buffer (current-buffer))
          (stderr-buffer (generate-new-buffer " *zerostack stderr*"))
-         (command (append (list zerostack-command "--emacs") args)))
-    (setq zerostack--server-process
-          (make-process
-           :name "zerostack-server"
-           :buffer nil
-           :command command
-           :stderr stderr-buffer
-           :noquery t
-           :sentinel #'zerostack--server-sentinel))
+         (command (append (list zerostack-command "--emacs") args))
+         (process (make-process
+                   :name "zerostack-server"
+                   :buffer nil
+                   :command command
+                   :stderr stderr-buffer
+                   :noquery t
+                   :sentinel #'zerostack--server-sentinel)))
+    (process-put process 'zerostack-buffer client-buffer)
+    (process-put process 'zerostack-stderr-buffer stderr-buffer)
+    (setq zerostack--server-process process)
     (setq zerostack--startup-timer
           (run-at-time 0.05 0.05 #'zerostack--poll-server-startup
-                       client-buffer stderr-buffer))))
+                        client-buffer stderr-buffer))))
 
 (defun zerostack--poll-server-startup (client-buffer stderr-buffer)
   "Poll STDERR-BUFFER until CLIENT-BUFFER can connect to the printed socket."
@@ -1075,12 +1077,36 @@ Return non-nil when DIRECTORY was newly added."
 
 (defun zerostack--server-sentinel (process event)
   "Record zerostack server PROCESS EVENT in its client buffer when possible."
-  (let ((buffer (process-get process 'zerostack-buffer)))
+  (let ((buffer (process-get process 'zerostack-buffer))
+        (stderr-text (zerostack--server-stderr-text process))
+        (terminal (memq (process-status process) '(exit signal closed failed))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
+        (when (and terminal (eq process zerostack--server-process))
+          (when zerostack--startup-timer
+            (cancel-timer zerostack--startup-timer)
+            (setq zerostack--startup-timer nil))
+          (setq zerostack--server-process nil))
         (zerostack--append-local-line
-         (format "server %s" (string-trim event))
+         (if (and (not (zerop (process-exit-status process)))
+                  stderr-text
+                  (not (string-empty-p stderr-text)))
+             (format "server %s: %s" (string-trim event) stderr-text)
+           (format "server %s" (string-trim event)))
          (if (zerop (process-exit-status process)) 'zs-muted 'zs-error))))))
+
+(defun zerostack--server-stderr-text (process)
+  "Return user-facing stderr text recorded for server PROCESS."
+  (let ((stderr-buffer (process-get process 'zerostack-stderr-buffer)))
+    (when (buffer-live-p stderr-buffer)
+      (with-current-buffer stderr-buffer
+        (let* ((lines (split-string (buffer-string) "\n" t "[[:space:]]+"))
+               (visible-lines
+                (cl-remove-if
+                 (lambda (line)
+                   (string-match-p "\\`socket[[:space:]]+" line))
+                 lines)))
+          (string-join visible-lines "\n"))))))
 
 (defun zerostack--connect-buffer (socket)
   "Connect the current zerostack buffer to SOCKET."
