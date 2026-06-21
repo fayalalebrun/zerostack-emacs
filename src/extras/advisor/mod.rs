@@ -214,6 +214,7 @@ async fn run_advisor_completion(
         AnyModel::OpenAI(m) => match m {
             OpenAiModel::Responses(m) => advisor_call(m, prompt).await,
             OpenAiModel::Completions(m) => advisor_call(m, prompt).await,
+            OpenAiModel::Codex(m) => advisor_call(m, prompt).await,
         },
         AnyModel::Anthropic(m) => advisor_call(m, prompt).await,
         AnyModel::Gemini(m) => advisor_call(m, prompt).await,
