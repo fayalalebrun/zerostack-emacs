@@ -85,6 +85,15 @@ pub(crate) fn cached_model_ids(provider: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub(crate) fn quick_model_names_for_provider(cfg: &Config, provider: &str) -> Vec<String> {
+    let mut names: Vec<String> = config::quick_models_map(cfg)
+        .into_iter()
+        .filter_map(|(name, quick)| (quick.provider.as_str() == provider).then_some(name))
+        .collect();
+    names.sort();
+    names
+}
+
 /// best-effort warm; returns id list (empty on failure, never errors)
 pub(crate) async fn warm_model_cache(
     provider: &str,
@@ -124,8 +133,57 @@ async fn apply_model(ctx: &mut SlashCtx<'_>, model_id: &str) {
         ctx.cfg
             .resolve_context_window(&ctx.session.provider, &new_model),
     );
+    sync_subagent_with_main(ctx).await;
     write_ok(ctx.renderer, format!("switched to model: {}", new_model));
 }
+
+#[cfg(feature = "subagents")]
+fn subagent_target_from_main(cfg: &Config, provider: &str, model: &str) -> (String, String) {
+    let provider = cfg
+        .subagent_provider
+        .as_deref()
+        .unwrap_or(provider)
+        .to_string();
+    let model = cfg.subagent_model.as_deref().unwrap_or(model).to_string();
+    (provider, model)
+}
+
+#[cfg(feature = "subagents")]
+async fn sync_subagent_with_main(ctx: &mut SlashCtx<'_>) {
+    use crate::extras::subagents;
+
+    if ctx.cfg.subagent_model.is_some() {
+        return;
+    }
+
+    let (provider, model) = subagent_target_from_main(
+        ctx.cfg,
+        ctx.session.provider.as_str(),
+        ctx.session.model.as_str(),
+    );
+
+    if provider == ctx.client.provider_name() {
+        subagents::set_client_and_model(ctx.client.clone(), model);
+        return;
+    }
+
+    match crate::provider::create_client(
+        &provider,
+        ctx.cli.api_key.as_deref(),
+        &ctx.cfg.custom_providers_map(),
+        ctx.cfg.api_keys.as_ref(),
+    ) {
+        Ok(client) => subagents::set_client_and_model(client, model),
+        Err(e) => tracing::warn!(
+            "Could not propagate main model to subagent provider '{}' ({}); keeping previous subagent config",
+            provider,
+            e
+        ),
+    }
+}
+
+#[cfg(not(feature = "subagents"))]
+async fn sync_subagent_with_main(_ctx: &mut SlashCtx<'_>) {}
 
 async fn handle_provider(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     if parts.len() < 2 {
@@ -163,6 +221,7 @@ async fn handle_provider(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
         ctx.cfg
             .resolve_context_window(new_provider, &ctx.session.model),
     );
+    sync_subagent_with_main(ctx).await;
     write_ok(
         ctx.renderer,
         format!(
@@ -181,6 +240,7 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
         );
         return Ok(());
     }
+<<<<<<< HEAD
     let new_model = compact_str::CompactString::new(parts[1].trim());
     let model = ctx.client.completion_model(new_model.to_string());
     let temperature = crate::config::resolve_temperature(ctx.cli, ctx.cfg, &new_model);
@@ -209,6 +269,9 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
             .resolve_context_window(&ctx.session.provider, &new_model),
     );
     write_ok(ctx.renderer, format!("switched to model: {}", new_model));
+=======
+    apply_model(ctx, parts[1].trim()).await;
+>>>>>>> cd14320 (fix(ui): keep model picker and subagents aligned)
     Ok(())
 }
 
@@ -216,6 +279,7 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
     let qm = config::quick_models_map(ctx.cfg);
     let provider = ctx.session.provider.to_string();
     let is_custom = ctx.cfg.custom_providers_map().contains_key(&provider);
+    let provider_quick_models = quick_model_names_for_provider(ctx.cfg, &provider);
 
     let refresh = parts.get(1).map(|s| s.trim()) == Some("refresh");
 
@@ -225,8 +289,8 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
         if let Some(q) = qm.get(arg) {
             ctx.rebuild_agent_with_client(&q.provider, *ctx.reasoning_enabled)
                 .await?;
-            apply_model(ctx, &q.model).await;
             ctx.session.provider = compact_str::CompactString::new(&q.provider);
+            apply_model(ctx, &q.model).await;
             // preserve v1.4.x pricing/cost tracking
             ctx.session.input_token_cost = q.input_token_cost;
             ctx.session.output_token_cost = q.output_token_cost;
@@ -246,6 +310,8 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
     // ---- list mode (+ optional refresh) ----
     match fetch_models_cached(&provider, is_custom, ctx.client, ctx.cli, ctx.cfg, refresh).await {
         Ok(models) => {
+            ctx.input
+                .set_quick_model_names(quick_model_names_for_provider(ctx.cfg, &provider));
             ctx.input.set_live_model_names(cached_model_ids(&provider));
             if refresh {
                 // Explicit refresh: just confirm with a count overview — the picker
@@ -255,26 +321,24 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
                     ctx.renderer,
                     format!(
                         "model list refreshed — quick models: {}, {} models: {}",
-                        qm.len(),
+                        provider_quick_models.len(),
                         provider,
                         models.len()
                     ),
                 );
             } else {
                 // Full listing: quick models, then the provider's available models.
-                let mut sorted: Vec<&String> = qm.keys().collect();
-                sorted.sort();
                 write_ok(
                     ctx.renderer,
                     format!(
-                        "quick models (current: {} | {}):",
+                        "quick models for {} (current: {}):",
                         ctx.session.provider, ctx.session.model
                     ),
                 );
-                if sorted.is_empty() {
+                if provider_quick_models.is_empty() {
                     write_result(ctx.renderer, "  (none — add with /models-add)");
                 }
-                for name in &sorted {
+                for name in &provider_quick_models {
                     let q = &qm[name.as_str()];
                     write_result(
                         ctx.renderer,
@@ -498,4 +562,76 @@ async fn model_for_subagent(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::QuickModelConfig;
+    use compact_str::CompactString;
+
+    #[test]
+    fn quick_models_are_filtered_to_current_provider() {
+        let mut quick = HashMap::new();
+        quick.insert(
+            "deepseek".to_string(),
+            QuickModelConfig {
+                provider: CompactString::new("openrouter"),
+                model: CompactString::new("deepseek/deepseek-v4-pro"),
+                input_token_cost: 0.0,
+                output_token_cost: 0.0,
+                reserve_tokens: None,
+                temperature: None,
+            },
+        );
+        quick.insert(
+            "codex".to_string(),
+            QuickModelConfig {
+                provider: CompactString::new("openai-codex"),
+                model: CompactString::new("gpt-5.1-codex"),
+                input_token_cost: 0.0,
+                output_token_cost: 0.0,
+                reserve_tokens: None,
+                temperature: None,
+            },
+        );
+        let cfg = Config {
+            quick_models: Some(quick),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            quick_model_names_for_provider(&cfg, "openai-codex"),
+            vec!["codex".to_string()]
+        );
+    }
+
+    #[cfg(feature = "subagents")]
+    #[test]
+    fn subagent_target_follows_main_unless_model_is_explicit() {
+        let cfg = Config::default();
+        assert_eq!(
+            subagent_target_from_main(&cfg, "openai-codex", "gpt-5.5"),
+            ("openai-codex".to_string(), "gpt-5.5".to_string())
+        );
+
+        let cfg = Config {
+            subagent_provider: Some(CompactString::new("anthropic")),
+            ..Default::default()
+        };
+        assert_eq!(
+            subagent_target_from_main(&cfg, "openai-codex", "gpt-5.5"),
+            ("anthropic".to_string(), "gpt-5.5".to_string())
+        );
+
+        let cfg = Config {
+            subagent_provider: Some(CompactString::new("anthropic")),
+            subagent_model: Some(CompactString::new("claude-sonnet-4-6")),
+            ..Default::default()
+        };
+        assert_eq!(
+            subagent_target_from_main(&cfg, "openai-codex", "gpt-5.5"),
+            ("anthropic".to_string(), "claude-sonnet-4-6".to_string())
+        );
+    }
 }
