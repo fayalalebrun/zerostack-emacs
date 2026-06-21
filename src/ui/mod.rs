@@ -22,7 +22,6 @@ use crossterm::style::Color;
 use tokio::sync::mpsc;
 
 use crate::cli::Cli;
-use crate::config;
 use crate::config::Config;
 use crate::context::ContextFiles;
 use crate::event::{AgentEvent, UserEvent};
@@ -764,13 +763,23 @@ pub async fn run_interactive(
     if let Some(editor) = &cfg.editor {
         input.set_editor(editor.clone());
     }
-    input.set_quick_model_names(config::quick_models_map(cfg).into_keys().collect());
+    input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
+        cfg,
+        &session.provider,
+    ));
     {
         // fixed built-in providers plus any custom gateways from config
-        let mut providers: Vec<String> = ["anthropic", "openai", "gemini", "openrouter", "ollama"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut providers: Vec<String> = [
+            "anthropic",
+            "openai",
+            "openai-codex",
+            "gemini",
+            "openrouter",
+            "ollama",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         providers.extend(cfg.custom_providers_map().keys().cloned());
         input.set_provider_names(providers);
     }
@@ -871,6 +880,9 @@ pub async fn run_interactive(
         let provider = session.provider.to_string();
         let is_custom = cfg.custom_providers_map().contains_key(&provider);
         let ids = crate::ui::slash::warm_model_cache(&provider, is_custom, &client, cli, cfg).await;
+        input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
+            cfg, &provider,
+        ));
         input.set_live_model_names(ids);
     }
 
@@ -1716,6 +1728,9 @@ pub async fn run_interactive(
                                     let provider = session.provider.to_string();
                                     let is_custom = cfg.custom_providers_map().contains_key(&provider);
                                     let ids = crate::ui::slash::warm_model_cache(&provider, is_custom, &client, cli, cfg).await;
+                                    input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
+                                        cfg, &provider,
+                                    ));
                                     input.set_live_model_names(ids);
                                 }
                                 match result {

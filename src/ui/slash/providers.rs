@@ -121,13 +121,6 @@ async fn apply_model(ctx: &mut SlashCtx<'_>, model_id: &str) {
             ctx.ask_tx.clone(),
             ctx.sandbox.clone(),
             *ctx.reasoning_enabled,
-            crate::config::resolve_reasoning_effort(
-                ctx.cli,
-                ctx.cfg,
-                &ctx.session.provider,
-                &new_model,
-            )
-            .as_deref(),
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]
@@ -170,7 +163,7 @@ async fn sync_subagent_with_main(ctx: &mut SlashCtx<'_>) {
     );
 
     if provider == ctx.client.provider_name() {
-        subagents::set_client_and_model(ctx.client.clone(), provider, model);
+        subagents::set_client_and_model(ctx.client.clone(), model);
         return;
     }
 
@@ -179,9 +172,8 @@ async fn sync_subagent_with_main(ctx: &mut SlashCtx<'_>) {
         ctx.cli.api_key.as_deref(),
         &ctx.cfg.custom_providers_map(),
         ctx.cfg.api_keys.as_ref(),
-        None,
     ) {
-        Ok(client) => subagents::set_client_and_model(client, provider, model),
+        Ok(client) => subagents::set_client_and_model(client, model),
         Err(e) => tracing::warn!(
             "Could not propagate main model to subagent provider '{}' ({}); keeping previous subagent config",
             provider,
@@ -248,34 +240,7 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
         );
         return Ok(());
     }
-    let new_model = compact_str::CompactString::new(parts[1].trim());
-    let model = ctx.client.completion_model(new_model.to_string());
-    let temperature = crate::config::resolve_temperature(ctx.cli, ctx.cfg, &new_model);
-    let extra_body = crate::config::resolve_extra_body(ctx.cfg, &new_model);
-    *ctx.agent = Some(
-        crate::provider::build_agent(
-            model,
-            ctx.cli,
-            ctx.cfg,
-            ctx.context,
-            ctx.permission.clone(),
-            ctx.ask_tx.clone(),
-            ctx.sandbox.clone(),
-            *ctx.reasoning_enabled,
-            temperature,
-            extra_body,
-            #[cfg(feature = "mcp")]
-            ctx.mcp_manager,
-        )
-        .await,
-    );
-    ctx.session.model = new_model.clone();
-    ctx.session.provider = ctx.cli.resolve_provider(ctx.cfg);
-    ctx.session.update_context_window(
-        ctx.cfg
-            .resolve_context_window(&ctx.session.provider, &new_model),
-    );
-    write_ok(ctx.renderer, format!("switched to model: {}", new_model));
+    apply_model(ctx, parts[1].trim()).await
     Ok(())
 }
 
@@ -453,7 +418,7 @@ async fn handle_model_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow
 
     if parts.len() < 2 {
         let (provider_name, model_name) =
-            subagents::with_config(|cfg| (cfg.provider_name.clone(), cfg.model_name.clone()));
+            subagents::with_config(|cfg| (cfg.client.provider_name(), cfg.model_name.clone()));
         write_ok(
             ctx.renderer,
             format!("current subagent model: {} / {}", provider_name, model_name),
@@ -521,15 +486,10 @@ async fn handle_models_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyho
                 ctx.cli.api_key.as_deref(),
                 &ctx.cfg.custom_providers_map(),
                 ctx.cfg.api_keys.as_ref(),
-                Some(ctx.session.id.as_str()),
             )?;
             let model = new_client.completion_model(q.model.to_string());
             model_for_subagent(ctx, model).await?;
-            subagents::set_client_and_model(
-                new_client,
-                q.provider.to_string(),
-                q.model.to_string(),
-            );
+            subagents::set_client_and_model(new_client, q.model.to_string());
         } else {
             let model = ctx.client.completion_model(q.model.to_string());
             model_for_subagent(ctx, model).await?;
@@ -591,7 +551,6 @@ mod tests {
                 output_token_cost: 0.0,
                 reserve_tokens: None,
                 temperature: None,
-                reasoning_effort: None,
             },
         );
         quick.insert(
@@ -603,7 +562,6 @@ mod tests {
                 output_token_cost: 0.0,
                 reserve_tokens: None,
                 temperature: None,
-                reasoning_effort: None,
             },
         );
         let cfg = Config {
