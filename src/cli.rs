@@ -274,6 +274,32 @@ pub enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    #[command(about = "Inspect or update configuration defaults")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigCommand {
+    #[command(about = "List configured provider names")]
+    Providers,
+    #[command(about = "List known model ids for a provider")]
+    Models {
+        #[arg(help = "Provider name; defaults to the configured provider")]
+        provider: Option<String>,
+    },
+    #[command(about = "Persist the default provider and reset model to its default")]
+    SetProvider {
+        #[arg(help = "Provider name")]
+        provider: String,
+    },
+    #[command(about = "Persist the default model for the current default provider")]
+    SetModel {
+        #[arg(help = "Model id")]
+        model: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
