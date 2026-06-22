@@ -1,5 +1,78 @@
 use compact_str::CompactString;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+impl From<rig::completion::Usage> for TokenUsage {
+    fn from(usage: rig::completion::Usage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        }
+    }
+}
+
+impl TokenUsage {
+    pub fn billable_input_tokens(self) -> u64 {
+        self.input_tokens
+    }
+
+    pub fn billable_output_tokens(self) -> u64 {
+        self.output_tokens
+    }
+}
+
+impl std::ops::AddAssign for TokenUsage {
+    fn add_assign(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenUsage;
+
+    #[test]
+    fn billable_input_uses_provider_reported_input_tokens() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 30,
+            cache_creation_input_tokens: 20,
+            ..Default::default()
+        };
+
+        assert_eq!(usage.billable_input_tokens(), 100);
+    }
+
+    #[test]
+    fn billable_output_uses_provider_reported_output_tokens() {
+        let usage = TokenUsage {
+            output_tokens: 40,
+            reasoning_tokens: 15,
+            ..Default::default()
+        };
+
+        assert_eq!(usage.billable_output_tokens(), 40);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Token(CompactString),
@@ -22,17 +95,12 @@ pub enum AgentEvent {
     /// status-bar estimate and to drive mid-turn compaction decisions
     /// independently of the local `len()/4` heuristic.
     CompletionCall {
-        input_tokens: u64,
-        output_tokens: u64,
-        cached_input_tokens: u64,
-        cache_creation_input_tokens: u64,
+        call_index: usize,
+        usage: TokenUsage,
     },
     Done {
         response: CompactString,
-        input_tokens: u64,
-        output_tokens: u64,
-        cached_input_tokens: u64,
-        cache_creation_input_tokens: u64,
+        usage: TokenUsage,
     },
 }
 
@@ -45,8 +113,7 @@ pub enum BtwEvent {
     Done {
         id: u32,
         response: CompactString,
-        input_tokens: u64,
-        output_tokens: u64,
+        usage: TokenUsage,
     },
     Error {
         id: u32,

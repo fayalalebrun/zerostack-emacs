@@ -2087,14 +2087,10 @@ mod imp {
                         )
                         .await;
                 }
-                AgentEvent::CompletionCall {
-                    call_index,
-                    input_tokens,
-                    output_tokens,
-                } => {
+                AgentEvent::CompletionCall { call_index, usage } => {
                     let (tokens, context_window) = {
                         let mut session = server.session.lock().await;
-                        let real = input_tokens.saturating_add(output_tokens);
+                        let real = usage.input_tokens.saturating_add(usage.output_tokens);
                         if real > session.total_estimated_tokens {
                             session.total_estimated_tokens = real;
                         }
@@ -2105,16 +2101,12 @@ mod imp {
                             "completion-call",
                             format!(
                                 " :turn {} :call-index {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
-                                turn, call_index, input_tokens, output_tokens, tokens, context_window,
+                                turn, call_index, usage.input_tokens, usage.output_tokens, tokens, context_window,
                             ),
                         )
                         .await;
                 }
-                AgentEvent::Done {
-                    response,
-                    input_tokens,
-                    output_tokens,
-                } => {
+                AgentEvent::Done { response, usage } => {
                     let cols = server.mutable.lock().await.cols;
                     let start = match response_start_line {
                         Some(start) => start,
@@ -2127,24 +2119,33 @@ mod imp {
                     server
                         .send_render_event("assistant-render", turn, start, lines)
                         .await;
-                    let (tokens, context_window) = {
+                    let (tokens, context_window, billable_input_tokens, billable_output_tokens) = {
                         let mut session = server.session.lock().await;
                         session.add_message(MessageRole::Assistant, &response);
-                        session.total_input_tokens =
-                            session.total_input_tokens.saturating_add(input_tokens);
-                        session.total_output_tokens =
-                            session.total_output_tokens.saturating_add(output_tokens);
+                        let billable_input_tokens = usage.billable_input_tokens();
+                        let billable_output_tokens = usage.billable_output_tokens();
+                        session.total_input_tokens = session
+                            .total_input_tokens
+                            .saturating_add(billable_input_tokens);
+                        session.total_output_tokens = session
+                            .total_output_tokens
+                            .saturating_add(billable_output_tokens);
                         session.total_cost += crate::pricing::estimate_cost(
-                            input_tokens,
-                            output_tokens,
+                            billable_input_tokens,
+                            billable_output_tokens,
                             session.input_token_cost,
                             session.output_token_cost,
                         );
-                        session.set_calibration(input_tokens, output_tokens);
+                        session.set_calibration(usage.input_tokens, usage.output_tokens);
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
-                        (session.effective_context_tokens(), session.context_window)
+                        (
+                            session.effective_context_tokens(),
+                            session.context_window,
+                            billable_input_tokens,
+                            billable_output_tokens,
+                        )
                     };
                     server.update_meta_from_session().await;
                     server
@@ -2152,7 +2153,7 @@ mod imp {
                             "done",
                             format!(
                                 " :turn {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
-                                turn, input_tokens, output_tokens, tokens, context_window,
+                                turn, billable_input_tokens, billable_output_tokens, tokens, context_window,
                             ),
                         )
                         .await;

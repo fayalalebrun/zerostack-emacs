@@ -2109,12 +2109,7 @@ pub async fn run_interactive(
                 let loop_running = loop_state.as_ref().is_some_and(|ls| ls.active);
                 #[cfg(not(feature = "loop"))]
                 let loop_running = false;
-                if let AgentEvent::CompletionCall {
-                    input_tokens,
-                    cached_input_tokens,
-                    cache_creation_input_tokens,
-                    ..
-                } = &event
+                if let AgentEvent::CompletionCall { usage, .. } = &event
                     && is_running
                     && !loop_running
                     && !cli.no_session
@@ -2122,16 +2117,8 @@ pub async fn run_interactive(
                     && session.context_window > 0
                     && let Some(threshold) = cfg.resolve_mid_turn_compact_threshold()
                 {
-                    // Use the cache-inclusive prompt size so Anthropic cache hits
-                    // (input_tokens excludes cached/cache-creation) don't understate
-                    // real context pressure and suppress mid-turn compaction.
-                    let real_input_tokens = crate::session::Session::real_input_tokens(
-                        cfg.is_anthropic_native(&session.provider),
-                        *input_tokens,
-                        *cached_input_tokens,
-                        *cache_creation_input_tokens,
-                    );
-                    let pressure = real_input_tokens as f64 / session.context_window as f64;
+                    let input_tokens = usage.input_tokens;
+                    let pressure = input_tokens as f64 / session.context_window as f64;
                     if pressure > threshold {
                         if awaiting_compaction_relief {
                             // We already compacted this turn and the very next
@@ -2139,7 +2126,7 @@ pub async fn run_interactive(
                             // exceeds the budget, so compacting again is futile.
                             // Stop the turn and show the user the arithmetic.
                             stop_turn_context_exhausted(
-                                real_input_tokens, threshold, &mut renderer, session, cfg,
+                                input_tokens, threshold, &mut renderer, session, cfg,
                                 &mut agent_rx, &mut main_abort, &mut is_running,
                                 &status_signals, &mut turn_trace, &mut response_buf,
                                 &mut response_start_line, &mut agent_line_started,
@@ -2276,13 +2263,15 @@ pub async fn run_interactive(
                 // Parallel side-question result. Rendered as a single block; it is
                 // NEVER written to the session (cost is tracked separately).
                 match bev {
-                    crate::event::BtwEvent::Done { id, response, input_tokens, output_tokens } => {
+                    crate::event::BtwEvent::Done { id, response, usage } => {
+                        let billable_input_tokens = usage.billable_input_tokens();
+                        let billable_output_tokens = usage.billable_output_tokens();
                         btw_total_cost += crate::pricing::estimate_cost(
-                            input_tokens, output_tokens,
+                            billable_input_tokens, billable_output_tokens,
                             session.input_token_cost, session.output_token_cost,
                         );
-                        btw_total_in = btw_total_in.saturating_add(input_tokens);
-                        btw_total_out = btw_total_out.saturating_add(output_tokens);
+                        btw_total_in = btw_total_in.saturating_add(billable_input_tokens);
+                        btw_total_out = btw_total_out.saturating_add(billable_output_tokens);
                         btw_abort.retain(|(i, _)| *i != id);
                         btw_inflight = btw_inflight.saturating_sub(1);
                         renderer.write_line(&format!("[btw #{}] answer:", id), C_BTW)?;

@@ -275,19 +275,10 @@ pub async fn handle_agent_event(
                 }
             }
         }
-        AgentEvent::Done {
-            response,
-            input_tokens,
-            output_tokens,
-            cached_input_tokens,
-            cache_creation_input_tokens,
-        } => {
+        AgentEvent::Done { response, usage } => {
             handle_agent_done(
                 response,
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-                cache_creation_input_tokens,
+                usage,
                 renderer,
                 session,
                 cfg,
@@ -315,25 +306,8 @@ pub async fn handle_agent_event(
             )
             .await?;
         }
-        AgentEvent::CompletionCall {
-            input_tokens,
-            output_tokens,
-            cached_input_tokens,
-            cache_creation_input_tokens,
-        } => {
-            // Real provider-reported usage for the call that just finished.
-            // The local len()/4 heuristic in session.total_estimated_tokens
-            // undercounts code-heavy turns; trust the real number as a floor
-            // so the status bar's x/y/% reflects what the provider actually saw.
-            // Use the cache-inclusive prompt size so Anthropic cache hits (which
-            // report input_tokens excluding cached tokens) don't deflate it.
-            let real = Session::real_input_tokens(
-                cfg.is_anthropic_native(&session.provider),
-                input_tokens,
-                cached_input_tokens,
-                cache_creation_input_tokens,
-            )
-            .saturating_add(output_tokens);
+        AgentEvent::CompletionCall { call_index: _, usage } => {
+            let real = usage.context_tokens();
             if real > session.total_estimated_tokens {
                 session.total_estimated_tokens = real;
             }
@@ -372,10 +346,7 @@ fn save_session_if_enabled(
 #[allow(clippy::too_many_arguments)]
 async fn handle_agent_done(
     response: CompactString,
-    input_tokens: u64,
-    output_tokens: u64,
-    cached_input_tokens: u64,
-    cache_creation_input_tokens: u64,
+    usage: crate::event::TokenUsage,
     renderer: &mut Renderer,
     session: &mut Session,
     cfg: &Config,
@@ -417,13 +388,18 @@ async fn handle_agent_done(
     renderer.write_line("", Color::White)?;
     renderer.write_line("", Color::White)?;
     session.add_message(MessageRole::Assistant, &response);
-    // Cost tracking uses the raw reported `input_tokens` (for Anthropic this is
-    // the billed uncached portion; cache reads are billed separately/cheaper).
-    session.total_input_tokens = session.total_input_tokens.saturating_add(input_tokens);
-    session.total_output_tokens = session.total_output_tokens.saturating_add(output_tokens);
+    let billable_input_tokens = usage.billable_input_tokens();
+    let billable_output_tokens = usage.billable_output_tokens();
+    session.total_input_tokens = session
+        .total_input_tokens
+        .saturating_add(billable_input_tokens);
+    session.total_output_tokens = session
+        .total_output_tokens
+        .saturating_add(billable_output_tokens);
+
     session.total_cost += crate::pricing::estimate_cost(
-        input_tokens,
-        output_tokens,
+        billable_input_tokens,
+        billable_output_tokens,
         session.input_token_cost,
         session.output_token_cost,
     );
@@ -432,13 +408,7 @@ async fn handle_agent_done(
     // (Anthropic reports input_tokens excluding cached/cache-creation tokens,
     // which would otherwise collapse the context meter to ~0 on cache hits).
     // Must come after add_message so the anchor includes the just-appended response.
-    let context_input_tokens = Session::real_input_tokens(
-        cfg.is_anthropic_native(&session.provider),
-        input_tokens,
-        cached_input_tokens,
-        cache_creation_input_tokens,
-    );
-    session.set_calibration(context_input_tokens, output_tokens);
+    session.set_calibration(usage.input_tokens, usage.output_tokens);
     *agent_line_started = false;
     response_buf.clear();
     *response_start_line = None;

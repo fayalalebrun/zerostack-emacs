@@ -825,8 +825,11 @@ impl AnyAgent {
                         .send(crate::event::BtwEvent::Done {
                             id,
                             response: CompactString::new(prompt),
-                            input_tokens: 1,
-                            output_tokens: 1,
+                            usage: crate::event::TokenUsage {
+                                input_tokens: 1,
+                                output_tokens: 1,
+                                ..Default::default()
+                            },
                         })
                         .await;
                 });
@@ -1259,8 +1262,11 @@ impl TestAgent {
             let _ = event_tx
                 .send(AgentEvent::Done {
                     response: CompactString::new(format!("received {prompt}")),
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    usage: crate::event::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
                 })
                 .await;
         });

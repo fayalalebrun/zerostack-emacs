@@ -10,7 +10,7 @@ use rig::message::ToolResultContent;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use tokio::sync::mpsc;
 
-use crate::event::{AgentEvent, BtwEvent};
+use crate::event::{AgentEvent, BtwEvent, TokenUsage};
 use crate::session::{MessageRole, Session};
 
 pub struct AgentRunner {
@@ -80,8 +80,7 @@ where
                         .send(BtwEvent::Done {
                             id,
                             response,
-                            input_tokens: usage.input_tokens,
-                            output_tokens: usage.output_tokens,
+                            usage: usage.into(),
                         })
                         .await;
                     return;
@@ -286,6 +285,7 @@ where
         let retry_history: Vec<Message> = history.clone();
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
+        let mut usage_total = TokenUsage::default();
 
         let mut stream = agent.stream_chat(prompt, history).await;
 
@@ -343,29 +343,58 @@ where
                         let usage = res.usage();
 
                         if !response_text.is_empty() {
+                            let usage = if usage_total == TokenUsage::default() {
+                                usage.into()
+                            } else {
+                                usage_total
+                            };
                             let _ = event_tx
                                 .send(AgentEvent::Done {
                                     response: CompactString::from(response_text),
-                                    input_tokens: usage.input_tokens,
-                                    output_tokens: usage.output_tokens,
-                                    cached_input_tokens: usage.cached_input_tokens,
-                                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                                    usage,
                                 })
                                 .await;
                             return;
                         }
                         break;
                     }
+                        if let Some(usage) = call.usage {
+                            let usage = TokenUsage::from(usage);
+                            usage_total += usage;
+                            let _ = event_tx
+                                .send(AgentEvent::CompletionCall {
+                                    call_index: call.call_index,
+                                    usage,
+                                })
+                                .await;
+                        }
+>>>>>>> 0ac01d0 (Fix Codex token usage accounting)
+                    }
+=======
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                        let usage = call.usage;
-                        let _ = event_tx
-                            .send(AgentEvent::CompletionCall {
-                                input_tokens: usage.input_tokens,
-                                output_tokens: usage.output_tokens,
-                                cached_input_tokens: usage.cached_input_tokens,
-                                cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                            })
-                            .await;
+                        if let Some(usage) = call.usage {
+                            let usage = TokenUsage::from(usage);
+                            usage_total += usage;
+                            let _ = event_tx
+                                .send(AgentEvent::CompletionCall {
+                                    call_index: call.call_index,
+                                    usage,
+                                })
+                                .await;
+                        }
+                    }
+=======
+                        if let Some(usage) = call.usage {
+                            let usage = TokenUsage::from(usage);
+                            usage_total += usage;
+                            let _ = event_tx
+                                .send(AgentEvent::CompletionCall {
+                                    call_index: call.call_index,
+                                    usage,
+                                })
+                                .await;
+                        }
+>>>>>>> 0ac01d0 (Fix Codex token usage accounting)
                     }
                     Err(e) => {
                         let _ = event_tx
