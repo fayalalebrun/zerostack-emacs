@@ -6,7 +6,10 @@ mod imp {
 
     use anyhow::Context as _;
     use compact_str::CompactString;
-    use crossterm::style::Color;
+    use pulldown_cmark::{
+        Alignment as MdAlignment, Event as MdEvent, Options as MdOptions, Parser as MdParser,
+        Tag as MdTag, TagEnd as MdTagEnd,
+    };
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -26,7 +29,8 @@ mod imp {
     use crate::sandbox::Sandbox;
     use crate::session::{MessageRole, PermissionAllowEntry, Session};
     use crate::ui::events::{format_time, sanitize_output};
-    use crate::ui::utils::{format_tool_call_summary, suggest_pattern};
+    use crate::ui::markdown::word_wrap;
+    use crate::ui::utils::{display_width, format_tool_call_summary, suggest_pattern};
 
     const PROTOCOL_VERSION: u32 = 1;
     const DEFAULT_COLS: usize = 100;
@@ -43,8 +47,16 @@ mod imp {
         pub created_at: String,
         pub updated_at: String,
         pub title: String,
+        pub tokens: u64,
+        pub context_window: u64,
         pub protocol: u32,
         pub socket: String,
+        #[serde(default = "default_thinking_level")]
+        pub thinking: String,
+    }
+
+    fn default_thinking_level() -> String {
+        "on".to_string()
     }
 
     struct Registration {
@@ -62,6 +74,8 @@ mod imp {
         ask_tx: Option<AskSender>,
         sandbox: Sandbox,
         status_signals: Option<StatusSignals>,
+        #[cfg(feature = "mcp")]
+        mcp_manager: Mutex<Option<crate::extras::mcp::McpClientManager>>,
         events: broadcast::Sender<String>,
         mutable: Mutex<MutableState>,
         session_id: String,
@@ -74,6 +88,7 @@ mod imp {
         cols: usize,
         line_count: usize,
         running: bool,
+        reasoning_enabled: bool,
         abort_handle: Option<tokio::task::AbortHandle>,
         turn: u64,
         #[cfg(feature = "loop")]
@@ -146,9 +161,16 @@ mod imp {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    struct WireSpan {
+        text: String,
+        face: &'static str,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct WireLine {
         text: String,
         face: &'static str,
+        spans: Vec<WireSpan>,
         artifact: Option<ArtifactInfo>,
         latex: Vec<LatexInfo>,
     }
@@ -158,6 +180,7 @@ mod imp {
             Self {
                 text: text.into(),
                 face,
+                spans: Vec::new(),
                 artifact: None,
                 latex: Vec::new(),
             }
@@ -171,7 +194,19 @@ mod imp {
             Self {
                 text: text.into(),
                 face,
+                spans: Vec::new(),
                 artifact: Some(artifact),
+                latex: Vec::new(),
+            }
+        }
+
+        fn with_spans(spans: Vec<WireSpan>, face: &'static str) -> Self {
+            let text = spans.iter().map(|span| span.text.as_str()).collect();
+            Self {
+                text,
+                face,
+                spans,
+                artifact: None,
                 latex: Vec::new(),
             }
         }
@@ -232,12 +267,15 @@ mod imp {
             ask_tx,
             sandbox,
             status_signals,
+            #[cfg(feature = "mcp")]
+            mcp_manager: Mutex::new(None),
             events,
             mutable: Mutex::new(MutableState {
                 seq: 0,
                 cols: DEFAULT_COLS,
                 line_count: initial_line_count,
                 running: false,
+                reasoning_enabled: true,
                 abort_handle: None,
                 turn: 0,
                 #[cfg(feature = "loop")]
@@ -344,8 +382,11 @@ mod imp {
                 created_at: session.created_at.to_string(),
                 updated_at: session.updated_at.to_string(),
                 title: session_title(session),
+                tokens: session.effective_context_tokens(),
+                context_window: session.context_window,
                 protocol: PROTOCOL_VERSION,
                 socket: socket_path.to_string_lossy().to_string(),
+                thinking: "on".to_string(),
             }
         }
     }
@@ -563,6 +604,8 @@ mod imp {
             "compact" => handle_compact(&server, &cmd, out).await,
             "provider" => handle_provider(&server, &cmd, out).await,
             "model" => handle_model(&server, &cmd, out).await,
+            "mcp" => handle_mcp(&server, &cmd, out).await,
+            "thinking" | "reasoning" => handle_thinking(&server, &cmd, out).await,
             "loop-start" => handle_loop_start(server.clone(), &cmd, out).await,
             "loop-stop" => handle_loop_stop(&server, &cmd, out).await,
             "loop-status" => handle_loop_status(&server, &cmd, out).await,
@@ -779,6 +822,119 @@ mod imp {
         )
         .await;
         Ok(())
+    }
+
+    async fn handle_thinking(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        ensure_idle_for_switch(server, "thinking").await?;
+        let level = string_arg(cmd, "level")
+            .or_else(|| atom_arg(cmd, "level"))
+            .unwrap_or_else(|| "toggle".to_string());
+        let enabled = match level.as_str() {
+            "on" | "true" | "t" | "enabled" => true,
+            "off" | "false" | "nil" | "disabled" => false,
+            "toggle" => !server.mutable.lock().await.reasoning_enabled,
+            other => anyhow::bail!("unknown thinking level '{}'; use on or off", other),
+        };
+        server.mutable.lock().await.reasoning_enabled = enabled;
+        let label = thinking_label(enabled);
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :thinking {} :message {}",
+                sexp_quote(label),
+                sexp_quote(&format!("thinking: {label}")),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn handle_mcp(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        #[cfg(not(feature = "mcp"))]
+        {
+            send_ok(
+                out,
+                request_arg(cmd),
+                format!(" :message {}", sexp_quote("MCP support not enabled")),
+            )
+            .await;
+            return Ok(());
+        }
+
+        #[cfg(feature = "mcp")]
+        {
+            let Some(configs) = server.cfg.mcp_servers.as_ref() else {
+                send_ok(
+                    out,
+                    request_arg(cmd),
+                    format!(" :message {}", sexp_quote("no MCP servers configured")),
+                )
+                .await;
+                return Ok(());
+            };
+            if configs.is_empty() {
+                send_ok(
+                    out,
+                    request_arg(cmd),
+                    format!(" :message {}", sexp_quote("no MCP servers configured")),
+                )
+                .await;
+                return Ok(());
+            }
+
+            let mut guard = server.mcp_manager.lock().await;
+            if guard.is_none() {
+                *guard = Some(crate::extras::mcp::McpClientManager::connect_all(configs).await);
+            }
+            let Some(manager) = guard.as_ref() else {
+                return Ok(());
+            };
+            if manager.handles.is_empty() {
+                send_ok(
+                    out,
+                    request_arg(cmd),
+                    format!(" :message {}", sexp_quote("no MCP servers connected")),
+                )
+                .await;
+                return Ok(());
+            }
+
+            let mut lines = vec!["MCP servers:".to_string()];
+            for handle in &manager.handles {
+                match handle.list_tools().await {
+                    Ok(tools) => {
+                        lines.push(format!("{}: {} tool(s)", handle.server_name, tools.len()));
+                        for tool in tools {
+                            let description = tool.description.unwrap_or_default();
+                            if description.is_empty() {
+                                lines.push(format!("  - {}", tool.name));
+                            } else {
+                                lines.push(format!("  - {} — {}", tool.name, description));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        lines.push(format!("{}: failed to list tools: {e}", handle.server_name))
+                    }
+                }
+            }
+            send_ok(
+                out,
+                request_arg(cmd),
+                format!(" :message {}", sexp_quote(&lines.join("\n"))),
+            )
+            .await;
+            Ok(())
+        }
     }
 
     async fn handle_model(
@@ -1301,21 +1457,51 @@ mod imp {
         cmd: &Command,
         out: &mpsc::Sender<String>,
     ) -> anyhow::Result<()> {
-        if server.mutable.lock().await.running {
-            anyhow::bail!("cannot compact while an agent turn is running");
+        let turn = {
+            let mut mutable = server.mutable.lock().await;
+            if mutable.running {
+                anyhow::bail!("cannot compact while an agent turn is running");
+            }
+            mutable.running = true;
+            mutable.turn = mutable.turn.saturating_add(1);
+            mutable.turn
+        };
+        if let Some(ss) = server.status_signals.as_ref() {
+            ss.send_start();
         }
+        server
+            .broadcast_event("compact-started", format!(" :turn {}", turn))
+            .await;
 
         let instructions = string_arg(cmd, "instructions");
-        let outcome = compact_session(server, instructions.as_deref()).await?;
+        let outcome = compact_session(server, instructions.as_deref()).await;
+        {
+            let mut mutable = server.mutable.lock().await;
+            if mutable.turn == turn {
+                mutable.running = false;
+            }
+        }
+        if let Some(ss) = server.status_signals.as_ref() {
+            ss.send_stop();
+        }
+
+        if outcome.is_err() {
+            server
+                .broadcast_event("compact-done", format!(" :turn {}", turn))
+                .await;
+        }
+        let outcome = outcome?;
         let cols = server.mutable.lock().await.cols;
         let lines = {
             let session = server.session.lock().await;
             let context = server.context.lock().await;
             render_session_lines(&session, &server.cli, &server.cfg, &context, cols)
         };
-        let turn = server.mutable.lock().await.turn;
         server
             .send_render_event("session-render", turn, 0, lines)
+            .await;
+        server
+            .broadcast_event("compact-done", format!(" :turn {}", turn))
             .await;
 
         send_ok(out, request_arg(cmd), compact_outcome_fields(&outcome)).await;
@@ -1531,10 +1717,11 @@ mod imp {
         cmd: &Command,
         out: &mpsc::Sender<String>,
     ) -> anyhow::Result<()> {
-        let meta = {
+        let mut meta = {
             let session = server.session.lock().await;
             SessionMeta::from_session(&session, &server.socket_path)
         };
+        meta.thinking = thinking_label(server.mutable.lock().await.reasoning_enabled).to_string();
         out.send(format!(
             "(status :request {} :session {})",
             request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
@@ -1666,6 +1853,18 @@ mod imp {
             let session = server.session.lock().await;
             config::resolve_temperature(&server.cli, &server.cfg, &session.model)
         };
+        #[cfg(feature = "mcp")]
+        let mut mcp_guard = server.mcp_manager.lock().await;
+        #[cfg(feature = "mcp")]
+        if mcp_guard.is_none() {
+            if let Some(configs) = server.cfg.mcp_servers.as_ref() {
+                if !configs.is_empty() {
+                    *mcp_guard =
+                        Some(crate::extras::mcp::McpClientManager::connect_all(configs).await);
+                }
+            }
+        }
+        let reasoning_enabled = server.mutable.lock().await.reasoning_enabled;
         let context = server.context.lock().await;
         let agent = build_agent(
             model,
@@ -1675,10 +1874,10 @@ mod imp {
             server.permission.clone(),
             server.ask_tx.clone(),
             server.sandbox.clone(),
-            true,
+            reasoning_enabled,
             temperature,
             #[cfg(feature = "mcp")]
-            None,
+            mcp_guard.as_ref(),
         )
         .await;
         drop(context);
@@ -1869,19 +2068,20 @@ mod imp {
                     input_tokens,
                     output_tokens,
                 } => {
-                    {
+                    let (tokens, context_window) = {
                         let mut session = server.session.lock().await;
                         let real = input_tokens.saturating_add(output_tokens);
                         if real > session.total_estimated_tokens {
                             session.total_estimated_tokens = real;
                         }
-                    }
+                        (session.effective_context_tokens(), session.context_window)
+                    };
                     server
                         .broadcast_event(
                             "completion-call",
                             format!(
-                                " :turn {} :call-index {} :input-tokens {} :output-tokens {}",
-                                turn, call_index, input_tokens, output_tokens,
+                                " :turn {} :call-index {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
+                                turn, call_index, input_tokens, output_tokens, tokens, context_window,
                             ),
                         )
                         .await;
@@ -1903,7 +2103,7 @@ mod imp {
                     server
                         .send_render_event("assistant-render", turn, start, lines)
                         .await;
-                    {
+                    let (tokens, context_window) = {
                         let mut session = server.session.lock().await;
                         session.add_message(MessageRole::Assistant, &response);
                         session.total_input_tokens =
@@ -1920,14 +2120,15 @@ mod imp {
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
-                    }
+                        (session.effective_context_tokens(), session.context_window)
+                    };
                     server.update_meta_from_session().await;
                     server
                         .broadcast_event(
                             "done",
                             format!(
-                                " :turn {} :input-tokens {} :output-tokens {}",
-                                turn, input_tokens, output_tokens,
+                                " :turn {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
+                                turn, input_tokens, output_tokens, tokens, context_window,
                             ),
                         )
                         .await;
@@ -1957,7 +2158,11 @@ mod imp {
             }
         }
 
-        if server.mutable.lock().await.running {
+        let should_report = {
+            let mutable = server.mutable.lock().await;
+            should_report_agent_ended(&mutable, turn)
+        };
+        if should_report {
             server
                 .broadcast_event(
                     "error",
@@ -1970,6 +2175,10 @@ mod imp {
                 .await;
         }
         Ok(None)
+    }
+
+    fn should_report_agent_ended(mutable: &MutableState, turn: u64) -> bool {
+        mutable.running && mutable.turn == turn
     }
 
     #[cfg(feature = "loop")]
@@ -2200,23 +2409,438 @@ mod imp {
     }
 
     fn render_assistant_lines(text: &str, cols: usize, trailing_blank: bool) -> Vec<WireLine> {
-        let mut styled = crate::ui::markdown::markdown_to_styled(text, cols);
-        if styled.is_empty() {
-            styled.push(crate::ui::renderer::LineEntry {
-                text: CompactString::new("< "),
-                color: Color::White,
-            });
-        } else {
-            styled[0].text = CompactString::from(format!("< {}", styled[0].text));
+        let mut out = markdown_to_wire_lines(text, cols);
+        if out.is_empty() {
+            out.push(WireLine::new("< ", "zs-normal"));
+        } else if let Some(first) = out.first_mut() {
+            first.text.insert_str(0, "< ");
+            if first.spans.is_empty() {
+                first.spans.push(WireSpan {
+                    text: first.text.clone(),
+                    face: first.face,
+                });
+            } else {
+                first.spans.insert(
+                    0,
+                    WireSpan {
+                        text: "< ".to_string(),
+                        face: "zs-normal",
+                    },
+                );
+            }
         }
-        let mut out = styled
-            .into_iter()
-            .map(|entry| WireLine::new(entry.text.to_string(), face_for_color(entry.color)))
-            .collect::<Vec<_>>();
         if trailing_blank {
             out.push(blank_line());
         }
         out
+    }
+
+    fn markdown_to_wire_lines(text: &str, cols: usize) -> Vec<WireLine> {
+        let options = MdOptions::ENABLE_STRIKETHROUGH
+            | MdOptions::ENABLE_TABLES
+            | MdOptions::ENABLE_TASKLISTS;
+        let parser = MdParser::new_ext(text, options);
+        let mut out = Vec::new();
+        let mut line = SpanLine::new("zs-normal");
+        let mut faces = vec!["zs-normal"];
+        let mut list_stack: Vec<Option<u64>> = Vec::new();
+        let mut in_code_block = false;
+        let mut in_table = false;
+        let mut table_alignments: Vec<MdAlignment> = Vec::new();
+        let mut table_rows: Vec<Vec<String>> = Vec::new();
+        let mut table_row: Vec<String> = Vec::new();
+        let mut table_cell = String::new();
+
+        for event in parser {
+            match event {
+                MdEvent::Start(tag) => match tag {
+                    MdTag::Paragraph => {}
+                    MdTag::Heading { .. } => {
+                        line.flush(&mut out, cols);
+                        line.face = "zs-heading";
+                        faces.push("zs-heading");
+                    }
+                    MdTag::CodeBlock(_) => {
+                        line.flush(&mut out, cols);
+                        line.face = "zs-code-block";
+                        faces.push("zs-code-block");
+                        in_code_block = true;
+                    }
+                    MdTag::BlockQuote(_) => {
+                        line.flush(&mut out, cols);
+                        line.face = "zs-quote";
+                        faces.push("zs-quote");
+                        line.push("│ ", "zs-quote");
+                    }
+                    MdTag::List(start) => list_stack.push(start),
+                    MdTag::Item => {
+                        line.flush(&mut out, cols);
+                        let marker = match list_stack.last_mut().and_then(Option::as_mut) {
+                            Some(n) => {
+                                let current = *n;
+                                *n = n.saturating_add(1);
+                                format!("{current}. ")
+                            }
+                            None => "• ".to_string(),
+                        };
+                        line.push(&marker, "zs-list-marker");
+                    }
+                    MdTag::Emphasis => faces.push("zs-italic"),
+                    MdTag::Strong => faces.push("zs-bold"),
+                    MdTag::Link { .. } => faces.push("zs-link"),
+                    MdTag::Table(alignments) => {
+                        line.flush(&mut out, cols);
+                        in_table = true;
+                        table_alignments = alignments;
+                        table_rows.clear();
+                    }
+                    MdTag::TableHead | MdTag::TableRow if in_table => {
+                        table_row.clear();
+                    }
+                    MdTag::TableCell if in_table => {
+                        table_cell.clear();
+                    }
+                    MdTag::TableHead | MdTag::TableRow | MdTag::TableCell => {}
+                    _ => {}
+                },
+                MdEvent::End(tag) => match tag {
+                    MdTagEnd::Paragraph => line.flush(&mut out, cols),
+                    MdTagEnd::Heading(_) => {
+                        line.flush(&mut out, cols);
+                        out.push(blank_line());
+                        pop_face(&mut faces, "zs-heading");
+                        line.face = *faces.last().unwrap_or(&"zs-normal");
+                    }
+                    MdTagEnd::CodeBlock => {
+                        line.flush(&mut out, cols);
+                        out.push(blank_line());
+                        in_code_block = false;
+                        pop_face(&mut faces, "zs-code-block");
+                        line.face = *faces.last().unwrap_or(&"zs-normal");
+                    }
+                    MdTagEnd::BlockQuote(_) => {
+                        line.flush(&mut out, cols);
+                        pop_face(&mut faces, "zs-quote");
+                        line.face = *faces.last().unwrap_or(&"zs-normal");
+                    }
+                    MdTagEnd::List(_) => {
+                        list_stack.pop();
+                        line.flush(&mut out, cols);
+                    }
+                    MdTagEnd::Item => line.flush(&mut out, cols),
+                    MdTagEnd::Emphasis => pop_face(&mut faces, "zs-italic"),
+                    MdTagEnd::Strong => pop_face(&mut faces, "zs-bold"),
+                    MdTagEnd::Link => pop_face(&mut faces, "zs-link"),
+                    MdTagEnd::Table => {
+                        flush_wire_table(&table_rows, &table_alignments, cols, &mut out);
+                        in_table = false;
+                        table_alignments.clear();
+                        table_rows.clear();
+                    }
+                    MdTagEnd::TableHead | MdTagEnd::TableRow if in_table => {
+                        if !table_row.is_empty() {
+                            table_rows.push(std::mem::take(&mut table_row));
+                        }
+                    }
+                    MdTagEnd::TableCell if in_table => {
+                        table_row.push(table_cell.trim().to_string());
+                        table_cell.clear();
+                    }
+                    MdTagEnd::TableHead | MdTagEnd::TableRow | MdTagEnd::TableCell => {
+                        line.flush(&mut out, cols)
+                    }
+                    _ => {}
+                },
+                MdEvent::Text(value) => {
+                    if in_table {
+                        if !table_cell.is_empty() {
+                            table_cell.push(' ');
+                        }
+                        table_cell.push_str(&value);
+                    } else {
+                        line.push(&value, *faces.last().unwrap_or(&"zs-normal"));
+                    }
+                }
+                MdEvent::Code(value) => {
+                    if in_table {
+                        if !table_cell.is_empty() {
+                            table_cell.push(' ');
+                        }
+                        table_cell.push('`');
+                        table_cell.push_str(&value);
+                        table_cell.push('`');
+                    } else {
+                        line.push(&value, "zs-code");
+                    }
+                }
+                MdEvent::SoftBreak | MdEvent::HardBreak => {
+                    if in_table {
+                        table_cell.push(' ');
+                    } else if in_code_block {
+                        line.flush(&mut out, cols);
+                    } else {
+                        line.push(" ", *faces.last().unwrap_or(&"zs-normal"));
+                    }
+                }
+                MdEvent::TaskListMarker(checked) => {
+                    line.push(if checked { "[x] " } else { "[ ] " }, "zs-list-marker");
+                }
+                _ => {}
+            }
+        }
+        line.flush(&mut out, cols);
+        out
+    }
+
+    fn flush_wire_table(
+        rows: &[Vec<String>],
+        alignments: &[MdAlignment],
+        cols: usize,
+        out: &mut Vec<WireLine>,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+
+        let col_count = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+        if col_count == 0 {
+            return;
+        }
+
+        let mut col_widths = vec![0usize; col_count];
+        for row in rows {
+            for (idx, cell) in row.iter().enumerate() {
+                col_widths[idx] = col_widths[idx].max(display_width(cell));
+            }
+        }
+
+        let overhead = 3 * col_count + 1;
+        let available = cols.max(20).saturating_sub(overhead);
+        if available == 0 {
+            return;
+        }
+
+        let mut total_req: usize = col_widths.iter().sum();
+        const MIN_COL_WIDTH: usize = 4;
+        while total_req > available {
+            let Some((widest_idx, widest_w)) = col_widths
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by_key(|(_, width)| *width)
+            else {
+                break;
+            };
+            if widest_w <= MIN_COL_WIDTH {
+                break;
+            }
+            col_widths[widest_idx] -= 1;
+            total_req -= 1;
+        }
+
+        push_wire_table_rule(&col_widths, '┌', '┬', '┐', out);
+        for (idx, row) in rows.iter().enumerate() {
+            for table_line in format_wire_table_row(row, &col_widths, alignments) {
+                out.push(WireLine::with_spans(
+                    vec![WireSpan {
+                        text: table_line,
+                        face: "zs-table",
+                    }],
+                    "zs-table",
+                ));
+            }
+            if idx == 0 && rows.len() > 1 {
+                push_wire_table_rule(&col_widths, '├', '┼', '┤', out);
+            }
+        }
+        push_wire_table_rule(&col_widths, '└', '┴', '┘', out);
+    }
+
+    fn push_wire_table_rule(
+        widths: &[usize],
+        left: char,
+        mid: char,
+        right: char,
+        out: &mut Vec<WireLine>,
+    ) {
+        let mut text = String::new();
+        text.push(left);
+        for (idx, width) in widths.iter().enumerate() {
+            for _ in 0..*width + 2 {
+                text.push('─');
+            }
+            if idx + 1 < widths.len() {
+                text.push(mid);
+            }
+        }
+        text.push(right);
+        out.push(WireLine::with_spans(
+            vec![WireSpan {
+                text,
+                face: "zs-table-border",
+            }],
+            "zs-table-border",
+        ));
+    }
+
+    fn format_wire_table_row(
+        cells: &[String],
+        widths: &[usize],
+        alignments: &[MdAlignment],
+    ) -> Vec<String> {
+        let mut wrapped_cells = Vec::new();
+        let mut max_subrows = 0usize;
+
+        for (idx, cell) in cells.iter().enumerate() {
+            let width = widths.get(idx).copied().unwrap_or(10);
+            let wrapped: Vec<String> = if display_width(cell) <= width {
+                vec![cell.clone()]
+            } else {
+                word_wrap(cell, width)
+                    .into_iter()
+                    .map(|chunk| chunk.to_string())
+                    .collect()
+            };
+            max_subrows = max_subrows.max(wrapped.len());
+            wrapped_cells.push(wrapped);
+        }
+
+        for _ in cells.len()..widths.len() {
+            wrapped_cells.push(vec![String::new()]);
+            max_subrows = max_subrows.max(1);
+        }
+
+        let mut lines = Vec::new();
+        for subrow in 0..max_subrows {
+            let mut line = String::new();
+            line.push('│');
+            for (idx, wrapped) in wrapped_cells.iter().enumerate() {
+                let width = widths.get(idx).copied().unwrap_or(10);
+                let text = wrapped.get(subrow).map(String::as_str).unwrap_or("");
+                let padding = width.saturating_sub(display_width(text));
+                line.push(' ');
+                match alignments.get(idx).copied().unwrap_or(MdAlignment::None) {
+                    MdAlignment::Center => {
+                        let left_pad = padding / 2;
+                        let right_pad = padding - left_pad;
+                        push_spaces(&mut line, left_pad);
+                        line.push_str(text);
+                        push_spaces(&mut line, right_pad);
+                    }
+                    MdAlignment::Right => {
+                        push_spaces(&mut line, padding);
+                        line.push_str(text);
+                    }
+                    MdAlignment::None | MdAlignment::Left => {
+                        line.push_str(text);
+                        push_spaces(&mut line, padding);
+                    }
+                }
+                line.push(' ');
+                if idx + 1 < wrapped_cells.len() {
+                    line.push('│');
+                }
+            }
+            line.push('│');
+            lines.push(line);
+        }
+        lines
+    }
+
+    fn push_spaces(line: &mut String, count: usize) {
+        for _ in 0..count {
+            line.push(' ');
+        }
+    }
+
+    struct SpanLine {
+        face: &'static str,
+        spans: Vec<WireSpan>,
+    }
+
+    impl SpanLine {
+        fn new(face: &'static str) -> Self {
+            Self {
+                face,
+                spans: Vec::new(),
+            }
+        }
+
+        fn push(&mut self, text: &str, face: &'static str) {
+            if text.is_empty() {
+                return;
+            }
+            if let Some(last) = self.spans.last_mut()
+                && last.face == face
+            {
+                last.text.push_str(text);
+                return;
+            }
+            self.spans.push(WireSpan {
+                text: text.to_string(),
+                face,
+            });
+        }
+
+        fn flush(&mut self, out: &mut Vec<WireLine>, cols: usize) {
+            if self.spans.is_empty() {
+                return;
+            }
+            out.extend(wrap_spans(std::mem::take(&mut self.spans), self.face, cols));
+        }
+    }
+
+    fn wrap_spans(spans: Vec<WireSpan>, line_face: &'static str, cols: usize) -> Vec<WireLine> {
+        let max = cols.max(20);
+        let mut out = Vec::new();
+        let mut current = Vec::new();
+        let mut width = 0usize;
+        for span in spans {
+            for part in span.text.split_inclusive('\n') {
+                let (text, newline) = part
+                    .strip_suffix('\n')
+                    .map(|s| (s, true))
+                    .unwrap_or((part, false));
+                for word in text.split_inclusive(' ') {
+                    let word_width = word.chars().count();
+                    if width > 0 && width + word_width > max {
+                        push_wrapped_line(&mut out, &mut current, line_face);
+                        width = 0;
+                    }
+                    if !word.is_empty() {
+                        current.push(WireSpan {
+                            text: word.to_string(),
+                            face: span.face,
+                        });
+                        width += word_width;
+                    }
+                }
+                if newline {
+                    push_wrapped_line(&mut out, &mut current, line_face);
+                    width = 0;
+                }
+            }
+        }
+        push_wrapped_line(&mut out, &mut current, line_face);
+        out
+    }
+
+    fn push_wrapped_line(
+        out: &mut Vec<WireLine>,
+        current: &mut Vec<WireSpan>,
+        line_face: &'static str,
+    ) {
+        if current.is_empty() {
+            return;
+        }
+        let spans = std::mem::take(current);
+        out.push(WireLine::with_spans(spans, line_face));
+    }
+
+    fn pop_face(faces: &mut Vec<&'static str>, face: &'static str) {
+        if let Some(pos) = faces.iter().rposition(|item| *item == face) {
+            faces.remove(pos);
+        }
     }
 
     async fn attach_latex_metadata(
@@ -2556,20 +3180,6 @@ mod imp {
         )
     }
 
-    fn face_for_color(color: Color) -> &'static str {
-        match color {
-            Color::Cyan | Color::DarkCyan => "zs-heading",
-            Color::DarkYellow => "zs-code",
-            Color::DarkGrey => "zs-muted",
-            Color::Green | Color::DarkGreen => "zs-user",
-            Color::Yellow => "zs-tool",
-            Color::Magenta | Color::DarkMagenta => "zs-reasoning",
-            Color::Red | Color::DarkRed => "zs-error",
-            Color::Blue | Color::DarkBlue => "zs-link",
-            _ => "zs-normal",
-        }
-    }
-
     fn blank_line() -> WireLine {
         WireLine::new(String::new(), "zs-normal")
     }
@@ -2665,9 +3275,13 @@ mod imp {
         id.get(..8).unwrap_or(id)
     }
 
+    fn thinking_label(enabled: bool) -> &'static str {
+        if enabled { "on" } else { "off" }
+    }
+
     fn meta_to_sexp(meta: &SessionMeta) -> String {
         format!(
-            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :protocol {} :socket {})",
+            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :context-window {} :protocol {} :socket {} :thinking {})",
             sexp_quote(&meta.session_id),
             meta.pid,
             sexp_quote(&meta.cwd),
@@ -2676,8 +3290,11 @@ mod imp {
             sexp_quote(&meta.created_at),
             sexp_quote(&meta.updated_at),
             sexp_quote(&meta.title),
+            meta.tokens,
+            meta.context_window,
             meta.protocol,
             sexp_quote(&meta.socket),
+            sexp_quote(&meta.thinking),
         )
     }
 
@@ -2980,14 +3597,31 @@ mod imp {
                     } else {
                         format!(" :latex {}", latex_items_to_sexp(&line.latex))
                     };
+                    let spans = if line.spans.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" :spans {}", spans_to_sexp(&line.spans))
+                    };
                     format!(
-                        "(:text {} :face {}{}{})",
+                        "(:text {} :face {}{}{}{})",
                         sexp_quote(&line.text),
                         line.face,
+                        spans,
                         artifact,
                         latex,
                     )
                 })
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }
+
+    fn spans_to_sexp(spans: &[WireSpan]) -> String {
+        format!(
+            "({})",
+            spans
+                .iter()
+                .map(|span| format!("(:text {} :face {})", sexp_quote(&span.text), span.face))
                 .collect::<Vec<_>>()
                 .join(" ")
         )
@@ -3162,6 +3796,33 @@ mod imp {
         }
 
         #[test]
+        fn agent_ended_error_is_only_for_current_running_turn() {
+            let mutable = MutableState {
+                seq: 0,
+                cols: DEFAULT_COLS,
+                line_count: 0,
+                running: true,
+                reasoning_enabled: true,
+                abort_handle: None,
+                turn: 2,
+                #[cfg(feature = "loop")]
+                loop_state: None,
+                next_artifact_id: 1,
+                next_permission_id: 1,
+                pending_permissions: HashMap::new(),
+            };
+
+            assert!(!should_report_agent_ended(&mutable, 1));
+            assert!(should_report_agent_ended(&mutable, 2));
+
+            let stopped = MutableState {
+                running: false,
+                ..mutable
+            };
+            assert!(!should_report_agent_ended(&stopped, 2));
+        }
+
+        #[test]
         fn provider_and_model_commands_read_values() {
             let provider =
                 parse_command("(provider :request 5 :provider \"openai-codex\")").unwrap();
@@ -3176,6 +3837,11 @@ mod imp {
             assert_eq!(model.name, "model");
             assert_eq!(request_arg(&model).as_deref(), Some("6"));
             assert_eq!(string_arg(&model, "model").as_deref(), Some("gpt-5.5"));
+
+            let thinking = parse_command("(thinking :request 7 :level off)").unwrap();
+            assert_eq!(thinking.name, "thinking");
+            assert_eq!(request_arg(&thinking).as_deref(), Some("7"));
+            assert_eq!(atom_arg(&thinking, "level").as_deref(), Some("off"));
         }
 
         #[cfg(feature = "loop")]
@@ -3212,6 +3878,42 @@ mod imp {
         fn rendered_lines_are_plists() {
             let lines = vec![WireLine::new("< hi", "zs-normal")];
             assert_eq!(lines_to_sexp(&lines), "((:text \"< hi\" :face zs-normal))");
+        }
+
+        #[test]
+        fn assistant_markdown_includes_line_local_spans() {
+            let lines = render_assistant_lines(
+                "# Head\n\n**bold** *italic* `code` [link](https://example.invalid)\n\n> quote\n\n- [x] task\n\n```rust\nfn main() {}\n```",
+                100,
+                false,
+            );
+            let rendered = lines_to_sexp(&lines);
+            assert!(rendered.contains(":spans"));
+            assert!(rendered.contains(":face zs-heading"));
+            assert!(rendered.contains(":face zs-bold"));
+            assert!(rendered.contains(":face zs-italic"));
+            assert!(rendered.contains(":face zs-code"));
+            assert!(rendered.contains(":face zs-link"));
+            assert!(rendered.contains(":face zs-quote"));
+            assert!(rendered.contains(":face zs-list-marker"));
+            assert!(rendered.contains(":face zs-code-block"));
+        }
+
+        #[test]
+        fn assistant_markdown_tables_are_boxed_and_aligned() {
+            let lines = render_assistant_lines(
+                "| Left | Center | Right |\n| :--- | :----: | ----: |\n| a | bb | 3 |\n| longer | c | 400 |",
+                100,
+                false,
+            );
+            let rendered = lines_to_sexp(&lines);
+            assert!(rendered.contains(":face zs-table-border"));
+            assert!(rendered.contains(":face zs-table"));
+            assert!(rendered.contains("┌"));
+            assert!(rendered.contains("├"));
+            assert!(rendered.contains("└"));
+            assert!(rendered.contains("│ a      │   bb   │     3 │"));
+            assert!(rendered.contains("│ longer │   c    │   400 │"));
         }
 
         #[test]

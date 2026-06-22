@@ -39,6 +39,10 @@
   "Return SENT protocol lines as decoded forms in send order."
   (mapcar #'zerostack-test--decode-line (nreverse sent)))
 
+(defun zerostack-test--expand-project (path)
+  "Mark project PATH expanded in the test board."
+  (zerostack-board--set-session-limit (format "project:%s" path) 5))
+
 (defun zerostack-test--wait-until (predicate &optional timeout)
   "Wait until PREDICATE returns non-nil, or fail after TIMEOUT seconds."
   (let ((deadline (+ (float-time) (or timeout 2.0)))
@@ -113,6 +117,7 @@
 			  :updated-at "2026-06-20T00:00:00Z"
 			  :message-count 2
 			  :tokens 10
+			  :context-window 100
 			  :cost 0.1
 			  :alive t
 			  :pid 123
@@ -127,6 +132,7 @@
 			  :updated-at "2026-06-19T00:00:00Z"
 			  :message-count 1
 			  :tokens 5
+			  :context-window 100
 			  :cost 0.0
 			  :alive nil
 			  :pid nil
@@ -155,12 +161,13 @@
 			  :provider "provider"
 			  :created-at "2026-06-18T00:00:00Z"
 			  :updated-at "2026-06-18T00:00:00Z"
-			  :message-count 1
-			  :tokens 1
-			  :cost 0.0
-			  :alive nil
-			  :pid nil
-			  :socket nil))))))
+		      :message-count 1
+		      :tokens 1
+		      :context-window 100
+		      :cost 0.0
+		      :alive nil
+		      :pid nil
+		      :socket nil))))))
     :loose-workspaces
     ((:path "/nongit/work"
 	    :alive nil
@@ -176,6 +183,7 @@
 		  :updated-at "2026-06-17T00:00:00Z"
 		  :message-count 1
 		  :tokens 1
+		  :context-window 100
 		  :cost 0.0
 		  :alive nil
 		  :pid nil
@@ -183,6 +191,7 @@
 
 (ert-deftest zerostack-test-board-refresh-renders-tree ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (setq-local zerostack-board--fetch-function
                (lambda () zerostack-test--board-snapshot))
    (zerostack-board-refresh)
@@ -190,7 +199,7 @@
    (let ((text (buffer-string)))
      (should (string-match-p "\\* project live-repo" text))
      (should (string-match-p "  \\* feature work  feature  live-wt/" text))
-     (should (string-match-p "    \\* Live session" text))
+     (should-not (string-match-p "Live session" text))
      (should (string-match-p "    (no description)  main  live-other/" text))
      (should (string-match-p "other workspaces" text))
      (should (string-match-p "workspace  work/  /nongit/work" text))
@@ -198,11 +207,36 @@
      (should (< (string-match "project live-repo" text)
                 (string-match "project dead-repo" text))))
    (goto-char (point-min))
-   (search-forward "Live session")
-   (beginning-of-line)
-   (let ((item (get-text-property (point) 'zerostack-board-item)))
-     (should (eq (plist-get item :type) 'session))
-     (should (equal (plist-get item :socket) "/tmp/live.sock")))))
+   (search-forward "live-wt/")
+   (let* ((item (get-text-property (1- (point)) 'zerostack-board-item))
+          (session (plist-get item :session-item)))
+     (should (eq (plist-get item :type) 'worktree))
+     (should (equal (plist-get session :socket) "/tmp/live.sock")))
+   (should (eq (get-text-property (1- (point)) 'face) 'zerostack-board-alive-face))
+   (goto-char (point-min))
+   (search-forward "project live-repo")
+   (should (eq (get-text-property (point) 'face) 'zerostack-board-alive-face))))
+
+(ert-deftest zerostack-test-board-colors-open-thinking-session-yellow ()
+  (let ((chat (generate-new-buffer " *zerostack-open-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (zerostack-mode)
+            (setq zerostack--session "live-session"
+                  zerostack--thinking t
+                  zerostack--tokens 42
+                  zerostack--context-window 100))
+          (zerostack-test--with-board-buffer
+           (zerostack-test--expand-project "/repo/live")
+           (zerostack-board--render zerostack-test--board-snapshot)
+           (goto-char (point-min))
+           (search-forward "live-wt/")
+           (should (eq (get-text-property (1- (point)) 'face)
+                       'zerostack-board-thinking-face))
+           (should (string-match-p "feature work  feature  live-wt/" (buffer-string)))))
+      (when (buffer-live-p chat)
+        (kill-buffer chat)))))
 
 (defun zerostack-test--session-plist (id title updated &optional alive)
   "Return a board session plist for tests."
@@ -216,6 +250,7 @@
 	:updated-at ,updated
 	:message-count 1
 	:tokens 1
+	:context-window 100
 	:cost 0.0
 	:alive ,alive
 	:pid ,(and alive 123)
@@ -225,6 +260,7 @@
   (zerostack-test--with-board-buffer
    (let* ((sessions (list
                      (zerostack-test--session-plist "session-live" "Live first" "2026-06-14T00:00:00Z" t)
+                     (zerostack-test--session-plist "session-live-2" "Live second" "2026-06-13T12:00:00Z" t)
                      (zerostack-test--session-plist "session-1" "Recent one" "2026-06-13T00:00:00Z")
                      (zerostack-test--session-plist "session-2" "Recent two" "2026-06-12T00:00:00Z")
                      (zerostack-test--session-plist "session-3" "Recent three" "2026-06-11T00:00:00Z")
@@ -246,23 +282,136 @@
 				      :alive t
 				      :sessions ,sessions))))
                       :loose-workspaces nil)))
+     (zerostack-test--expand-project "/repo/many")
      (setq-local zerostack-board--snapshot snapshot)
      (zerostack-board--render snapshot)
      (let ((text (buffer-string)))
        (should (string-match-p "Live first" text))
-       (should (string-match-p "Recent four" text))
+       (should (string-match-p "Recent three" text))
+       (should-not (string-match-p "Recent four" text))
        (should-not (string-match-p "Hidden five" text))
-       (should (string-match-p "show 5 more (2 remaining)" text))
-       (should (< (string-match "Live first" text)
+       (should (string-match-p "show 5 more (3 remaining)" text))
+       (should (< (string-match "many/" text)
                   (string-match "Recent one" text))))
      (goto-char (point-min))
      (search-forward "show 5 more")
-     (beginning-of-line)
      (zerostack-board-open-at-point)
      (let ((text (buffer-string)))
        (should (string-match-p "Hidden five" text))
        (should (string-match-p "Hidden six" text))
        (should-not (string-match-p "show 5 more" text))))))
+
+(ert-deftest zerostack-test-board-single-active-workspace-colors-entire-workspace-row ()
+  (zerostack-test--with-board-buffer
+   (let* ((session (zerostack-test--session-plist "workspace-live" "Live workspace session" "2026-06-14T00:00:00Z" t))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :projects nil
+                      :loose-workspaces
+                      ((:path "/nongit/single" :alive t :sessions (,session))))))
+     (zerostack-board--render snapshot)
+     (goto-char (point-min))
+     (search-forward "* workspace")
+     (should (eq (get-text-property (point) 'face)
+                 'zerostack-board-alive-face))
+     (search-forward "/nongit/single")
+     (should (eq (get-text-property (1- (point)) 'face)
+                 'zerostack-board-alive-face))
+     (should-not (string-match-p "Live workspace session" (buffer-string))))))
+
+(ert-deftest zerostack-test-board-single-active-worktree-colors-entire-worktree-row ()
+  (zerostack-test--with-board-buffer
+   (let* ((session (zerostack-test--session-plist "worktree-live" "Live worktree session" "2026-06-14T00:00:00Z" t))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :projects
+                      ((:path "/repo" :repo "/repo" :name "repo" :alive t
+                        :worktrees ((:path "/repo/wt" :branch "main" :description "main work"
+                                     :alive t :sessions (,session)))))
+                      :loose-workspaces nil)))
+     (zerostack-test--expand-project "/repo")
+     (zerostack-board--render snapshot)
+     (goto-char (point-min))
+     (search-forward "main work")
+     (should (eq (get-text-property (1- (point)) 'face)
+                 'zerostack-board-alive-face))
+     (search-forward "wt/")
+     (should (eq (get-text-property (1- (point)) 'face)
+                 'zerostack-board-alive-face))
+     (should-not (string-match-p "Live worktree session" (buffer-string))))))
+
+(ert-deftest zerostack-test-board-single-active-project-collapses-workspace-row ()
+  (zerostack-test--with-board-buffer
+   (let* ((live-session (zerostack-test--session-plist "project-live" "Live project session" "2026-06-14T00:00:00Z" t))
+          (old-session (zerostack-test--session-plist "project-old" "Old project session" "2026-06-13T00:00:00Z" nil))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :projects
+                      ((:path "/repo" :repo "/repo" :name "repo" :alive t
+                        :worktrees ((:path "/repo/live" :branch "live" :description "live work"
+                                     :alive t :sessions (,live-session ,old-session))
+                                    (:path "/repo/old" :branch "old" :description "old work"
+                                     :alive nil :sessions nil)
+                                    (:path "/repo/old2" :branch "old2" :description "old work 2"
+                                     :alive nil :sessions nil)
+                                    (:path "/repo/old3" :branch "old3" :description "old work 3"
+                                     :alive nil :sessions nil)
+                                    (:path "/repo/old4" :branch "old4" :description "old work 4"
+                                     :alive nil :sessions nil)
+                                    (:path "/repo/old5" :branch "old5" :description "old work 5"
+                                     :alive nil :sessions nil))))
+                      :loose-workspaces nil)))
+     (setq-local zerostack-board--snapshot snapshot)
+     (zerostack-board--render snapshot)
+     (let ((text (buffer-string)))
+       (should (string-match-p "project repo  /repo  \\+ show 5 more" text))
+       (should-not (string-match-p "live work" text))
+       (should-not (string-match-p "Live project session" text)))
+     (goto-char (point-min))
+     (search-forward "project repo")
+     (should (eq (get-text-property (1- (point)) 'face)
+                 'zerostack-board-alive-face))
+     (search-forward "show 5 more")
+     (zerostack-board-open-at-point)
+     (let ((text (buffer-string)))
+       (should (string-match-p "live work" text))
+       (should (string-match-p "old work" text))
+       (should (string-match-p "live work  live  live/  /repo/live  \\+ show 5 more" text))
+       (should-not (string-match-p "Live project session" text))
+       (should-not (string-match-p "project repo  /repo  \\+ show 5 more" text))))))
+
+(ert-deftest zerostack-test-board-single-active-workspace-load-more-is-inline ()
+  (zerostack-test--with-board-buffer
+   (let* ((sessions (list
+                     (zerostack-test--session-plist "workspace-live" "Live first" "2026-06-14T00:00:00Z" t)
+                     (zerostack-test--session-plist "workspace-1" "Recent one" "2026-06-13T00:00:00Z")
+                     (zerostack-test--session-plist "workspace-2" "Recent two" "2026-06-12T00:00:00Z")
+                     (zerostack-test--session-plist "workspace-3" "Recent three" "2026-06-11T00:00:00Z")
+                     (zerostack-test--session-plist "workspace-4" "Recent four" "2026-06-10T00:00:00Z")
+                     (zerostack-test--session-plist "workspace-5" "Hidden five" "2026-06-09T00:00:00Z")
+                     (zerostack-test--session-plist "workspace-6" "Hidden six" "2026-06-08T00:00:00Z")))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :projects nil
+                      :loose-workspaces
+                      ((:path "/nongit/many" :alive t :sessions ,sessions)))))
+     (setq-local zerostack-board--snapshot snapshot)
+      (zerostack-board--render snapshot)
+      (let ((text (buffer-string)))
+        (should (string-match-p "workspace  many/  /nongit/many  \\+ show 5 more" text))
+        (should-not (string-match-p "Recent one" text))
+        (should-not (string-match-p "^    + show 5 more" text))
+        (should-not (string-match-p "Hidden five" text)))
+      (goto-char (point-min))
+      (search-forward "show 5 more")
+      (let ((item (get-text-property (point) 'zerostack-board-item)))
+        (should (eq (plist-get item :type) 'load-more)))
+      (zerostack-board-open-at-point)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Recent one" text))
+        (should-not (string-match-p "Hidden five" text))
+        (should (string-match-p (regexp-quote "    + show 5 more") text))
+        (should-not (string-match-p "workspace  many/  /nongit/many  \\+ show 5 more" text))))))
 
 (ert-deftest zerostack-test-board-renders-pinned-directory ()
   (let* ((dir (make-temp-file "zerostack-pinned" t))
@@ -336,6 +485,7 @@
 
 (ert-deftest zerostack-test-board-refresh-preserves-cursor-position ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (setq-local zerostack-board--fetch-function
                (lambda () zerostack-test--board-snapshot))
    (zerostack-board-refresh)
@@ -350,6 +500,7 @@
 
 (ert-deftest zerostack-test-board-open-session-actions ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (zerostack-board--render zerostack-test--board-snapshot)
    (let (connected connected-title connected-cwd connected-worktree connected-session
                    started started-title started-cwd started-worktree started-session)
@@ -368,7 +519,7 @@
                         started-worktree worktree
                         started-session session-id))))
        (goto-char (point-min))
-       (search-forward "Live session")
+       (search-forward "live-wt/")
        (beginning-of-line)
        (zerostack-board-open-at-point)
        (should (equal connected "/tmp/live.sock"))
@@ -377,6 +528,8 @@
        (should (equal connected-worktree "/repo/live-wt"))
        (should (equal connected-session "live-session"))
 
+       (zerostack-board--set-session-limit "worktree:/repo/live-wt" 5)
+       (zerostack-board--render zerostack-test--board-snapshot)
        (goto-char (point-min))
        (search-forward "Dead session")
        (beginning-of-line)
@@ -389,6 +542,7 @@
 
 (ert-deftest zerostack-test-board-open-live-session-uses-chat-buffer ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (zerostack-board--render zerostack-test--board-snapshot)
    (let ((board-buffer (current-buffer))
          connected-socket chat-buffer popped-buffer)
@@ -401,7 +555,7 @@
                   (setq popped-buffer buffer)
                   buffer)))
        (goto-char (point-min))
-       (search-forward "Live session")
+       (search-forward "live-wt/")
        (beginning-of-line)
        (unwind-protect
            (let ((result (zerostack-board-open-at-point)))
@@ -521,6 +675,7 @@
 
 (ert-deftest zerostack-test-board-create-actions ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (zerostack-board--render zerostack-test--board-snapshot)
    (let (git-calls refreshed started started-called start-directory read-answers)
      (setq read-answers '("feature/new-board" "Created from board"))
@@ -562,6 +717,7 @@
 
 (ert-deftest zerostack-test-board-trash-actions ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (zerostack-board--render zerostack-test--board-snapshot)
    (let ((process-environment (cons "ZS_DATA_DIR=/data" process-environment))
          trashed git-calls refreshes)
@@ -584,6 +740,8 @@
        (should (member "/repo/live-wt" trashed))
        (should (member '("/repo/live" "worktree" "prune") git-calls))
 
+       (zerostack-board--set-session-limit "worktree:/repo/live-wt" 5)
+       (zerostack-board--render zerostack-test--board-snapshot)
        (goto-char (point-min))
        (search-forward "Dead session")
        (beginning-of-line)
@@ -591,8 +749,28 @@
        (should (member "/data/sessions/dead-session.json" trashed))
        (should (= refreshes 2))))))
 
+(ert-deftest zerostack-test-board-set-branch-description ()
+  (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
+   (zerostack-board--render zerostack-test--board-snapshot)
+   (let (git-calls refreshed)
+     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "new description"))
+               ((symbol-function 'zerostack-board--call-git)
+                (lambda (dir &rest args)
+                  (push (cons dir args) git-calls)))
+               ((symbol-function 'zerostack-board-refresh)
+                (lambda () (setq refreshed t))))
+       (goto-char (point-min))
+       (search-forward "feature work")
+       (beginning-of-line)
+       (zerostack-board-set-description-at-point)
+       (should (equal git-calls
+                      '(("/repo/live" "config" "branch.feature.description" "new description"))))
+       (should refreshed)))))
+
 (ert-deftest zerostack-test-board-stop-live-session ()
   (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
    (zerostack-board--render zerostack-test--board-snapshot)
    (let (signals refreshed)
      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
@@ -607,7 +785,7 @@
                ((symbol-function 'zerostack-board-refresh)
                 (lambda () (setq refreshed t))))
        (goto-char (point-min))
-       (search-forward "Live session")
+       (search-forward "live-wt/")
        (beginning-of-line)
        (zerostack-board-stop-at-point)
        (should (equal signals '((123 term))))
@@ -652,7 +830,9 @@
      (zerostack-set-view 120)
      (zerostack-provider-menu "openai-codex")
      (zerostack-model-menu "gpt-5.5")
-     (zerostack-send-prompt "hello")
+     (zerostack-mcp)
+     (zerostack-thinking-menu "off")
+     (zerostack-send-prompt "hello\nworld")
      (zerostack-compact)
      (zerostack-compact "keep recent tool output")
      (zerostack-loop-start "fix bugs" 2 "cargo test")
@@ -669,7 +849,7 @@
 
      (let ((forms (zerostack-test--sent-forms sent)))
        (should (equal (mapcar #'car forms)
-                      '(hello attach render set-view provider model prompt compact compact loop-start
+                      '(hello attach render set-view provider model mcp thinking prompt compact compact loop-start
                               loop-status loop-stop file-add file-list file-drop-all abort
                               permission-answer list-sessions status)))
        (should (equal (nth 0 forms) '(hello :request 1 :protocol 1 :cols 100)))
@@ -678,29 +858,54 @@
        (should (equal (nth 3 forms) '(set-view :request 4 :cols 120)))
        (should (equal (nth 4 forms) '(provider :request 5 :provider "openai-codex")))
        (should (equal (nth 5 forms) '(model :request 6 :model "gpt-5.5")))
-       (should (equal (nth 6 forms) '(prompt :request 7 :text "hello")))
-       (should (equal (nth 7 forms) '(compact :request 8)))
-       (should (equal (nth 8 forms)
-                      '(compact :request 9 :instructions "keep recent tool output")))
-       (should (equal (nth 9 forms)
-                      '(loop-start :request 10 :prompt "fix bugs" :max 2
+       (should (equal (nth 6 forms) '(mcp :request 7)))
+       (should (equal (nth 7 forms) '(thinking :request 8 :level "off")))
+       (should (equal (nth 8 forms) '(prompt :request 9 :text "hello\nworld")))
+       (should (equal (nth 9 forms) '(compact :request 10)))
+       (should (equal (nth 10 forms)
+                      '(compact :request 11 :instructions "keep recent tool output")))
+       (should (equal (nth 11 forms)
+                      '(loop-start :request 12 :prompt "fix bugs" :max 2
                                    :run "cargo test")))
-       (should (equal (nth 10 forms) '(loop-status :request 11)))
-       (should (equal (nth 11 forms) '(loop-stop :request 12)))
-       (should (equal (nth 12 forms) '(file-add :request 13 :path "/tmp/photo.png")))
-       (should (equal (nth 13 forms) '(file-list :request 14)))
-       (should (equal (nth 14 forms) '(file-drop-all :request 15)))
-       (should (equal (nth 15 forms) '(abort :request 16)))
-       (should (equal (nth 16 forms)
+       (should (equal (nth 12 forms) '(loop-status :request 13)))
+       (should (equal (nth 13 forms) '(loop-stop :request 14)))
+       (should (equal (nth 14 forms) '(file-add :request 15 :path "/tmp/photo.png")))
+       (should (equal (nth 15 forms) '(file-list :request 16)))
+       (should (equal (nth 16 forms) '(file-drop-all :request 17)))
+       (should (equal (nth 17 forms) '(abort :request 18)))
+       (should (equal (nth 18 forms)
                       '(permission-answer :request 42 :decision allow-always
                                           :pattern "bash cargo test")))
-       (should (equal (nth 17 forms) '(list-sessions :request 17 :limit 7)))
-       (should (equal (nth 18 forms) '(status :request 18)))))))
+       (should (equal (nth 19 forms) '(list-sessions :request 19 :limit 7)))
+       (should (equal (nth 20 forms) '(status :request 20)))))))
+
+(ert-deftest zerostack-test-send-form-escapes-newlines ()
+  (zerostack-test--with-buffer
+   (let ((line (zerostack--send-form '(prompt :request 1 :text "hello\nworld"))))
+     (should (equal (length (split-string line "\n")) 2))
+     (should (equal (zerostack-test--decode-line line)
+                    '(prompt :request 1 :text "hello\nworld"))))))
+
+(ert-deftest zerostack-test-compact-marks-buffer-busy-until-complete ()
+  (zerostack-test--with-buffer
+   (let (sent notified)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (cl-letf (((symbol-function 'zerostack--notify-ready)
+                (lambda () (setq notified t))))
+       (zerostack-compact)
+       (should zerostack--thinking)
+       (should (equal zerostack--status "compacting..."))
+       (should (equal (car (zerostack-test--sent-forms sent))
+                      '(compact :request 1)))
+       (zerostack--handle-ok '(:request 1 :compacted t :messages 2 :saved-tokens 10 :message "compressed"))
+       (should-not zerostack--thinking)
+       (should-not zerostack--status)
+       (should notified)))))
 
 (ert-deftest zerostack-test-command-menu-fallback-dispatches-to-protocol ()
   (zerostack-test--with-buffer
    (let (dispatched)
-     (let ((choices '("attach" "compact" "loop" "provider" "model" "view")))
+     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "mcp" "view")))
        (cl-letf (((symbol-function 'completing-read)
                   (lambda (&rest _) (pop choices)))
                  ((symbol-function 'zerostack-attachment-menu)
@@ -709,15 +914,19 @@
                   (lambda () (interactive) (push 'compact dispatched)))
                  ((symbol-function 'zerostack-loop)
                   (lambda () (interactive) (push 'loop dispatched)))
+                 ((symbol-function 'zerostack-thinking-menu)
+                  (lambda (&optional _) (interactive) (push 'thinking dispatched)))
                  ((symbol-function 'zerostack-provider-menu)
                   (lambda (&optional _) (interactive) (push 'provider dispatched)))
                  ((symbol-function 'zerostack-model-menu)
                   (lambda (&optional _) (interactive) (push 'model dispatched)))
+                 ((symbol-function 'zerostack-mcp)
+                  (lambda () (interactive) (push 'mcp dispatched)))
                  ((symbol-function 'zerostack-set-view)
                   (lambda () (interactive) (push 'view dispatched))))
-         (dotimes (_ 6)
+         (dotimes (_ 8)
            (zerostack--command-menu-fallback))))
-     (should (equal (nreverse dispatched) '(attach compact loop provider model view))))))
+     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model mcp view))))))
 
 (ert-deftest zerostack-test-command-menu-permission-selection ()
   (zerostack-test--with-buffer
@@ -839,23 +1048,41 @@
        (zerostack--cleanup-clipboard-temp-files)
        (should-not (file-exists-p path))))))
 
-(ert-deftest zerostack-test-add_clipboard_prefers_yank_media ()
+(ert-deftest zerostack-test-yank-attaches-image-before-regular-yank ()
   (zerostack-test--with-buffer
-   (let (sent)
+   (let (sent yanked)
      (setq zerostack--send-function (lambda (line) (push line sent)))
-     (cl-letf (((symbol-function 'yank-media)
-                (lambda ()
-                  (zerostack--yank-media-image 'image/png "PNGDATA")))
-               ((symbol-function 'gui-get-selection)
-                (lambda (&rest _) nil))
+     (cl-letf (((symbol-function 'gui-get-selection)
+                (lambda (_selection target)
+                  (when (eq target 'image/png) "PNGDATA")))
                ((symbol-function 'zerostack--clipboard-command-output)
-                (lambda (&rest _) nil)))
-       (zerostack-add-clipboard))
+                (lambda (&rest _) nil))
+               ((symbol-function 'yank)
+                (lambda (&rest _)
+                  (setq yanked t))))
+       (zerostack-yank))
      (let* ((form (car (zerostack-test--sent-forms sent)))
             (path (plist-get (cdr form) :path)))
+       (should-not yanked)
        (should (equal (car form) 'file-add))
        (should (string-suffix-p ".png" path))
        (zerostack--cleanup-clipboard-temp-files)))))
+
+(ert-deftest zerostack-test-yank-falls-back-to-regular-yank ()
+  (zerostack-test--with-buffer
+   (let (yanked)
+     (cl-letf (((symbol-function 'zerostack-add-clipboard)
+                (lambda (&optional quiet)
+                  (should quiet)
+                  nil))
+               ((symbol-function 'yank)
+                (lambda (&rest _)
+                  (interactive)
+                  (setq yanked t))))
+       (zerostack-yank))
+     (should yanked)
+     (should (eq (lookup-key zerostack-mode-map [remap yank])
+                 'zerostack-yank)))))
 
 (ert-deftest zerostack-test-skill-menu-falls-back-to-board-metadata ()
   (let* ((root (make-temp-file "zerostack-skills" t))
@@ -922,9 +1149,26 @@
      (goto-char (point-max))
      (insert "/compact now")
      (zerostack-send-input)
-     (let ((forms (zerostack-test--sent-forms sent)))
-       (should (equal (cadr forms)
-                      '(prompt :request 2 :text "/compact now")))))))
+      (let ((forms (zerostack-test--sent-forms sent)))
+        (should (equal (cadr forms)
+                       '(prompt :request 2 :text "/compact now")))))))
+
+(ert-deftest zerostack-test-input-line-shows-thinking-level ()
+  (zerostack-test--with-buffer
+   (setq zerostack--model "gpt-test")
+   (zerostack--handle-ok '(:request 1 :thinking "off"))
+   (should (string-match-p "thinking:off | gpt-test" (buffer-string)))))
+
+(ert-deftest zerostack-test-control-return-inserts-newline ()
+  (zerostack-test--with-buffer
+   (goto-char (point-max))
+   (insert "hello")
+   (zerostack-insert-newline)
+   (insert "world")
+   (should (equal (buffer-substring-no-properties
+                   (marker-position zerostack--input-marker)
+                   (marker-position zerostack--controls-start-marker))
+                  "hello\nworld"))))
 
 (ert-deftest zerostack-test-buffered-protocol-input ()
   (zerostack-test--with-buffer
@@ -944,17 +1188,20 @@
    (should (equal zerostack--session "s"))
    (zerostack--handle-form
     '(ok :request 1 :protocol 1 :session "s" :pid 123 :cols 111 :socket "/tmp/sock"
-         :provider "openai-codex" :model "gpt-5.5"))
+         :provider "openai-codex" :model "gpt-5.5" :tokens 20 :context-window 100))
    (should (= zerostack--cols 111))
    (should (equal zerostack--provider "openai-codex"))
    (should (equal zerostack--model "gpt-5.5"))
+   (should (equal zerostack--tokens 20))
+   (should (equal zerostack--context-window 100))
+   (should (string-match-p "gpt-5.5 | (20/20%)" (buffer-string)))
    (zerostack--handle-form '(error :request 2 :message "bad request"))
    (should (string-match-p "bad request" zerostack--last-notice))
    (zerostack--handle-form
     '(sessions :request 3
                :items ((:session "s1" :pid 1 :cwd "/repo" :model "m"
 				 :provider "p" :created-at "c" :updated-at "u"
-				 :title "t" :protocol 1 :socket "/tmp/s1"))))
+				 :title "t" :tokens 30 :context-window 100 :protocol 1 :socket "/tmp/s1"))))
    (should (string-match-p "sessions" (buffer-string)))
    (zerostack--handle-form
     '(status :request 4
@@ -1077,6 +1324,25 @@
      (should (< a b))
      (should (< b notice)))))
 
+(ert-deftest zerostack-test-wire-line-applies-span-faces ()
+  (zerostack-test--with-buffer
+   (zerostack--replace-lines
+    0
+    '((:text "Title bold code table"
+       :face zs-normal
+       :spans ((:text "Title" :face zs-heading)
+               (:text " bold" :face zs-bold)
+               (:text " code" :face zs-code)
+               (:text " table" :face zs-table)))))
+   (let ((title (text-property-any (point-min) (point-max) 'face 'zerostack-heading-face))
+         (bold (text-property-any (point-min) (point-max) 'face 'zerostack-bold-face))
+         (code (text-property-any (point-min) (point-max) 'face 'zerostack-code-face))
+         (table (text-property-any (point-min) (point-max) 'face 'zerostack-table-face)))
+     (should title)
+     (should bold)
+     (should code)
+     (should table))))
+
 (ert-deftest zerostack-test-routine-events-do-not-insert-local-lines ()
   (zerostack-test--with-buffer
    (zerostack--replace-lines
@@ -1174,6 +1440,20 @@
               :input-tokens 1 :output-tokens 1))
      (should-not zerostack--thinking)
      (should (string-match-p "zs> " (buffer-string))))))
+
+(ert-deftest zerostack-test-ready-notification-on-thinking-transition ()
+  (zerostack-test--with-buffer
+   (let ((zerostack-notify-on-ready t)
+         processes)
+     (setq zerostack--session-title "Demo")
+     (cl-letf (((symbol-function 'executable-find)
+                (lambda (program) (and (equal program "notify-send") program)))
+               ((symbol-function 'start-process)
+                (lambda (&rest args) (push args processes))))
+       (zerostack--set-thinking t)
+       (zerostack--set-thinking nil)
+       (should (equal processes
+                      '(("zerostack-notify" nil "notify-send" "zerostack" "Demo is ready"))))))))
 
 (ert-deftest zerostack-test-loop-state-updates-prompt-and_stop_command ()
   (zerostack-test--with-buffer

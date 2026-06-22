@@ -51,6 +51,7 @@ struct BoardSession {
     updated_at: String,
     message_count: usize,
     tokens: u64,
+    context_window: u64,
     cost: f64,
     alive: bool,
     pid: Option<u32>,
@@ -254,6 +255,7 @@ fn board_session(session: &Session, live: Option<&LiveSessionMeta>) -> BoardSess
         updated_at: session.updated_at.to_string(),
         message_count: session.messages.len(),
         tokens: session.effective_context_tokens(),
+        context_window: session.context_window,
         cost: session.total_cost,
         alive: live.is_some(),
         pid: live.map(|meta| meta.pid),
@@ -595,7 +597,7 @@ fn worktree_to_sexp(worktree: &BoardWorktree) -> String {
 
 fn session_to_sexp(session: &BoardSession) -> String {
     format!(
-        "(:id {} :short-id {} :title {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :message-count {} :tokens {} :cost {:.6} :alive {} :pid {} :socket {})",
+        "(:id {} :short-id {} :title {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :message-count {} :tokens {} :context-window {} :cost {:.6} :alive {} :pid {} :socket {})",
         sexp_quote(&session.id),
         sexp_quote(short_id(&session.id)),
         sexp_quote(&session.title),
@@ -606,6 +608,7 @@ fn session_to_sexp(session: &BoardSession) -> String {
         sexp_quote(&session.updated_at),
         session.message_count,
         session.tokens,
+        session.context_window,
         session.cost,
         sexp_bool(session.alive),
         session
@@ -665,6 +668,7 @@ mod tests {
             updated_at: updated_at.to_string(),
             message_count: 1,
             tokens: 10,
+            context_window: 100,
             cost: 0.0,
             alive,
             pid: alive.then_some(123),

@@ -1601,23 +1601,24 @@ timeout_secs = 60
         format!(
             r#"# Zerostack Emacs demo: {motif}
 
-The local OpenAI-compatible provider returned this response through the regular zerostack provider stack.
+The local OpenAI-compatible provider returned **bold text**, *italic text*, `inline code`, and a [link](https://example.invalid) through the regular zerostack provider stack.
 
 > Reasoning and tool output were written as ephemeral artifacts under the live session runtime directory.
+> This quoted line should use the quote face.
 
-- [x] rendered markdown sexps
+- [x] styled span sexps
 - [x] real tool calls and tool-output artifacts
 - [x] built-in tool tour: read, list_dir, find_files, grep, task subagent, write, edit, bash, write_todo_list
 - [x] project-local skills discovered from .claude/skills and .opencode/skills
 - [x] Rust-rendered inline LaTeX SVG artifacts
 - [ ] try `/compact` or open `M-x zerostack-board`
 
-| Feature | What to look for |
-| :--- | :--- |
-| Streaming | assistant lines replace in place |
-| Tool output | clickable ephemeral artifact link |
-| LaTeX | inline $E = mc^2$ and display metadata |
-| Board | live sessions sorted first |
+| Feature | What to look for | Score |
+| :--- | :---: | ---: |
+| Streaming | assistant lines replace in place | 9 |
+| Tool output | clickable ephemeral artifact link | 10 |
+| LaTeX | inline $E = mc^2$ and display metadata | 8 |
+| Board | live sessions sorted first | 7 |
 
 ```rust
 fn rendered_by_rust() -> &'static str {{

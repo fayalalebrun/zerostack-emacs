@@ -81,6 +81,34 @@ math macros while keeping the original LaTeX source and artifact link intact."
   '((t :inherit fixed-pitch :background unspecified))
   "Code zerostack output face.")
 
+(defface zerostack-code-block-face
+  '((t :inherit fixed-pitch :background unspecified))
+  "Code block zerostack output face.")
+
+(defface zerostack-table-face
+  '((t :inherit fixed-pitch))
+  "Table zerostack output face.")
+
+(defface zerostack-table-border-face
+  '((t :inherit (fixed-pitch shadow)))
+  "Table border zerostack output face.")
+
+(defface zerostack-bold-face
+  '((t :weight bold))
+  "Bold zerostack output face.")
+
+(defface zerostack-italic-face
+  '((t :slant italic))
+  "Italic zerostack output face.")
+
+(defface zerostack-quote-face
+  '((t :inherit font-lock-comment-face))
+  "Block quote zerostack output face.")
+
+(defface zerostack-list-marker-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "List marker zerostack output face.")
+
 (defface zerostack-muted-face
   '((t :inherit shadow))
   "Muted zerostack output face.")
@@ -129,10 +157,21 @@ math macros while keeping the original LaTeX source and artifact link intact."
   '((t :inherit success :weight bold))
   "Face used for zerostack board rows with live sessions.")
 
+(defface zerostack-board-thinking-face
+  '((t :foreground "yellow" :weight bold))
+  "Face used for zerostack board sessions that are currently thinking.")
+
 (defconst zerostack--face-map
   '((zs-normal . zerostack-normal-face)
     (zs-heading . zerostack-heading-face)
     (zs-code . zerostack-code-face)
+    (zs-code-block . zerostack-code-block-face)
+    (zs-table . zerostack-table-face)
+    (zs-table-border . zerostack-table-border-face)
+    (zs-bold . zerostack-bold-face)
+    (zs-italic . zerostack-italic-face)
+    (zs-quote . zerostack-quote-face)
+    (zs-list-marker . zerostack-list-marker-face)
     (zs-muted . zerostack-muted-face)
     (zs-link . zerostack-link-face)
     (zs-user . zerostack-user-face)
@@ -144,6 +183,12 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar zerostack-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'zerostack-send-input)
+    (define-key map (kbd "C-y") #'zerostack-yank)
+    (define-key map [remap yank] #'zerostack-yank)
+    (define-key map (kbd "C-RET") #'zerostack-insert-newline)
+    (define-key map (kbd "C-<return>") #'zerostack-insert-newline)
+    (define-key map (kbd "M-RET") #'zerostack-insert-newline)
+    (define-key map (kbd "M-<return>") #'zerostack-insert-newline)
     (define-key map (kbd "C-c C-c") #'zerostack-abort)
     (define-key map (kbd "C-c C-m") #'zerostack-command-menu)
     (define-key map (kbd "C-c /") #'zerostack-command-menu)
@@ -167,6 +212,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
     (define-key map (kbd "c") #'zerostack-board-create-at-point)
     (define-key map (kbd "p") #'zerostack-board-set-default-provider)
     (define-key map (kbd "m") #'zerostack-board-set-default-model)
+    (define-key map (kbd "d") #'zerostack-board-set-description-at-point)
     (define-key map (kbd "s") #'zerostack-board-stop-at-point)
     (define-key map (kbd "x") #'zerostack-board-trash-at-point)
     (define-key map (kbd "RET") #'zerostack-board-open-at-point)
@@ -191,6 +237,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--worktree-dir nil)
 (defvar-local zerostack--provider nil)
 (defvar-local zerostack--model nil)
+(defvar-local zerostack--tokens nil)
+(defvar-local zerostack--context-window nil)
 (defvar-local zerostack--protocol nil)
 (defvar-local zerostack--cols nil)
 (defvar-local zerostack--metadata-status-request nil)
@@ -204,6 +252,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--thinking nil)
 (defvar-local zerostack--loop-active nil)
 (defvar-local zerostack--loop-label nil)
+(defvar-local zerostack--thinking-level "on")
 (defvar-local zerostack--status nil)
 (defvar-local zerostack--send-function nil)
 (defvar-local zerostack--pending-permissions nil)
@@ -212,6 +261,10 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--latex-items nil)
 (defvar-local zerostack--latex-overlays nil)
 (defvar-local zerostack--last-notice nil)
+
+(defcustom zerostack-notify-on-ready t
+  "When non-nil, send notify-send when a session becomes ready for input."
+  :type 'boolean)
 (defvar-local zerostack-board--snapshot nil)
 (defvar-local zerostack-board--fetch-function nil)
 (defvar-local zerostack-board--session-limits nil)
@@ -227,6 +280,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--worktree-dir default-directory)
   (setq-local zerostack--provider nil)
   (setq-local zerostack--model nil)
+  (setq-local zerostack--tokens nil)
+  (setq-local zerostack--context-window nil)
   (setq-local zerostack--metadata-status-request nil)
   (setq-local zerostack--line-markers nil)
   (setq-local zerostack--notice-start-marker nil)
@@ -236,6 +291,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--thinking nil)
   (setq-local zerostack--loop-active nil)
   (setq-local zerostack--loop-label nil)
+  (setq-local zerostack--thinking-level "on")
   (setq-local zerostack--status nil)
   (setq-local zerostack--pending-permissions (make-hash-table :test 'eql))
   (setq-local zerostack--latex-items (make-hash-table :test 'equal))
@@ -579,7 +635,7 @@ The root is resolved with Projectile when available, then `project.el', then
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
-    (insert (propertize "g refresh, RET open, c create, p provider, m model, s stop, x trash\n\n" 'face 'zerostack-muted-face))
+    (insert (propertize "g refresh, RET open, c create, d describe, p provider, m model, s stop, x trash\n\n" 'face 'zerostack-muted-face))
     (if (or projects all-workspaces)
         (progn
           (dolist (project projects)
@@ -593,21 +649,43 @@ The root is resolved with Projectile when available, then `project.el', then
 
 (defun zerostack-board--insert-project (project)
   "Insert one PROJECT node and its children."
-  (let ((item (list :type 'project
-                    :path (plist-get project :path)
-                    :repo (plist-get project :repo)
-                    :name (plist-get project :name))))
-    (zerostack-board--insert-row
-     (format "%s project %s  %s"
-             (zerostack-board--alive-marker (plist-get project :alive))
-             (or (plist-get project :name) "")
-             (or (plist-get project :path) ""))
-     (if (plist-get project :alive)
-         'zerostack-board-alive-face
-       'zerostack-board-project-face)
-     item))
-  (dolist (worktree (plist-get project :worktrees))
-    (zerostack-board--insert-worktree project worktree)))
+  (let* ((worktrees (plist-get project :worktrees))
+         (active-worktrees (zerostack-board--active-worktrees worktrees))
+         (single-active (and (= (length active-worktrees) 1) (car active-worktrees)))
+         (key (format "project:%s" (or (plist-get project :path) "")))
+         (limit (zerostack-board--session-limit key))
+         (collapsed (and single-active
+                         (not (zerostack-board--session-limit-set-p key))))
+         (shown-worktrees (if collapsed nil (cl-subseq worktrees 0 (min limit (length worktrees)))))
+         (face (and single-active
+                    (zerostack-board--worktree-face single-active)))
+         (item (append (list :type 'project
+                             :path (plist-get project :path)
+                             :repo (plist-get project :repo)
+                             :name (plist-get project :name))
+                       (when single-active
+                         (list :workspace-item
+                               (zerostack-board--worktree-item-with-session project single-active))))))
+    (if collapsed
+        (zerostack-board--insert-project-row
+         (format "%s project %s  %s"
+                 (zerostack-board--alive-marker (plist-get project :alive))
+                 (or (plist-get project :name) "")
+                 (or (plist-get project :path) ""))
+         face
+         item
+         (list key (length worktrees) 0))
+      (zerostack-board--insert-row
+       (format "%s project %s  %s"
+               (zerostack-board--alive-marker (plist-get project :alive))
+               (or (plist-get project :name) "")
+               (or (plist-get project :path) ""))
+       face
+       item))
+    (dolist (worktree shown-worktrees)
+      (zerostack-board--insert-worktree project worktree))
+    (when (and (not collapsed) (> (length worktrees) limit))
+      (zerostack-board--insert-load-more key (length worktrees) limit))))
 
 (defun zerostack-board--insert-worktree (project worktree)
   "Insert one WORKTREE node and its session children."
@@ -615,57 +693,145 @@ The root is resolved with Projectile when available, then `project.el', then
          (description (zerostack-board--one-line (plist-get worktree :description)))
          (path (or (plist-get worktree :path) ""))
          (path-marker (zerostack-board--path-marker path))
-         (label (format "  %s %s  %s  %s"
+         (sessions (plist-get worktree :sessions))
+         (active (zerostack-board--active-sessions sessions))
+         (single-active (and (= (length active) 1) (car active)))
+         (key (format "worktree:%s" path))
+         (limit (zerostack-board--session-limit key))
+         (collapsed (and single-active
+                         (not (zerostack-board--session-limit-set-p key))))
+         (inline-load-more (and collapsed
+                                sessions
+                                (list key (length sessions) 0)))
+         (label (format "  %s %s  %s  "
                         (zerostack-board--alive-marker (plist-get worktree :alive))
                         (if (and description (not (string-empty-p description)))
                             description
                           "(no description)")
-                        (if (and branch (not (string-empty-p branch))) branch "-")
-                        path-marker))
-         (item (list :type 'worktree
-                     :path path
-                     :project-path (plist-get project :path)
-                     :repo (plist-get project :repo)
-                     :branch branch)))
-    (zerostack-board--insert-row
+                        (if (and branch (not (string-empty-p branch))) branch "-")))
+         (item (append (zerostack-board--worktree-item project worktree)
+                       (when single-active
+                         (list :session-item (zerostack-board--session-item single-active path))))))
+    (zerostack-board--insert-workspace-row
      label
-     (if (plist-get worktree :alive)
-         'zerostack-board-alive-face
-       'zerostack-board-worktree-face)
-     item)
-    (zerostack-board--insert-session-list
-     (format "worktree:%s" path)
-     (plist-get worktree :sessions)
-     path)))
+     path-marker
+     (format "  %s" path)
+     item
+     (and single-active (zerostack-board--session-face single-active))
+     inline-load-more)
+    (unless collapsed
+      (zerostack-board--insert-session-list key sessions path nil nil))))
 
 (defun zerostack-board--insert-loose-workspace (workspace)
   "Insert one non-Git WORKSPACE and its session children."
   (let* ((path (or (plist-get workspace :path) ""))
          (path-marker (zerostack-board--path-marker path))
-         (item (list :type 'workspace
-                     :path path)))
-    (zerostack-board--insert-row
-     (format "  %s workspace  %s  %s"
-             (zerostack-board--alive-marker (plist-get workspace :alive))
-             path-marker
-             path)
-     (if (plist-get workspace :alive)
-         'zerostack-board-alive-face
-       'zerostack-board-worktree-face)
-     item)
-    (zerostack-board--insert-session-list
-     (format "workspace:%s" path)
-     (plist-get workspace :sessions)
-     path)))
+         (sessions (plist-get workspace :sessions))
+         (active (zerostack-board--active-sessions sessions))
+         (single-active (and (= (length active) 1) (car active)))
+         (key (format "workspace:%s" path))
+         (limit (zerostack-board--session-limit key))
+         (collapsed (and single-active
+                         (not (zerostack-board--session-limit-set-p key))))
+         (item (append (list :type 'workspace
+                             :path path)
+                       (when single-active
+                         (list :session-item (zerostack-board--session-item single-active path)))))
+         (inline-load-more (and collapsed
+                                sessions
+                                (list key (length sessions) 0))))
+    (zerostack-board--insert-workspace-row
+     (format "  %s workspace  "
+             (zerostack-board--alive-marker (plist-get workspace :alive)))
+     path-marker
+     (format "  %s" path)
+     item
+     (and single-active (zerostack-board--session-face single-active))
+     inline-load-more)
+    (unless collapsed
+      (zerostack-board--insert-session-list key sessions path nil nil))))
 
-(defun zerostack-board--insert-session-list (key sessions worktree-path)
+(defun zerostack-board--active-sessions (sessions)
+  "Return live SESSIONS."
+  (cl-remove-if-not (lambda (session) (plist-get session :alive)) sessions))
+
+(defun zerostack-board--active-worktrees (worktrees)
+  "Return WORKTREES with live sessions."
+  (cl-remove-if-not
+   (lambda (worktree)
+     (zerostack-board--active-sessions (plist-get worktree :sessions)))
+   worktrees))
+
+(defun zerostack-board--worktree-face (worktree)
+  "Return aggregate face for WORKTREE."
+  (when-let ((session (car (zerostack-board--active-sessions (plist-get worktree :sessions)))))
+    (zerostack-board--session-face session)))
+
+(defun zerostack-board--worktree-item (project worktree)
+  "Return board item metadata for WORKTREE under PROJECT."
+  (list :type 'worktree
+        :path (or (plist-get worktree :path) "")
+        :project-path (plist-get project :path)
+        :repo (plist-get project :repo)
+        :branch (plist-get worktree :branch)))
+
+(defun zerostack-board--worktree-item-with-session (project worktree)
+  "Return WORKTREE item, including its active session when it is singular."
+  (let* ((path (or (plist-get worktree :path) ""))
+         (active (zerostack-board--active-sessions (plist-get worktree :sessions)))
+         (single-active (and (= (length active) 1) (car active))))
+    (append (zerostack-board--worktree-item project worktree)
+            (when single-active
+              (list :session-item (zerostack-board--session-item single-active path))))))
+
+(defun zerostack-board--insert-project-row (text face item load-more)
+  "Insert one project row TEXT with FACE, ITEM metadata, and inline LOAD-MORE."
+  (let ((start (point)))
+    (insert text)
+    (add-text-properties
+     start (point)
+     `(,@(when face `(face ,face))
+            mouse-face highlight
+            help-echo "RET opens this zerostack board item"
+            keymap ,zerostack-board-mode-map
+            follow-link t
+            zerostack-board-item ,item))
+    (insert "  ")
+    (apply #'zerostack-board--insert-load-more-inline load-more)
+    (insert "\n")))
+
+(defun zerostack-board--insert-workspace-row (prefix name suffix item name-face load-more)
+  "Insert a workspace row with NAME optionally styled and LOAD-MORE inline."
+  (let ((start (point)))
+    (insert prefix name suffix)
+    (when name-face
+      (add-text-properties start (point) `(face ,name-face)))
+    (add-text-properties
+     start (point)
+     `(mouse-face highlight
+                  help-echo "RET opens this zerostack board item"
+                  keymap ,zerostack-board-mode-map
+                  follow-link t
+                  zerostack-board-item ,item))
+    (when load-more
+      (insert "  ")
+      (apply #'zerostack-board--insert-load-more-inline load-more))
+    (insert "\n")))
+
+(defun zerostack-board--insert-session-list (key sessions worktree-path &optional suppress-load-more subdued-session-id)
   "Insert paginated SESSIONS for KEY under WORKTREE-PATH."
   (let* ((limit (zerostack-board--session-limit key))
          (shown (cl-subseq sessions 0 (min limit (length sessions)))))
     (dolist (session shown)
-      (zerostack-board--insert-session session worktree-path))
-    (when (> (length sessions) limit)
+      (unless (equal (plist-get session :id) subdued-session-id)
+        (zerostack-board--insert-session session worktree-path)))
+    (when (and (not suppress-load-more) (> (length sessions) limit))
       (zerostack-board--insert-load-more key (length sessions) limit))))
+
+(defun zerostack-board--session-limit-set-p (key)
+  "Return non-nil when KEY has an explicit board session limit."
+  (and zerostack-board--session-limits
+       (gethash key zerostack-board--session-limits)))
 
 (defun zerostack-board--session-limit (key)
   "Return currently visible session count for board list KEY."
@@ -690,27 +856,76 @@ The root is resolved with Projectile when available, then `project.el', then
            :total total
            :shown shown))))
 
-(defun zerostack-board--insert-session (session &optional worktree-path)
+(defun zerostack-board--insert-load-more-inline (key total shown)
+  "Insert an inline load-more button for session list KEY."
+  (let* ((remaining (- total shown))
+         (start (point))
+         (item (list :type 'load-more
+                     :key key
+                     :total total
+                     :shown shown)))
+    (insert (format "+ show 5 more (%d remaining)" remaining))
+    (add-text-properties
+     start (point)
+     `(face zerostack-link-face
+            mouse-face highlight
+            help-echo "RET shows more zerostack sessions"
+            keymap ,zerostack-board-mode-map
+            follow-link t
+            zerostack-board-item ,item))))
+
+(defun zerostack-board--session-item (session worktree-path)
+  "Return board item metadata for SESSION under WORKTREE-PATH."
+  (list :type 'session
+        :id (plist-get session :id)
+        :title (zerostack-board--one-line (plist-get session :title))
+        :cwd (plist-get session :cwd)
+        :worktree-path worktree-path
+        :pid (plist-get session :pid)
+        :socket (plist-get session :socket)
+        :alive (plist-get session :alive)))
+
+(defun zerostack-board--insert-session (session &optional worktree-path subdued-session-id)
   "Insert one SESSION node."
   (let* ((alive (plist-get session :alive))
          (title (zerostack-board--one-line (plist-get session :title)))
+         (display-title (if (string-empty-p title) "(untitled)" title))
          (updated-at (or (plist-get session :updated-at) ""))
          (age (zerostack-board--relative-time updated-at))
-         (item (list :type 'session
-                     :id (plist-get session :id)
-                     :title title
-                     :cwd (plist-get session :cwd)
-                     :worktree-path worktree-path
-                     :pid (plist-get session :pid)
-                     :socket (plist-get session :socket)
-                     :alive alive)))
-    (zerostack-board--insert-row
-     (format "    %s %s  %s"
-             (zerostack-board--alive-marker alive)
-             (if (string-empty-p title) "(untitled)" title)
-             age)
-     (if alive 'zerostack-board-alive-face 'zerostack-board-session-face)
-     item)))
+         (buffer (zerostack--find-chat-buffer (plist-get session :id)
+                                              (plist-get session :socket)))
+         (usage (zerostack-board--session-usage session buffer))
+         (face (if (equal (plist-get session :id) subdued-session-id)
+                   'zerostack-board-session-face
+                 (zerostack-board--session-face session buffer)))
+         (item (zerostack-board--session-item session worktree-path))
+         (start (point)))
+    (insert (format "    %s " (zerostack-board--alive-marker alive)))
+    (let ((title-start (point)))
+      (insert display-title)
+      (add-text-properties title-start (point) `(face ,face)))
+    (insert (format "  %s%s" age (if usage (format "  %s" usage) "")))
+    (add-text-properties
+     start (point)
+     `(mouse-face highlight
+                  help-echo "RET opens this zerostack board item"
+                  keymap ,zerostack-board-mode-map
+                  follow-link t
+                  zerostack-board-item ,item))
+    (insert "\n")))
+
+(defun zerostack-board--session-face (session &optional buffer)
+  "Return board face for SESSION, considering live BUFFER state."
+  (let* ((alive (plist-get session :alive))
+         (chat-buffer (or buffer
+                          (zerostack--find-chat-buffer (plist-get session :id)
+                                                       (plist-get session :socket))))
+         (thinking (and chat-buffer
+                        (with-current-buffer chat-buffer zerostack--thinking))))
+    (cond
+     (thinking 'zerostack-board-thinking-face)
+     (alive 'zerostack-board-alive-face)
+     (t 'zerostack-board-session-face))))
 
 (defun zerostack-board--insert-row (text face item)
   "Insert one board row TEXT with FACE and clickable ITEM metadata."
@@ -718,7 +933,7 @@ The root is resolved with Projectile when available, then `project.el', then
     (insert text)
     (add-text-properties
      start (point)
-     `(face ,face
+     `(,@(when face `(face ,face))
 	    mouse-face highlight
 	    help-echo "RET opens this zerostack board item"
 	    keymap ,zerostack-board-mode-map
@@ -729,6 +944,26 @@ The root is resolved with Projectile when available, then `project.el', then
 (defun zerostack-board--alive-marker (alive)
   "Return the board marker for ALIVE state."
   (if alive "*" " "))
+
+(defun zerostack-board--session-usage (session buffer)
+  "Return context usage text for SESSION, preferring live BUFFER state."
+  (let* ((tokens (or (and buffer (with-current-buffer buffer zerostack--tokens))
+                     (plist-get session :tokens)))
+         (window (or (and buffer (with-current-buffer buffer zerostack--context-window))
+                     (plist-get session :context-window))))
+    (zerostack--format-token-usage tokens window)))
+
+(defun zerostack--format-token-usage (tokens window)
+  "Return TUI-style token usage for TOKENS and WINDOW."
+  (when (and (numberp tokens) (numberp window) (> window 0))
+    (format "(%s/%s%%)" (zerostack--format-token-count tokens) (/ (* tokens 100) window))))
+
+(defun zerostack--format-token-count (tokens)
+  "Return compact token count string for TOKENS."
+  (cond
+   ((>= tokens 1000000) (format "%.1fM" (/ tokens 1000000.0)))
+   ((>= tokens 1000) (format "%dk" (/ tokens 1000)))
+   (t (format "%s" tokens))))
 
 (defun zerostack-board--current-directory-root ()
   "Return the current Projectile/project root, or `default-directory'."
@@ -841,29 +1076,56 @@ Return non-nil when DIRECTORY was newly added."
   (let ((item (zerostack-board--item-at-point event)))
     (pcase (plist-get item :type)
       ('project
-       (dired (plist-get item :path)))
+       (if-let ((workspace (plist-get item :workspace-item)))
+           (zerostack-board-open-at-point-for-item workspace)
+         (dired (plist-get item :path))))
       ('worktree
-       (dired (plist-get item :path)))
+       (if-let ((session (plist-get item :session-item)))
+           (zerostack-board--open-session session)
+         (dired (plist-get item :path))))
       ('workspace
-       (dired (plist-get item :path)))
+       (if-let ((session (plist-get item :session-item)))
+           (zerostack-board--open-session session)
+         (dired (plist-get item :path))))
       ('session
-       (if-let ((socket (plist-get item :socket)))
-           (zerostack-connect socket
-                              (plist-get item :title)
-                              (plist-get item :cwd)
-                              (plist-get item :worktree-path)
-                              (plist-get item :id))
-         (let ((default-directory (file-name-as-directory
-                                   (or (plist-get item :cwd) default-directory))))
-           (zerostack (list "--session" (plist-get item :id))
-                      (plist-get item :title)
-                      (plist-get item :cwd)
-                      (plist-get item :worktree-path)
-                      (plist-get item :id)))))
+       (zerostack-board--open-session item))
+
       ('load-more
        (zerostack-board--load-more item))
       (_
        (message "No zerostack board item at point")))))
+
+(defun zerostack-board-open-at-point-for-item (item)
+  "Open board ITEM."
+  (pcase (plist-get item :type)
+    ('worktree
+     (if-let ((session (plist-get item :session-item)))
+         (zerostack-board--open-session session)
+       (dired (plist-get item :path))))
+    ('workspace
+     (if-let ((session (plist-get item :session-item)))
+         (zerostack-board--open-session session)
+       (dired (plist-get item :path))))
+    ('session
+     (zerostack-board--open-session item))
+    (_
+     (dired (plist-get item :path)))))
+
+(defun zerostack-board--open-session (item)
+  "Open SESSION board ITEM."
+  (if-let ((socket (plist-get item :socket)))
+      (zerostack-connect socket
+                         (plist-get item :title)
+                         (plist-get item :cwd)
+                         (plist-get item :worktree-path)
+                         (plist-get item :id))
+    (let ((default-directory (file-name-as-directory
+                              (or (plist-get item :cwd) default-directory))))
+      (zerostack (list "--session" (plist-get item :id))
+                 (plist-get item :title)
+                 (plist-get item :cwd)
+                 (plist-get item :worktree-path)
+                 (plist-get item :id)))))
 
 (defun zerostack-board--load-more (item)
   "Show five more sessions for load-more ITEM."
@@ -872,7 +1134,7 @@ Return non-nil when DIRECTORY was newly added."
         (total (or (plist-get item :total) 0))
         (line (line-number-at-pos))
         (column (current-column)))
-    (zerostack-board--set-session-limit key (min total (+ shown 5)))
+    (zerostack-board--set-session-limit key (min total (max 5 (+ shown 5))))
     (when zerostack-board--snapshot
       (zerostack-board--render zerostack-board--snapshot)
       (zerostack--goto-line-column line column))))
@@ -891,6 +1153,29 @@ Return non-nil when DIRECTORY was newly added."
       (_
        (message "Press c on a project to create a worktree, or a worktree/workspace to create a session")))))
 
+(defun zerostack-board-set-description-at-point (&optional event)
+  "Set the Git branch description for the worktree at point."
+  (interactive (list last-nonmenu-event))
+  (let ((item (zerostack-board--item-at-point event)))
+    (pcase (plist-get item :type)
+      ('worktree
+       (zerostack-board--set-worktree-description item))
+      (_
+       (message "Press d on a worktree to set its branch description")))))
+
+(defun zerostack-board--set-worktree-description (worktree)
+  "Set branch description for WORKTREE."
+  (let ((project-path (plist-get worktree :project-path))
+        (branch (plist-get worktree :branch)))
+    (unless (and branch (not (string-empty-p branch)) (not (equal branch "detached")))
+      (user-error "Worktree has no branch"))
+    (let ((description (string-trim (read-string "Branch description: "))))
+      (zerostack-board--call-git project-path "config"
+                                 (format "branch.%s.description" branch)
+                                 description)
+      (message "Set branch description for %s" branch)
+      (zerostack-board-refresh))))
+
 (defun zerostack-board-stop-at-point (&optional event)
   "Stop the live zerostack session process at point."
   (interactive (list last-nonmenu-event))
@@ -898,6 +1183,10 @@ Return non-nil when DIRECTORY was newly added."
     (pcase (plist-get item :type)
       ('session
        (zerostack-board--stop-session item))
+      ((or 'worktree 'workspace)
+       (if-let ((session (plist-get item :session-item)))
+           (zerostack-board--stop-session session)
+         (message "Press s on a live session to stop its process")))
       (_
        (message "Press s on a live session to stop its process")))))
 
@@ -1166,7 +1455,9 @@ Return non-nil when DIRECTORY was newly added."
 
 (defun zerostack--send-form (form)
   "Send FORM as one protocol line and return the encoded line."
-  (let ((line (concat (prin1-to-string form) "\n")))
+  (let ((line (concat (let ((print-escape-newlines t))
+                        (prin1-to-string form))
+                      "\n")))
     (cond
      (zerostack--send-function
       (funcall zerostack--send-function line))
@@ -1229,6 +1520,19 @@ Return non-nil when DIRECTORY was newly added."
                             :request (zerostack--next-request)
                             :model model))
 
+(defun zerostack-mcp ()
+  "List configured MCP servers and tools."
+  (interactive)
+  (zerostack--send-command 'mcp :request (zerostack--next-request)))
+
+(defun zerostack-thinking-menu (level)
+  "Set native zerostack thinking/reasoning LEVEL."
+  (interactive
+   (list (completing-read "Thinking: " '("on" "off") nil t nil nil zerostack--thinking-level)))
+  (zerostack--send-command 'thinking
+                           :request (zerostack--next-request)
+                           :level level))
+
 (defun zerostack-send-prompt (text)
   "Send TEXT as a zerostack prompt."
   (interactive "sPrompt: ")
@@ -1242,6 +1546,8 @@ Return non-nil when DIRECTORY was newly added."
   (interactive "sCompaction instructions (optional): ")
   (let ((request (zerostack--next-request))
         (instructions (and instructions (string-trim instructions))))
+    (zerostack--set-status "compacting...")
+    (zerostack--set-thinking t)
     (if (and instructions (not (string-empty-p instructions)))
         (zerostack--send-command 'compact
                                  :request request
@@ -1334,27 +1640,35 @@ LIMIT defaults to 50."
                            :request (zerostack--next-request)
                            :path (expand-file-name path)))
 
-(defun zerostack-add-clipboard ()
+(defun zerostack-yank ()
+  "Yank text, or attach image/media clipboard contents."
+  (interactive)
+  (unless (zerostack-add-clipboard t)
+    (call-interactively #'yank)))
+
+(defun zerostack-add-clipboard (&optional quiet)
   "Attach clipboard contents to the current zerostack session.
 
 If the clipboard contains a path or file URI, attach that file.  If it contains
 image bytes, write them to a temporary image file first.  Otherwise, write text
-clipboard contents to a temporary text file and attach that."
+clipboard contents to a temporary text file and attach that.
+
+When QUIET is non-nil, return nil instead of falling back to text attachment or
+raising an error when no file/media clipboard content is available."
   (interactive)
-  (let ((handled (zerostack--try-yank-media))
-        path)
-    (unless handled
-      (setq path (or (zerostack--clipboard-path)
-                     (zerostack--clipboard-image-file)
-                     (zerostack--clipboard-text-file))))
+  (let ((path (or (zerostack--clipboard-path)
+                  (zerostack--clipboard-image-file)
+                  (unless quiet
+                    (zerostack--clipboard-text-file)))))
     (unless path
-      (unless handled
+      (unless quiet
         (zerostack--set-status "clipboard: no file path, image, or text found")
         (user-error "Clipboard does not contain a file path, image, or text")))
     (when path
       (zerostack--set-status (format "attaching clipboard: %s"
                                      (file-name-nondirectory path)))
-      (zerostack-add-file path))))
+      (zerostack-add-file path))
+    path))
 
 (defun zerostack--try-yank-media ()
   "Try Emacs' native `yank-media' clipboard path.
@@ -1594,6 +1908,15 @@ When BINARY is non-nil, DATA is written with binary coding."
                              :request request
                              :decision decision)))
 
+(defun zerostack-insert-newline ()
+  "Insert a newline into the current prompt input."
+  (interactive)
+  (zerostack--ensure-prompt)
+  (let ((inhibit-read-only t))
+    (goto-char (max (marker-position zerostack--input-marker)
+                    (min (point) (marker-position zerostack--controls-start-marker))))
+    (insert "\n")))
+
 (defun zerostack-send-input ()
   "Send the current input line as a normal zerostack prompt."
   (interactive)
@@ -1613,14 +1936,16 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view  _o_ artifact
+_k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ model  _M_ MCP  _v_ view  _o_ artifact
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
     ("c" zerostack-compact)
     ("l" zerostack-loop)
+    ("t" zerostack-thinking-menu)
     ("p" zerostack-provider-menu)
     ("m" zerostack-model-menu)
+    ("M" zerostack-mcp)
     ("v" zerostack-set-view)
     ("o" zerostack-open-last-artifact)))
 
@@ -1633,15 +1958,17 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "loop" "provider" "model" "view" "artifact"))
+  (let* ((commands '("skill" "attach" "compact" "loop" "thinking" "provider" "model" "mcp" "view" "artifact"))
           (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
       ("attach" (zerostack-attachment-menu))
       ("compact" (call-interactively #'zerostack-compact))
       ("loop" (call-interactively #'zerostack-loop))
+      ("thinking" (call-interactively #'zerostack-thinking-menu))
       ("provider" (call-interactively #'zerostack-provider-menu))
       ("model" (call-interactively #'zerostack-model-menu))
+      ("mcp" (call-interactively #'zerostack-mcp))
       ("view" (call-interactively #'zerostack-set-view))
       ("artifact" (zerostack-open-last-artifact)))))
 
@@ -1747,6 +2074,11 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
                 (append (list (car args) "deny") (cdr args))))
       ("/artifact" (zerostack-open-last-artifact))
       ("/latex" (zerostack-open-last-latex-artifact))
+      ("/mcp" (zerostack-mcp))
+      ((or "/thinking" "/reasoning")
+       (if (car args)
+           (zerostack-thinking-menu (car args))
+         (call-interactively #'zerostack-thinking-menu)))
       ("/loop"
        (zerostack--append-local-line
         "/loop is not implemented by the native Emacs protocol yet"
@@ -1779,7 +2111,7 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
   (zerostack--set-status
-   "commands: C-c / opens skill, attach, compact, loop, provider, model, view, artifact"))
+   "commands: C-c / opens skill, attach, compact, loop, thinking, provider, model, mcp, view, artifact"))
 
 (defun zerostack-disconnect ()
   "Disconnect from zerostack and stop a server process started by this buffer."
@@ -1816,14 +2148,28 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
   (when (plist-member plist :active)
     (zerostack--update-loop-state plist))
   (when-let ((message (plist-get plist :message)))
-    (zerostack--append-local-line message 'zs-muted)))
+    (zerostack--append-local-line message 'zs-muted))
+  (when (plist-member plist :compacted)
+    (zerostack--set-thinking nil)
+    (zerostack--set-status nil)))
 
 (defun zerostack--update-provider-model (plist)
   "Update provider/model buffer-local state from PLIST."
   (when-let ((provider (plist-get plist :provider)))
     (setq zerostack--provider (format "%s" provider)))
   (when-let ((model (plist-get plist :model)))
-    (setq zerostack--model (format "%s" model))))
+    (setq zerostack--model (format "%s" model)))
+  (when-let ((tokens (plist-get plist :tokens)))
+    (setq zerostack--tokens tokens))
+  (when-let ((window (plist-get plist :context-window)))
+    (setq zerostack--context-window window))
+  (when-let ((level (plist-get plist :thinking)))
+    (setq zerostack--thinking-level (format "%s" level)))
+  (when (and (markerp zerostack--prompt-start-marker)
+             (markerp zerostack--input-marker)
+             (marker-position zerostack--prompt-start-marker)
+             (marker-position zerostack--input-marker))
+    (zerostack--refresh-prompt)))
 
 (defun zerostack--handle-error (plist)
   "Handle error PLIST."
@@ -1881,6 +2227,12 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
       (if (eq (plist-get plist :reason) 'max)
           "loop stopped: max iterations reached"
         "loop stopped")))
+    ('compact-started
+     (zerostack--set-status "compacting...")
+     (zerostack--set-thinking t))
+    ('compact-done
+     (zerostack--set-thinking nil)
+     (zerostack--set-status nil))
     ('tool-call
      nil)
     ('subagent-tool-call
@@ -1896,8 +2248,9 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
        (remhash request zerostack--pending-permissions))
      (zerostack--refresh-permission-status))
     ('completion-call
-     nil)
+     (zerostack--update-provider-model plist))
     ('done
+     (zerostack--update-provider-model plist)
      (zerostack--clear-pending-permissions)
      (zerostack--set-thinking nil)
      (unless zerostack--loop-active
@@ -2093,11 +2446,14 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
   "Insert one pre-rendered LINE plist at point."
   (let* ((text (or (plist-get line :text) ""))
          (face (zerostack--face (or (plist-get line :face) 'zs-normal)))
+         (spans (plist-get line :spans))
          (artifact (plist-get line :artifact))
          (latex (plist-get line :latex))
          (start (point)))
-    (insert text)
-    (add-text-properties start (point) `(face ,face read-only t rear-nonsticky t))
+    (if spans
+        (zerostack--insert-wire-spans spans face)
+      (insert text)
+      (add-text-properties start (point) `(face ,face read-only t rear-nonsticky t)))
     (when artifact
       (zerostack--remember-artifact artifact)
       (zerostack--make-artifact-region start (point) artifact))
@@ -2105,6 +2461,22 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _p_ provider  _m_ model  _v_ view 
       (dolist (item latex)
         (zerostack--remember-latex item)))
     (insert (propertize "\n" 'read-only t 'rear-nonsticky t))))
+
+(defun zerostack--insert-wire-spans (spans fallback-face)
+  "Insert line-local SPANS with protocol faces."
+  (if spans
+      (dolist (span spans)
+        (let ((start (point))
+              (text (or (plist-get span :text) ""))
+              (face (zerostack--face (or (plist-get span :face) 'zs-normal))))
+          (insert text)
+          (add-text-properties
+           start (point)
+           `(face ,face read-only t rear-nonsticky t))))
+    (let ((start (point)))
+      (add-text-properties
+       start (point)
+       `(face ,fallback-face read-only t rear-nonsticky t)))))
 
 (defun zerostack--make-artifact-region (start end artifact)
   "Make text between START and END open ARTIFACT."
@@ -2296,12 +2668,13 @@ inserted into the transcript."
 
 (defun zerostack--insert-prompt-text ()
   "Insert the current prompt text at point."
-  (when (and zerostack--status (not (string-empty-p zerostack--status)))
-    (insert (propertize (format "%s | " zerostack--status)
-                        'face 'zerostack-muted-face
-                        'read-only t
-                        'front-sticky t
-                        'rear-nonsticky t)))
+  (let ((prefix (zerostack--prompt-prefix)))
+    (when (not (string-empty-p prefix))
+      (insert (propertize (format "%s | " prefix)
+                          'face 'zerostack-muted-face
+                          'read-only t
+                          'front-sticky t
+                          'rear-nonsticky t))))
   (insert (propertize (cond
                        ((zerostack--pending-permissions-p)
                         "zs waiting for permission> ")
@@ -2317,6 +2690,17 @@ inserted into the transcript."
                       'read-only t
                       'front-sticky t
                       'rear-nonsticky t)))
+
+(defun zerostack--prompt-prefix ()
+  "Return prompt metadata prefix."
+  (string-join
+   (delq nil
+         (list zerostack--status
+               (and zerostack--thinking-level
+                    (format "thinking:%s" zerostack--thinking-level))
+               zerostack--model
+               (zerostack--format-token-usage zerostack--tokens zerostack--context-window)))
+   " | "))
 
 (defun zerostack--set-status (text)
   "Set single-line prompt status TEXT without adding transcript lines."
@@ -2342,8 +2726,17 @@ inserted into the transcript."
   "Set whether the input prompt should indicate THINKING."
   (zerostack--ensure-prompt)
   (unless (eq zerostack--thinking thinking)
-    (setq zerostack--thinking thinking)
-    (zerostack--refresh-prompt)))
+    (let ((became-ready (and zerostack--thinking (not thinking))))
+      (setq zerostack--thinking thinking)
+      (zerostack--refresh-prompt)
+      (when became-ready
+        (zerostack--notify-ready)))))
+
+(defun zerostack--notify-ready ()
+  "Send a desktop notification that this session is ready for input."
+  (when (and zerostack-notify-on-ready (executable-find "notify-send"))
+    (let ((title (or zerostack--session-title "zerostack")))
+      (start-process "zerostack-notify" nil "notify-send" "zerostack" (format "%s is ready" title)))))
 
 (defun zerostack--refresh-prompt ()
   "Refresh prompt text while preserving current input."
