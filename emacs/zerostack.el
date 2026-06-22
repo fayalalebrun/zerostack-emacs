@@ -161,6 +161,10 @@ math macros while keeping the original LaTeX source and artifact link intact."
   '((t :foreground "yellow" :weight bold))
   "Face used for zerostack board sessions that are currently thinking.")
 
+(defface zerostack-board-input-face
+  '((t :inherit warning :weight bold))
+  "Face used for zerostack board sessions waiting for user input.")
+
 (defconst zerostack--face-map
   '((zs-normal . zerostack-normal-face)
     (zs-heading . zerostack-heading-face)
@@ -205,20 +209,24 @@ math macros while keeping the original LaTeX source and artifact link intact."
     map)
   "Keymap used on clickable artifact and LaTeX spans.")
 
+(defun zerostack-board--bind-keys (map)
+  (set-keymap-parent map special-mode-map)
+  (define-key map (kbd "g") #'zerostack-board-refresh)
+  (define-key map (kbd "c") #'zerostack-board-create-at-point)
+  (define-key map (kbd "p") #'zerostack-board-set-default-provider)
+  (define-key map (kbd "m") #'zerostack-board-set-default-model)
+  (define-key map (kbd "d") #'zerostack-board-set-description-at-point)
+  (define-key map (kbd "s") #'zerostack-board-stop-at-point)
+  (define-key map (kbd "x") #'zerostack-board-trash-at-point)
+  (define-key map (kbd "RET") #'zerostack-board-open-at-point)
+  (define-key map [mouse-2] #'zerostack-board-open-at-point)
+  map)
+
 (defvar zerostack-board-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "g") #'zerostack-board-refresh)
-    (define-key map (kbd "c") #'zerostack-board-create-at-point)
-    (define-key map (kbd "p") #'zerostack-board-set-default-provider)
-    (define-key map (kbd "m") #'zerostack-board-set-default-model)
-    (define-key map (kbd "d") #'zerostack-board-set-description-at-point)
-    (define-key map (kbd "s") #'zerostack-board-stop-at-point)
-    (define-key map (kbd "x") #'zerostack-board-trash-at-point)
-    (define-key map (kbd "RET") #'zerostack-board-open-at-point)
-    (define-key map [mouse-2] #'zerostack-board-open-at-point)
-    map)
+  (zerostack-board--bind-keys (make-sparse-keymap))
   "Keymap for `zerostack-board-mode'.")
+
+(zerostack-board--bind-keys zerostack-board-mode-map)
 
 (defvar zerostack-global-mode-map
   (let ((map (make-sparse-keymap)))
@@ -920,9 +928,13 @@ The root is resolved with Projectile when available, then `project.el', then
          (chat-buffer (or buffer
                           (zerostack--find-chat-buffer (plist-get session :id)
                                                        (plist-get session :socket))))
+         (needs-input (and chat-buffer
+                           (with-current-buffer chat-buffer
+                             (zerostack--needs-input-p))))
          (thinking (and chat-buffer
                         (with-current-buffer chat-buffer zerostack--thinking))))
     (cond
+     (needs-input 'zerostack-board-input-face)
      (thinking 'zerostack-board-thinking-face)
      (alive 'zerostack-board-alive-face)
      (t 'zerostack-board-session-face))))
@@ -2291,7 +2303,15 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ mo
   "Handle permission request event PLIST."
   (let ((request (plist-get plist :request)))
     (puthash request plist zerostack--pending-permissions)
-    (zerostack--refresh-permission-status)))
+    (zerostack--refresh-permission-status)
+    (zerostack--notify-needs-input
+     (format "permission #%s %s"
+             request
+             (or (plist-get plist :tool) "tool")))))
+
+(defun zerostack--needs-input-p ()
+  "Return non-nil when the current session is waiting for user input."
+  (zerostack--pending-permissions-p))
 
 (defun zerostack--pending-permissions-p ()
   "Return non-nil when the current session is waiting for permission."
@@ -2734,9 +2754,13 @@ inserted into the transcript."
 
 (defun zerostack--notify-ready ()
   "Send a desktop notification that this session is ready for input."
+  (zerostack--notify-needs-input "ready"))
+
+(defun zerostack--notify-needs-input (reason)
+  "Send a desktop notification that this session needs input for REASON."
   (when (and zerostack-notify-on-ready (executable-find "notify-send"))
     (let ((title (or zerostack--session-title "zerostack")))
-      (start-process "zerostack-notify" nil "notify-send" "zerostack" (format "%s is ready" title)))))
+      (start-process "zerostack-notify" nil "notify-send" "zerostack" (format "%s needs input: %s" title reason)))))
 
 (defun zerostack--refresh-prompt ()
   "Refresh prompt text while preserving current input."

@@ -462,6 +462,7 @@
   (should (eq (lookup-key zerostack-global-mode-map (kbd "C-c z"))
               #'zerostack-board-add-current-directory)))
 
+
 (ert-deftest zerostack-test-board-create-session-from-pinned-workspace ()
   (let* ((dir (make-temp-file "zerostack-pinned-session" t))
          (zerostack-board-directories (list dir)))
@@ -1453,7 +1454,7 @@
        (zerostack--set-thinking t)
        (zerostack--set-thinking nil)
        (should (equal processes
-                      '(("zerostack-notify" nil "notify-send" "zerostack" "Demo is ready"))))))))
+                      '(("zerostack-notify" nil "notify-send" "zerostack" "Demo needs input: ready"))))))))
 
 (ert-deftest zerostack-test-loop-state-updates-prompt-and_stop_command ()
   (zerostack-test--with-buffer
@@ -1485,6 +1486,42 @@
      (should-not zerostack--loop-active)
      (should-not zerostack--thinking)
      (should (string-match-p "loop stopped" (buffer-string))))))
+
+(ert-deftest zerostack-test-permission-request-notifies-needs-input ()
+  (zerostack-test--with-buffer
+   (let ((zerostack-notify-on-ready t)
+         processes)
+     (setq zerostack--session-title "Demo")
+     (cl-letf (((symbol-function 'executable-find)
+                (lambda (program) (and (equal program "notify-send") program)))
+               ((symbol-function 'start-process)
+                (lambda (&rest args) (push args processes))))
+       (zerostack--handle-form
+        '(event :seq 1 :session "s" :type permission-request
+                :request 8 :tool "bash" :input "pwd"))
+       (should (equal processes
+                      '(("zerostack-notify" nil "notify-send" "zerostack" "Demo needs input: permission #8 bash"))))))))
+
+(ert-deftest zerostack-test-board-colors-open-permission-session-as-input-needed ()
+  (let ((chat (generate-new-buffer " *zerostack-open-permission-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (zerostack-mode)
+            (setq zerostack--session "live-session"
+                  zerostack--thinking t)
+            (zerostack--handle-form
+             '(event :seq 1 :session "live-session" :type permission-request
+                     :request 8 :tool "bash" :input "pwd")))
+          (zerostack-test--with-board-buffer
+           (zerostack-test--expand-project "/repo/live")
+           (zerostack-board--render zerostack-test--board-snapshot)
+           (goto-char (point-min))
+           (search-forward "live-wt/")
+           (should (eq (get-text-property (1- (point)) 'face)
+                       'zerostack-board-input-face))))
+      (when (buffer-live-p chat)
+        (kill-buffer chat)))))
 
 (ert-deftest zerostack-test-prompt-indicates-waiting-for-permission ()
   (zerostack-test--with-buffer
