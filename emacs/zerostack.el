@@ -199,6 +199,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
     (define-key map (kbd "C-c C-a") #'zerostack-attach)
     (define-key map (kbd "C-c C-o") #'zerostack-open-artifact-at-point)
     (define-key map (kbd "C-c C-s") #'zerostack-request-status)
+    (define-key map (kbd "C-c C-f") #'zerostack-fork)
     map)
   "Keymap for `zerostack-mode'.")
 
@@ -1553,6 +1554,24 @@ Return non-nil when DIRECTORY was newly added."
                            :request (zerostack--next-request)
                            :text text))
 
+(defun zerostack--message-index-at-point ()
+  "Return rendered zerostack message index at point."
+  (get-text-property (point) 'zerostack-message-index))
+
+(defun zerostack-fork (&optional index)
+  "Fork the current session before message INDEX, defaulting to point/region."
+  (interactive)
+  (let* ((index (or index
+                   (and (use-region-p)
+                        (save-excursion
+                          (goto-char (region-beginning))
+                          (zerostack--message-index-at-point)))
+                   (zerostack--message-index-at-point)
+                   (read-number "Fork before message index: ")))
+         (request (zerostack--next-request)))
+    (zerostack--set-status (format "forking before message %s" index))
+    (zerostack--send-command 'fork :request request :index index)))
+
 (defun zerostack-compact (&optional instructions)
   "Compact the current zerostack session, optionally using INSTRUCTIONS."
   (interactive "sCompaction instructions (optional): ")
@@ -1948,11 +1967,12 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ model  _M_ MCP  _v_ view  _o_ artifact
+_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _p_ provider  _m_ model  _M_ MCP  _v_ view  _o_ artifact
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
     ("c" zerostack-compact)
+    ("f" zerostack-fork)
     ("l" zerostack-loop)
     ("t" zerostack-thinking-menu)
     ("p" zerostack-provider-menu)
@@ -1970,12 +1990,13 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ mo
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "loop" "thinking" "provider" "model" "mcp" "view" "artifact"))
+  (let* ((commands '("skill" "attach" "compact" "fork" "loop" "thinking" "provider" "model" "mcp" "view" "artifact"))
           (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
       ("attach" (zerostack-attachment-menu))
       ("compact" (call-interactively #'zerostack-compact))
+      ("fork" (call-interactively #'zerostack-fork))
       ("loop" (call-interactively #'zerostack-loop))
       ("thinking" (call-interactively #'zerostack-thinking-menu))
       ("provider" (call-interactively #'zerostack-provider-menu))
@@ -2077,6 +2098,10 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ mo
          (zerostack--append-local-line "usage: /view <cols>" 'zs-error)))
       ("/abort" (zerostack-abort))
       ((or "/compact" "/compress") (zerostack-compact rest))
+      ("/fork"
+       (if (car args)
+           (zerostack-fork (string-to-number (car args)))
+         (zerostack-fork)))
       ("/permission" (zerostack--slash-permission args))
       ("/allow" (zerostack--slash-permission
                  (append (list (car args) "allow-once") (cdr args))))
@@ -2123,7 +2148,7 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ mo
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
   (zerostack--set-status
-   "commands: C-c / opens skill, attach, compact, loop, thinking, provider, model, mcp, view, artifact"))
+   "commands: C-c / opens skill, attach, compact, fork, loop, thinking, provider, model, mcp, view, artifact"))
 
 (defun zerostack-disconnect ()
   "Disconnect from zerostack and stop a server process started by this buffer."
@@ -2469,11 +2494,17 @@ _k_ skill  _a_ attach  _c_ compact  _l_ loop  _t_ thinking  _p_ provider  _m_ mo
          (spans (plist-get line :spans))
          (artifact (plist-get line :artifact))
          (latex (plist-get line :latex))
+         (message-index (plist-get line :message-index))
+         (role (plist-get line :role))
          (start (point)))
     (if spans
         (zerostack--insert-wire-spans spans face)
       (insert text)
       (add-text-properties start (point) `(face ,face read-only t rear-nonsticky t)))
+    (when message-index
+      (add-text-properties
+       start (point)
+       `(zerostack-message-index ,message-index zerostack-message-role ,role)))
     (when artifact
       (zerostack--remember-artifact artifact)
       (zerostack--make-artifact-region start (point) artifact))

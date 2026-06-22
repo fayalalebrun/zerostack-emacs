@@ -212,6 +212,51 @@ fn add_message_updates_updated_at() {
 }
 
 #[test]
+fn fork_before_message_truncates_and_resets_totals() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, "first");
+    s.add_message(MessageRole::Assistant, "reply");
+    s.add_message(MessageRole::User, "second");
+    s.total_input_tokens = 10;
+    s.total_output_tokens = 20;
+    s.total_cost = 0.5;
+    s.set_calibration(100, 50);
+
+    let fork = s.fork_before_message(2);
+
+    assert_ne!(fork.id, s.id);
+    assert_eq!(fork.messages.len(), 2);
+    assert_eq!(fork.messages[0].content, "first");
+    assert_eq!(fork.messages[1].content, "reply");
+    assert_eq!(
+        fork.total_estimated_tokens,
+        fork.messages
+            .iter()
+            .map(|m| m.estimated_tokens)
+            .sum::<u64>()
+    );
+    assert_eq!(fork.total_input_tokens, 0);
+    assert_eq!(fork.total_output_tokens, 0);
+    assert_eq!(fork.total_cost, 0.0);
+    assert_eq!(fork.calibrated_tokens, 0);
+    assert_eq!(fork.name, "Fork before: second");
+    assert_eq!(fork.title(), "Fork before: second");
+    assert_eq!(s.messages.len(), 3);
+}
+
+#[test]
+fn session_title_uses_latest_user_message_or_name() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    assert_eq!(s.title(), "untitled");
+    s.add_message(MessageRole::User, "first");
+    s.add_message(MessageRole::Assistant, "reply");
+    s.add_message(MessageRole::User, "second");
+    assert_eq!(s.title(), "second");
+    s.name = "named".into();
+    assert_eq!(s.title(), "named");
+}
+
+#[test]
 fn needs_compaction_when_over_threshold() {
     let mut s = Session::new("openai", "gpt-4", 1000);
     s.add_message(MessageRole::User, &"x".repeat(900 * 4)); // ~900 tokens

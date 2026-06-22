@@ -87,6 +87,15 @@ in
 pkgs.zerostack
 ```
 
+Development commands should be run through the flake shell so Emacs, TeX, and
+other native-client test tools are available:
+
+```bash
+nix develop --no-write-lock-file -c cargo fmt
+nix develop --no-write-lock-file -c cargo test
+nix develop --no-write-lock-file -c cargo install --path . --debug
+```
+
 ### Cargo
 
 ```bash

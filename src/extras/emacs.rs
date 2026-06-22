@@ -78,7 +78,6 @@ mod imp {
         mcp_manager: Mutex<Option<crate::extras::mcp::McpClientManager>>,
         events: broadcast::Sender<String>,
         mutable: Mutex<MutableState>,
-        session_id: String,
         registry_dir: PathBuf,
         socket_path: PathBuf,
     }
@@ -174,6 +173,8 @@ mod imp {
         spans: Vec<WireSpan>,
         artifact: Option<ArtifactInfo>,
         latex: Vec<LatexInfo>,
+        message_index: Option<usize>,
+        role: Option<MessageRole>,
     }
 
     impl WireLine {
@@ -184,6 +185,8 @@ mod imp {
                 spans: Vec::new(),
                 artifact: None,
                 latex: Vec::new(),
+                message_index: None,
+                role: None,
             }
         }
 
@@ -198,6 +201,8 @@ mod imp {
                 spans: Vec::new(),
                 artifact: Some(artifact),
                 latex: Vec::new(),
+                message_index: None,
+                role: None,
             }
         }
 
@@ -209,11 +214,27 @@ mod imp {
                 spans,
                 artifact: None,
                 latex: Vec::new(),
+                message_index: None,
+                role: None,
             }
         }
 
         fn push_latex(&mut self, latex: LatexInfo) {
             self.latex.push(latex);
+        }
+
+        fn with_source(mut self, message_index: usize, role: MessageRole) -> Self {
+            self.message_index = Some(message_index);
+            self.role = Some(role);
+            self
+        }
+    }
+
+    fn role_atom(role: MessageRole) -> &'static str {
+        match role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
         }
     }
 
@@ -254,7 +275,6 @@ mod imp {
         status_signals: Option<StatusSignals>,
     ) -> anyhow::Result<()> {
         let (registration, listener) = Registration::create(&session)?;
-        let session_id = session.id.to_string();
         let initial_line_count =
             render_session_lines(&session, &cli, &cfg, &context, DEFAULT_COLS).len();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
@@ -286,7 +306,6 @@ mod imp {
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
             }),
-            session_id,
             registry_dir: registration.dir.clone(),
             socket_path: registration.socket_path.clone(),
         });
@@ -295,7 +314,10 @@ mod imp {
             tokio::spawn(permission_pump(server.clone(), ask_rx));
         }
 
-        eprintln!("zerostack Emacs session {}", server.session_id);
+        eprintln!(
+            "zerostack Emacs session {}",
+            server.current_session_id().await
+        );
         eprintln!("socket {}", registration.socket_path.display());
 
         loop {
@@ -383,7 +405,7 @@ mod imp {
                 provider: session.provider.to_string(),
                 created_at: session.created_at.to_string(),
                 updated_at: session.updated_at.to_string(),
-                title: session_title(session),
+                title: session.title(),
                 tokens: session.effective_context_tokens(),
                 context_window: session.context_window,
                 protocol: PROTOCOL_VERSION,
@@ -400,12 +422,17 @@ mod imp {
             mutable.seq
         }
 
+        async fn current_session_id(&self) -> String {
+            self.session.lock().await.id.to_string()
+        }
+
         async fn event_form(&self, event_type: &str, fields: String) -> String {
             let seq = self.next_seq().await;
+            let session_id = self.current_session_id().await;
             format!(
                 "(event :seq {} :session {} :type {}{})",
                 seq,
-                sexp_quote(&self.session_id),
+                sexp_quote(&session_id),
                 event_type,
                 fields,
             )
@@ -569,7 +596,7 @@ mod imp {
             .send(format!(
                 "(ready :protocol {} :session {} :pid {} :socket {})",
                 PROTOCOL_VERSION,
-                sexp_quote(&server.session_id),
+                sexp_quote(&server.current_session_id().await),
                 std::process::id(),
                 sexp_quote(server.socket_path.to_string_lossy().as_ref()),
             ))
@@ -616,6 +643,7 @@ mod imp {
             "file-list" => handle_file_list(&server, &cmd, out).await,
             "prompt" => handle_prompt(server.clone(), &cmd, out).await,
             "compact" => handle_compact(&server, &cmd, out).await,
+            "fork" => handle_fork(&server, &cmd, out).await,
             "provider" => handle_provider(&server, &cmd, out).await,
             "model" => handle_model(&server, &cmd, out).await,
             "mcp" => handle_mcp(&server, &cmd, out).await,
@@ -650,7 +678,7 @@ mod imp {
             format!(
                 " :protocol {} :session {} :pid {} :cols {} :socket {}",
                 PROTOCOL_VERSION,
-                sexp_quote(&server.session_id),
+                sexp_quote(&server.current_session_id().await),
                 std::process::id(),
                 cols,
                 sexp_quote(server.socket_path.to_string_lossy().as_ref()),
@@ -682,7 +710,7 @@ mod imp {
         out.send(format!(
             "(event :seq {} :session {} :type session-render :replace-from 0 :lines {})",
             seq,
-            sexp_quote(&server.session_id),
+            sexp_quote(&server.current_session_id().await),
             lines_to_sexp(&lines),
         ))
         .await?;
@@ -1466,6 +1494,63 @@ mod imp {
         Ok(())
     }
 
+    async fn handle_fork(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let message_index = usize_arg(cmd, "index").context("fork requires :index")?;
+        let (old_id, new_id, message_count) = {
+            let mutable = server.mutable.lock().await;
+            if mutable.running {
+                anyhow::bail!("cannot fork while an agent turn is running");
+            }
+            #[cfg(feature = "loop")]
+            if mutable.loop_state.as_ref().is_some_and(|ls| ls.active) {
+                anyhow::bail!("cannot fork while a loop is active");
+            }
+            let mut session = server.session.lock().await;
+            if message_index > session.messages.len() {
+                anyhow::bail!("message index out of range");
+            }
+            let old_id = session.id.to_string();
+            *session = session.fork_before_message(message_index);
+            if !server.cli.no_session {
+                crate::session::storage::save_session(&session)?;
+            }
+            (old_id, session.id.to_string(), session.messages.len())
+        };
+        server.update_meta_from_session().await;
+        let cols = server.mutable.lock().await.cols;
+        let lines = {
+            let session = server.session.lock().await;
+            let context = server.context.lock().await;
+            render_session_lines(&session, &server.cli, &server.cfg, &context, cols)
+        };
+        server
+            .send_render_event("session-render", 0, 0, lines)
+            .await;
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :old-session {} :new-session {} :index {} :messages {} :message {}",
+                sexp_quote(&old_id),
+                sexp_quote(&new_id),
+                message_index,
+                message_count,
+                sexp_quote(&format!(
+                    "forked {} -> {} before message {}",
+                    short_id(&old_id),
+                    short_id(&new_id),
+                    message_index,
+                )),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
     async fn handle_compact(
         server: &Arc<Server>,
         cmd: &Command,
@@ -1832,11 +1917,9 @@ mod imp {
         text: String,
         turn: u64,
     ) -> anyhow::Result<Option<String>> {
-        let user_lines = render_user_lines(&text);
-        server.append_lines("user-render", turn, user_lines).await;
-
-        let history = {
+        let (history, user_index, assistant_index) = {
             let mut session = server.session.lock().await;
+            let user_index = session.messages.len();
             let history = convert_history(&session);
             #[cfg(feature = "multimodal")]
             let history = {
@@ -1850,6 +1933,7 @@ mod imp {
                 }
             };
             session.add_message(MessageRole::User, &text);
+            let assistant_index = session.messages.len();
             if !server.cli.no_session {
                 let _ = crate::session::chat_history::append_entry(
                     &crate::session::chat_history::ChatHistoryEntry {
@@ -1858,8 +1942,15 @@ mod imp {
                     },
                 );
             }
-            history
+            (history, user_index, assistant_index)
         };
+        server
+            .append_lines(
+                "user-render",
+                turn,
+                with_source_lines(render_user_lines(&text), user_index, MessageRole::User),
+            )
+            .await;
         server.update_meta_from_session().await;
 
         if let Some(ss) = server.status_signals.as_ref() {
@@ -1979,7 +2070,11 @@ mod imp {
                     let safe = sanitize_output(&text);
                     response_buf.push_str(&safe);
                     let cols = server.mutable.lock().await.cols;
-                    let lines = render_assistant_lines(&response_buf, cols, false);
+                    let lines = with_source_lines(
+                        render_assistant_lines(&response_buf, cols, false),
+                        assistant_index,
+                        MessageRole::Assistant,
+                    );
                     let start = match response_start_line {
                         Some(start) => start,
                         None => {
@@ -1995,7 +2090,14 @@ mod imp {
                 AgentEvent::ToolCall { name, args } => {
                     if response_start_line.is_some() {
                         server
-                            .append_lines("assistant-render", turn, vec![blank_line()])
+                            .append_lines(
+                                "assistant-render",
+                                turn,
+                                vec![
+                                    blank_line()
+                                        .with_source(assistant_index, MessageRole::Assistant),
+                                ],
+                            )
                             .await;
                     }
                     response_buf.clear();
@@ -2112,10 +2214,14 @@ mod imp {
                         Some(start) => start,
                         None => server.mutable.lock().await.line_count,
                     };
-                    let mut lines = render_assistant_lines(&response, cols, false);
+                    let mut lines = with_source_lines(
+                        render_assistant_lines(&response, cols, false),
+                        assistant_index,
+                        MessageRole::Assistant,
+                    );
                     let latex_items = attach_latex_metadata(&server, turn, start, &mut lines).await;
-                    lines.push(blank_line());
-                    lines.push(blank_line());
+                    lines.push(blank_line().with_source(assistant_index, MessageRole::Assistant));
+                    lines.push(blank_line().with_source(assistant_index, MessageRole::Assistant));
                     server
                         .send_render_event("assistant-render", turn, start, lines)
                         .await;
@@ -2245,7 +2351,7 @@ mod imp {
 
         let validation_output = run_loop_validation(run_cmd.as_deref()).await;
         if let Err(e) = crate::extras::r#loop::transcript::save_iteration(
-            &server.session_id,
+            &server.current_session_id().await,
             iteration,
             &prompt,
             &response,
@@ -2372,17 +2478,28 @@ mod imp {
             ));
             out.push(blank_line());
         }
-        for msg in &session.messages {
+        for (message_index, msg) in session.messages.iter().enumerate() {
             match msg.role {
-                MessageRole::User => out.extend(render_user_lines(&msg.content)),
+                MessageRole::User => out.extend(
+                    render_user_lines(&msg.content)
+                        .into_iter()
+                        .map(|line| line.with_source(message_index, msg.role)),
+                ),
                 MessageRole::Assistant => {
-                    out.extend(render_assistant_lines(&msg.content, cols, true));
+                    out.extend(
+                        render_assistant_lines(&msg.content, cols, true)
+                            .into_iter()
+                            .map(|line| line.with_source(message_index, msg.role)),
+                    );
                 }
                 MessageRole::System => {
                     for line in msg.content.lines() {
-                        out.push(WireLine::new(format!("# {}", line), "zs-muted"));
+                        out.push(
+                            WireLine::new(format!("# {}", line), "zs-muted")
+                                .with_source(message_index, msg.role),
+                        );
                     }
-                    out.push(blank_line());
+                    out.push(blank_line().with_source(message_index, msg.role));
                 }
             }
         }
@@ -2415,6 +2532,17 @@ mod imp {
             out.push(blank_line());
         }
         out
+    }
+
+    fn with_source_lines(
+        lines: Vec<WireLine>,
+        message_index: usize,
+        role: MessageRole,
+    ) -> Vec<WireLine> {
+        lines
+            .into_iter()
+            .map(|line| line.with_source(message_index, role))
+            .collect()
     }
 
     fn render_user_lines(text: &str) -> Vec<WireLine> {
@@ -3283,19 +3411,6 @@ mod imp {
         std::os::unix::net::UnixStream::connect(path).is_ok()
     }
 
-    fn session_title(session: &Session) -> String {
-        if !session.name.is_empty() {
-            return session.name.to_string();
-        }
-        session
-            .messages
-            .iter()
-            .rev()
-            .find(|msg| msg.role == MessageRole::User)
-            .map(|msg| msg.content.chars().take(80).collect())
-            .unwrap_or_default()
-    }
-
     fn short_id(id: &str) -> &str {
         id.get(..8).unwrap_or(id)
     }
@@ -3627,13 +3742,20 @@ mod imp {
                     } else {
                         format!(" :spans {}", spans_to_sexp(&line.spans))
                     };
+                    let source = match (line.message_index, line.role) {
+                        (Some(index), Some(role)) => {
+                            format!(" :message-index {} :role {}", index, role_atom(role))
+                        }
+                        _ => String::new(),
+                    };
                     format!(
-                        "(:text {} :face {}{}{}{})",
+                        "(:text {} :face {}{}{}{}{})",
                         sexp_quote(&line.text),
                         line.face,
                         spans,
                         artifact,
                         latex,
+                        source,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -3778,6 +3900,11 @@ mod imp {
                 Some("preserve test failure details"),
             );
 
+            let fork = parse_command("(fork :request 13 :index 2)").unwrap();
+            assert_eq!(fork.name, "fork");
+            assert_eq!(request_arg(&fork).as_deref(), Some("13"));
+            assert_eq!(usize_arg(&fork, "index"), Some(2));
+
             let outcome = CompactionOutcome {
                 compacted: true,
                 messages: 3,
@@ -3818,6 +3945,32 @@ mod imp {
                 attachment_items_to_sexp(&items),
                 "((:index 0 :kind context-file :path \"/tmp/notes.txt\" :bytes 12))",
             );
+        }
+
+        #[test]
+        fn session_render_lines_include_message_source_metadata() {
+            let mut session = Session::new("openai", "gpt", 1000);
+            session.add_message(MessageRole::User, "hello");
+            session.add_message(MessageRole::Assistant, "world");
+            let cli = Cli::default();
+            let cfg = Config::default();
+            let context = crate::context::load(true);
+            let lines = render_session_lines(&session, &cli, &cfg, &context, 100);
+            let encoded = lines_to_sexp(&lines);
+
+            assert!(encoded.contains(":message-index 0 :role user"));
+            assert!(encoded.contains(":message-index 1 :role assistant"));
+        }
+
+        #[test]
+        fn with_source_lines_adds_message_source_metadata() {
+            let encoded = lines_to_sexp(&with_source_lines(
+                render_user_lines("hello"),
+                3,
+                MessageRole::User,
+            ));
+
+            assert!(encoded.contains(":message-index 3 :role user"));
         }
 
         #[test]
@@ -4165,7 +4318,6 @@ mod imp {
                     pending_permissions: HashMap::new(),
                     last_event_at: None,
                 }),
-                session_id: "test-session".to_string(),
                 registry_dir: registration.dir.clone(),
                 socket_path,
             });

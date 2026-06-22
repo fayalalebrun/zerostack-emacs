@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::Context as _;
 use serde::Deserialize;
 
-use crate::session::{MessageRole, Session, storage};
+use crate::session::{Session, storage};
 
 #[derive(Debug, Clone)]
 struct BoardProject {
@@ -248,7 +248,7 @@ fn project_from_builder(builder: ProjectBuilder) -> BoardProject {
 fn board_session(session: &Session, live: Option<&LiveSessionMeta>) -> BoardSession {
     BoardSession {
         id: session.id.to_string(),
-        title: session_title(session),
+        title: session.title(),
         cwd: session.working_dir.to_string(),
         model: session.model.to_string(),
         provider: session.provider.to_string(),
@@ -405,19 +405,6 @@ fn project_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-fn session_title(session: &Session) -> String {
-    if !session.name.is_empty() {
-        return session.name.to_string();
-    }
-    session
-        .messages
-        .iter()
-        .rev()
-        .find(|msg| msg.role == MessageRole::User)
-        .map(|msg| msg.content.chars().take(80).collect())
-        .unwrap_or_default()
 }
 
 fn sort_projects(projects: &mut [BoardProject]) {

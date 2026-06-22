@@ -83,6 +83,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     }
     write_result(ctx.renderer, "  /clear [/new]          clear screen");
     write_result(ctx.renderer, "  /undo                  undo last exchange");
+    write_result(
+        ctx.renderer,
+        "  /fork [idx]            fork before selected/user message",
+    );
     write_result(ctx.renderer, "  /retry                 retry last prompt");
     write_result(
         ctx.renderer,

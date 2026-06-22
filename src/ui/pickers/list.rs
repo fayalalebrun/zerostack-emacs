@@ -15,6 +15,7 @@ const BASE_COMMANDS: &[&str] = &[
     "/drop-all",
     "/editsys",
     "/exit",
+    "/fork",
     "/help",
     "/history",
     "/init",

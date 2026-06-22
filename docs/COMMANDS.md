@@ -14,6 +14,7 @@ All slash commands are available from the TUI input prompt.
 | `/sessions <id-prefix>` | Load a session by its ID prefix. |
 | `/sessions delete <id-prefix>` | Delete a session by its ID prefix. |
 | `/history` | Show global chat history (last 10 entries across sessions). |
+| `/fork [message-index]` | Fork the current conversation into a new session before a selected user message, or before `message-index`. |
 
 ## Provider & Model
 
