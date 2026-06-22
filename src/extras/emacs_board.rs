@@ -85,6 +85,7 @@ struct LiveSessionMeta {
     session_id: String,
     pid: u32,
     socket: String,
+    updated_at: Option<String>,
 }
 
 pub fn print_board() -> anyhow::Result<()> {
@@ -252,7 +253,9 @@ fn board_session(session: &Session, live: Option<&LiveSessionMeta>) -> BoardSess
         model: session.model.to_string(),
         provider: session.provider.to_string(),
         created_at: session.created_at.to_string(),
-        updated_at: session.updated_at.to_string(),
+        updated_at: live
+            .and_then(|meta| meta.updated_at.clone())
+            .unwrap_or_else(|| session.updated_at.to_string()),
         message_count: session.messages.len(),
         tokens: session.effective_context_tokens(),
         context_window: session.context_window,

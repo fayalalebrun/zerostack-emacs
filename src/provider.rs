@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use compact_str::CompactString;
@@ -367,6 +369,12 @@ impl HttpClientExt for CodexHttpClient {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TestClient {
+    pub(crate) prompts: Arc<StdMutex<Vec<String>>>,
+}
+
 #[derive(Clone)]
 pub enum AnyClient {
     OpenRouter(openrouter::Client),
@@ -374,6 +382,8 @@ pub enum AnyClient {
     Anthropic(anthropic::Client),
     Gemini(gemini::Client),
     Ollama(ollama::Client),
+    #[cfg(test)]
+    Test(TestClient),
 }
 
 /// Extra OpenRouter request body params that pin a Claude model to the
@@ -428,6 +438,8 @@ impl AnyClient {
             AnyClient::Anthropic(_) => "anthropic",
             AnyClient::Gemini(_) => "gemini",
             AnyClient::Ollama(_) => "ollama",
+            #[cfg(test)]
+            AnyClient::Test(_) => "test",
         }
     }
 
@@ -444,6 +456,8 @@ impl AnyClient {
             }
             AnyClient::Gemini(c) => AnyModel::Gemini(c.completion_model(name)),
             AnyClient::Ollama(c) => AnyModel::Ollama(c.completion_model(name)),
+            #[cfg(test)]
+            AnyClient::Test(c) => AnyModel::Test(c.clone()),
         }
     }
 
@@ -548,6 +562,8 @@ impl AnyClient {
                 anyhow::bail!("rig model listing unavailable for this client")
             }
             AnyClient::OpenAI(OpenAiClient::Codex(_)) => return Ok(codex_model_entries()),
+            #[cfg(test)]
+            AnyClient::Test(_) => return Ok(Vec::new()),
         };
         Ok(list.iter().map(ModelEntry::from_rig).collect())
     }
@@ -617,6 +633,8 @@ async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result
         AnyModel::Anthropic(m) => run_summarizer(m, prompt).await,
         AnyModel::Gemini(m) => run_summarizer(m, prompt).await,
         AnyModel::Ollama(m) => run_summarizer(m, prompt).await,
+        #[cfg(test)]
+        AnyModel::Test(_) => Ok(prompt),
     }
 }
 
@@ -693,6 +711,8 @@ pub enum AnyModel {
     Anthropic(anthropic::completion::CompletionModel),
     Gemini(gemini::completion::CompletionModel),
     Ollama(ollama::CompletionModel),
+    #[cfg(test)]
+    Test(TestClient),
 }
 
 #[derive(Clone)]
@@ -702,6 +722,15 @@ pub enum AnyAgent {
     Anthropic(Agent<anthropic::completion::CompletionModel>),
     Gemini(Agent<gemini::completion::CompletionModel>),
     Ollama(Agent<ollama::CompletionModel>),
+    #[cfg(test)]
+    Test(TestAgent),
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestAgent {
+    pub(crate) prompts: Arc<StdMutex<Vec<String>>>,
+    pub(crate) sandbox: Sandbox,
 }
 
 impl AnyAgent {
@@ -725,6 +754,8 @@ impl AnyAgent {
             AnyAgent::Anthropic(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             AnyAgent::Gemini(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             AnyAgent::Ollama(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
+            #[cfg(test)]
+            AnyAgent::Test(_) => Ok(prompt.to_string()),
         }
     }
 
@@ -749,6 +780,8 @@ impl AnyAgent {
             AnyAgent::Anthropic(a) => runner::run_subagent(a, prompt, max_turns, event_tx).await,
             AnyAgent::Gemini(a) => runner::run_subagent(a, prompt, max_turns, event_tx).await,
             AnyAgent::Ollama(a) => runner::run_subagent(a, prompt, max_turns, event_tx).await,
+            #[cfg(test)]
+            AnyAgent::Test(_) => Ok(prompt.to_string()),
         }
     }
 
@@ -763,6 +796,8 @@ impl AnyAgent {
             AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history),
             AnyAgent::Gemini(a) => runner::spawn_agent(a, prompt, history),
             AnyAgent::Ollama(a) => runner::spawn_agent(a, prompt, history),
+            #[cfg(test)]
+            AnyAgent::Test(a) => a.spawn_runner(prompt),
         }
     }
 
@@ -783,6 +818,22 @@ impl AnyAgent {
             AnyAgent::Anthropic(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             AnyAgent::Gemini(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             AnyAgent::Ollama(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+            #[cfg(test)]
+            AnyAgent::Test(_) => {
+                let join = tokio::spawn(async move {
+                    let _ = event_tx
+                        .send(crate::event::BtwEvent::Done {
+                            id,
+                            response: CompactString::new(prompt),
+                            input_tokens: 1,
+                            output_tokens: 1,
+                        })
+                        .await;
+                });
+                crate::agent::runner::BtwRunner {
+                    abort_handle: join.abort_handle(),
+                }
+            }
         }
     }
 }
@@ -1169,7 +1220,7 @@ pub async fn build_agent(
                 context,
                 permission,
                 ask_tx,
-                sandbox,
+                sandbox.clone(),
                 reasoning_enabled,
                 temperature,
                 extra_body,
@@ -1178,6 +1229,45 @@ pub async fn build_agent(
             )
             .await,
         ),
+        #[cfg(test)]
+        AnyModel::Test(c) => AnyAgent::Test(TestAgent {
+            prompts: c.prompts,
+            sandbox,
+        }),
+    }
+}
+
+#[cfg(test)]
+impl TestAgent {
+    fn spawn_runner(self, prompt: String) -> AgentRunner {
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(32);
+        let join = tokio::spawn(async move {
+            self.prompts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(prompt.clone());
+            if prompt == "sleep" {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = event_tx
+                    .send(AgentEvent::ToolCall {
+                        name: CompactString::new("bash"),
+                        args: serde_json::json!({ "command": "bash -c 'sleep 500'" }),
+                    })
+                    .await;
+                let _ = self.sandbox.output_command("bash -c 'sleep 500'").await;
+            }
+            let _ = event_tx
+                .send(AgentEvent::Done {
+                    response: CompactString::new(format!("received {prompt}")),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                })
+                .await;
+        });
+        AgentRunner {
+            event_rx,
+            abort_handle: join.abort_handle(),
+        }
     }
 }
 
@@ -1265,6 +1355,11 @@ pub fn build_btw_agent(
             temperature,
             extra_body,
         )),
+        #[cfg(test)]
+        AnyModel::Test(c) => AnyAgent::Test(TestAgent {
+            prompts: c.prompts,
+            sandbox: Sandbox::new(false, "bwrap"),
+        }),
         AnyModel::Ollama(m) => AnyAgent::Ollama(builder::build_btw_agent_inner(
             m,
             cli,

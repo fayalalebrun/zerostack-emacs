@@ -96,6 +96,7 @@ mod imp {
         next_artifact_id: u64,
         next_permission_id: u64,
         pending_permissions: HashMap<u64, AskRequest>,
+        last_event_at: Option<String>,
     }
 
     struct CompactionOutcome {
@@ -283,6 +284,7 @@ mod imp {
                 next_artifact_id: 1,
                 next_permission_id: 1,
                 pending_permissions: HashMap::new(),
+                last_event_at: None,
             }),
             session_id,
             registry_dir: registration.dir.clone(),
@@ -422,9 +424,16 @@ mod imp {
             lines: Vec<WireLine>,
         ) {
             let len = lines.len();
+            let should_update_meta = len > 0;
             {
                 let mut mutable = self.mutable.lock().await;
                 mutable.line_count = replace_from.saturating_add(len);
+                if should_update_meta {
+                    mutable.last_event_at = Some(chrono::Utc::now().to_rfc3339());
+                }
+            }
+            if should_update_meta {
+                self.update_meta_from_session().await;
             }
             self.broadcast_event(
                 event_type,
@@ -448,7 +457,12 @@ mod imp {
 
         async fn update_meta_from_session(&self) {
             let session = self.session.lock().await;
-            let meta = SessionMeta::from_session(&session, &self.socket_path);
+            let mut meta = SessionMeta::from_session(&session, &self.socket_path);
+            let mutable = self.mutable.lock().await;
+            if let Some(last_event_at) = mutable.last_event_at.clone() {
+                meta.updated_at = last_event_at;
+            }
+            meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
             if let Err(e) = write_meta_atomic(&self.registry_dir, &meta) {
                 tracing::warn!("failed to update Emacs session metadata: {e}");
             }
@@ -1591,14 +1605,14 @@ mod imp {
         stop_loop_state(server, false).await;
         let aborted = {
             let mut mutable = server.mutable.lock().await;
+            let was_running = mutable.running;
             if let Some(handle) = mutable.abort_handle.take() {
                 handle.abort();
-                mutable.running = false;
-                true
-            } else {
-                false
             }
+            mutable.running = false;
+            was_running
         };
+        server.sandbox.kill_active();
         if aborted {
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
@@ -1616,21 +1630,25 @@ mod imp {
 
     #[cfg(feature = "loop")]
     async fn stop_loop_state(server: &Arc<Server>, abort_running: bool) -> bool {
-        let (stopped, abort_handle) = {
+        let (stopped, aborted, abort_handle) = {
             let mut mutable = server.mutable.lock().await;
             let stopped = mutable.loop_state.take().is_some();
+            let aborted = abort_running && mutable.running;
             let abort_handle = if abort_running {
                 mutable.abort_handle.take()
             } else {
                 None
             };
-            if abort_handle.is_some() {
+            if abort_running {
                 mutable.running = false;
             }
-            (stopped, abort_handle)
+            (stopped, aborted, abort_handle)
         };
         if let Some(handle) = abort_handle {
             handle.abort();
+        }
+        if aborted {
+            server.sandbox.kill_active();
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -1749,6 +1767,10 @@ mod imp {
                 None
             }
         };
+        let active_before_cleanup = server.sandbox.active_group_count();
+        if active_before_cleanup > 0 {
+            server.sandbox.kill_active();
+        }
         let cleared_current_turn = {
             let mut mutable = server.mutable.lock().await;
             if mutable.turn == turn {
@@ -1853,35 +1875,40 @@ mod imp {
             let session = server.session.lock().await;
             config::resolve_temperature(&server.cli, &server.cfg, &session.model)
         };
-        #[cfg(feature = "mcp")]
-        let mut mcp_guard = server.mcp_manager.lock().await;
-        #[cfg(feature = "mcp")]
-        if mcp_guard.is_none() {
-            if let Some(configs) = server.cfg.mcp_servers.as_ref() {
-                if !configs.is_empty() {
-                    *mcp_guard =
-                        Some(crate::extras::mcp::McpClientManager::connect_all(configs).await);
-                }
-            }
-        }
         let reasoning_enabled = server.mutable.lock().await.reasoning_enabled;
         let context = server.context.lock().await;
-        let agent = build_agent(
-            model,
-            &server.cli,
-            &server.cfg,
-            &context,
-            server.permission.clone(),
-            server.ask_tx.clone(),
-            server.sandbox.clone(),
-            reasoning_enabled,
-            temperature,
+        let agent = {
             #[cfg(feature = "mcp")]
-            mcp_guard.as_ref(),
-        )
-        .await;
-        drop(context);
+            let mut mcp_guard = {
+                let guard = server.mcp_manager.lock().await;
+                guard
+            };
+            #[cfg(feature = "mcp")]
+            if mcp_guard.is_none() {
+                if let Some(configs) = server.cfg.mcp_servers.as_ref() {
+                    if !configs.is_empty() {
+                        *mcp_guard =
+                            Some(crate::extras::mcp::McpClientManager::connect_all(configs).await);
+                    }
+                }
+            }
 
+            build_agent(
+                model,
+                &server.cli,
+                &server.cfg,
+                &context,
+                server.permission.clone(),
+                server.ask_tx.clone(),
+                server.sandbox.clone(),
+                reasoning_enabled,
+                temperature,
+                #[cfg(feature = "mcp")]
+                mcp_guard.as_ref(),
+            )
+            .await
+        };
+        drop(context);
         let mut runner = agent.spawn_runner(text, history);
         {
             let mut mutable = server.mutable.lock().await;
@@ -1951,9 +1978,6 @@ mod imp {
                 AgentEvent::Token(text) => {
                     let safe = sanitize_output(&text);
                     response_buf.push_str(&safe);
-                    if response_buf.is_empty() {
-                        continue;
-                    }
                     let cols = server.mutable.lock().await.cols;
                     let lines = render_assistant_lines(&response_buf, cols, false);
                     let start = match response_start_line {
@@ -3810,6 +3834,7 @@ mod imp {
                 next_artifact_id: 1,
                 next_permission_id: 1,
                 pending_permissions: HashMap::new(),
+                last_event_at: None,
             };
 
             assert!(!should_report_agent_ended(&mutable, 1));
@@ -4036,6 +4061,169 @@ mod imp {
             assert!(!dir.exists());
 
             let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[tokio::test]
+        async fn abort_allows_provider_to_receive_next_prompt() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server(prompts.clone());
+            drop(listener);
+            let (out_tx, mut out_rx) = mpsc::channel(16);
+            let sleep_cmd = parse_command("(prompt :request 1 :text \"sleep\")").unwrap();
+            handle_prompt(server.clone(), &sleep_cmd, &out_tx)
+                .await
+                .unwrap();
+            wait_for_prompt(&prompts, "sleep").await;
+            wait_for_active_command(&server).await;
+            let abort_cmd = parse_command("(abort :request 2)").unwrap();
+            handle_abort(&server, &abort_cmd, &out_tx).await.unwrap();
+            wait_for_not_running(&server).await;
+            let after_cmd = parse_command("(prompt :request 3 :text \"after\")").unwrap();
+            handle_prompt(server.clone(), &after_cmd, &out_tx)
+                .await
+                .unwrap();
+            wait_for_prompt(&prompts, "after").await;
+            let seen = prompts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            assert_eq!(seen, vec!["sleep".to_string(), "after".to_string()]);
+            while out_rx.try_recv().is_ok() {}
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn abort_over_socket_allows_provider_to_receive_next_prompt() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server(prompts.clone());
+            let socket_path = registration.socket_path.clone();
+            let accept_task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                handle_client(server, stream).await;
+            });
+
+            let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader).lines();
+            let _ = read_until(&mut reader, "ready", Duration::from_secs(1)).await;
+
+            writer
+                .write_all(b"(prompt :request 1 :text \"sleep\")\n")
+                .await
+                .unwrap();
+            wait_for_prompt(&prompts, "sleep").await;
+            let _ = read_until(&mut reader, "tool-call", Duration::from_secs(2)).await;
+
+            writer.write_all(b"(abort :request 2)\n").await.unwrap();
+            let _ = read_until(&mut reader, "aborted", Duration::from_secs(2)).await;
+
+            writer
+                .write_all(b"(prompt :request 3 :text \"after\")\n")
+                .await
+                .unwrap();
+            wait_for_prompt(&prompts, "after").await;
+            let seen = prompts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            assert_eq!(seen, vec!["sleep".to_string(), "after".to_string()]);
+            drop(writer);
+            let _ = timeout(Duration::from_secs(1), accept_task).await;
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        fn test_server(
+            prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        ) -> (Arc<Server>, Registration, UnixListener) {
+            let client = AnyClient::Test(crate::provider::TestClient { prompts });
+            let session = Session::new("test", "test", 0);
+            let (registration, listener) = Registration::create(&session).unwrap();
+            let socket_path = registration.socket_path.clone();
+            let server = Arc::new(Server {
+                client: Mutex::new(client),
+                cli: Cli {
+                    no_session: true,
+                    ..Cli::default()
+                },
+                cfg: Config::default(),
+                context: Mutex::new(crate::context::load(true)),
+                session: Mutex::new(session),
+                permission: None,
+                ask_tx: None,
+                sandbox: Sandbox::new(false, "bwrap"),
+                status_signals: None,
+                #[cfg(feature = "mcp")]
+                mcp_manager: Mutex::new(None),
+                events: broadcast::channel(EVENT_BUFFER).0,
+                mutable: Mutex::new(MutableState {
+                    seq: 0,
+                    cols: DEFAULT_COLS,
+                    line_count: 0,
+                    running: false,
+                    reasoning_enabled: true,
+                    abort_handle: None,
+                    turn: 0,
+                    #[cfg(feature = "loop")]
+                    loop_state: None,
+                    next_artifact_id: 1,
+                    next_permission_id: 1,
+                    pending_permissions: HashMap::new(),
+                    last_event_at: None,
+                }),
+                session_id: "test-session".to_string(),
+                registry_dir: registration.dir.clone(),
+                socket_path,
+            });
+            (server, registration, listener)
+        }
+
+        async fn read_until(
+            reader: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+            needle: &str,
+            duration: Duration,
+        ) -> String {
+            timeout(duration, async {
+                loop {
+                    let line = reader.next_line().await.unwrap().unwrap();
+                    if line.contains(needle) {
+                        return line;
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn wait_for_prompt(prompts: &Arc<std::sync::Mutex<Vec<String>>>, prompt: &str) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if prompts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .any(|p| p == prompt)
+                {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn wait_for_not_running(server: &Arc<Server>) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if !server.mutable.lock().await.running {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn wait_for_active_command(server: &Arc<Server>) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if server.sandbox.active_group_count() == 1 {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
 }

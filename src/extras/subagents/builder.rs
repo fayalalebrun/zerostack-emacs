@@ -160,5 +160,10 @@ pub(crate) async fn build_explore_agent(
             #[cfg(feature = "archmd")]
             arch_ref,
         )),
+        #[cfg(test)]
+        AnyModel::Test(c) => AnyAgent::Test(crate::provider::TestAgent {
+            prompts: c.prompts,
+            sandbox: crate::sandbox::Sandbox::new(false, "bwrap"),
+        }),
     }
 }
