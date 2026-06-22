@@ -11,6 +11,7 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
         "/retry" => handle_retry(ctx).await,
         "/quit" | "/exit" => handle_quit(ctx).await,
         "/history" => handle_history(ctx).await,
+        "/fork" => handle_fork(parts, ctx).await,
         _ => Ok(()),
     }
 }
@@ -130,6 +131,63 @@ async fn handle_sessions(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
             }
         }
     }
+    Ok(())
+}
+
+async fn handle_fork(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
+    let target = if parts.len() >= 2 {
+        match parts[1].parse::<usize>() {
+            Ok(idx) if idx <= ctx.session.messages.len() => Some(idx),
+            Ok(_) => {
+                write_error(ctx.renderer, "message index out of range");
+                return Ok(());
+            }
+            Err(_) => {
+                write_error(ctx.renderer, "usage: /fork <message-index>");
+                return Ok(());
+            }
+        }
+    } else {
+        ctx.renderer
+            .selected_session_message_indices()
+            .into_iter()
+            .find(|&idx| {
+                ctx.session
+                    .messages
+                    .get(idx)
+                    .is_some_and(|m| m.role == crate::session::MessageRole::User)
+            })
+    };
+
+    let Some(message_index) = target else {
+        write_ok(
+            ctx.renderer,
+            "usage: select a prior user message, then /fork; or /fork <index>",
+        );
+        for (idx, msg) in ctx.session.messages.iter().enumerate() {
+            if msg.role == crate::session::MessageRole::User {
+                let preview: String = msg.content.chars().take(60).collect();
+                write_result(ctx.renderer, format!("  {}  {}", idx, preview));
+            }
+        }
+        return Ok(());
+    };
+
+    let old_id = ctx.session.id.clone();
+    *ctx.session = ctx.session.fork_before_message(message_index);
+    if !ctx.cli.no_session {
+        crate::session::storage::save_session(ctx.session)?;
+    }
+    render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
+    write_ok(
+        ctx.renderer,
+        format!(
+            "forked {} -> {} before message {}",
+            &old_id[..8],
+            &ctx.session.id[..8],
+            message_index
+        ),
+    );
     Ok(())
 }
 

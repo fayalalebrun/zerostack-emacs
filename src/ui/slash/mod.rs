@@ -329,9 +329,8 @@ pub async fn handle_slash(
         "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys" | "/advisor" => {
             settings::handle(&parts, &mut ctx).await
         }
-        "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history" => {
-            session::handle(&parts, &mut ctx).await
-        }
+        "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"
+        | "/fork" => session::handle(&parts, &mut ctx).await,
         "/help" => {
             help::handle(&parts, &mut ctx);
             Ok(())
