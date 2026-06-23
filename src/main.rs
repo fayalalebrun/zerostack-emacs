@@ -629,6 +629,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             let temperature = config::resolve_temperature(&cli, &cfg, &model);
             let extra_body = config::resolve_extra_body(&cfg, &model);
+            let reasoning_effort = config::resolve_reasoning_effort(&cli, &cfg, &provider, &model);
             let agent = provider::build_agent(
                 completion_model,
                 &cli,
@@ -638,6 +639,7 @@ async fn main() -> anyhow::Result<()> {
                 ask_tx,
                 sandbox.clone(),
                 true,
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -681,6 +683,7 @@ async fn main() -> anyhow::Result<()> {
             let model_completion = client.completion_model(model.to_string());
             let temperature = config::resolve_temperature(&cli, &cfg, &model);
             let extra_body = config::resolve_extra_body(&cfg, &model);
+            let reasoning_effort = config::resolve_reasoning_effort(&cli, &cfg, &provider, &model);
             let agent = provider::build_agent(
                 model_completion,
                 &cli,
@@ -690,6 +693,7 @@ async fn main() -> anyhow::Result<()> {
                 ask_tx,
                 sandbox.clone(),
                 true,
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]

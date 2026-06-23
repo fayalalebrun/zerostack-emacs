@@ -58,6 +58,13 @@ pub struct Cli {
     #[arg(long = "temperature", help = "Model temperature (0.0 to 2.0)")]
     pub temperature: Option<f64>,
 
+    #[arg(
+        long = "reasoning-effort",
+        value_parser = ["minimal", "low", "medium", "high"],
+        help = "OpenAI reasoning effort for supported models"
+    )]
+    pub reasoning_effort: Option<String>,
+
     #[arg(short = 't', long = "tools", help = "Allowlist specific tools")]
     pub tools: Vec<String>,
 

@@ -197,6 +197,20 @@ pub(crate) fn merge_extra_body(
     }
 }
 
+pub fn supports_reasoning_effort(provider: &str, model: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+    provider == "openai" && (model.starts_with("o") || model.starts_with("gpt-5"))
+}
+
+fn openai_reasoning_params(reasoning_effort: Option<&str>) -> Option<serde_json::Value> {
+    reasoning_effort.map(|effort| {
+        serde_json::json!({
+            "reasoning": { "effort": effort }
+        })
+    })
+}
+
 impl AnyClient {
     #[allow(dead_code)]
     pub fn provider_name(&self) -> &'static str {
@@ -768,6 +782,7 @@ async fn build_openai_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
@@ -784,7 +799,7 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                extra_body,
+                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body.clone()),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -801,7 +816,7 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                extra_body,
+                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -820,6 +835,7 @@ pub async fn build_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
@@ -852,6 +868,7 @@ pub async fn build_agent(
                 ask_tx,
                 sandbox.clone(),
                 reasoning_enabled,
+                reasoning_effort,
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]

@@ -282,6 +282,8 @@ async fn run_prompt(
         ask_tx,
         sandbox,
         false,
+        crate::config::resolve_reasoning_effort(&state.cli, &state.cfg, &provider, &model_str)
+            .as_deref(),
         temperature,
         extra_body,
         #[cfg(feature = "mcp")]

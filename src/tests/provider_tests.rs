@@ -156,11 +156,23 @@ fn serialize_multiple_roles() {
             content: CompactString::new("note"),
             estimated_tokens: 1,
         },
+        SessionMessage {
+            role: MessageRole::ToolCall,
+            content: CompactString::new("read {path}"),
+            estimated_tokens: 1,
+        },
+        SessionMessage {
+            role: MessageRole::ToolResult,
+            content: CompactString::new("read:\ncontents"),
+            estimated_tokens: 1,
+        },
     ];
     let result = serialize_conversation(&msgs);
     assert!(result.contains("[User]: hi"));
     assert!(result.contains("[Assistant]: hey"));
     assert!(result.contains("[System]: note"));
+    assert!(result.contains("[ToolCall]: read {path}"));
+    assert!(result.contains("[ToolResult]: read:\ncontents"));
 }
 
 // --- resolve_provider_config tests ---
