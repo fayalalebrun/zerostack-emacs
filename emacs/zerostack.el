@@ -265,6 +265,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--reasoning-effort-supported nil)
 (defvar-local zerostack--reasoning-effort nil)
 (defvar-local zerostack--status nil)
+(defvar-local zerostack--notice nil)
+(defvar-local zerostack--notice-timer nil)
 (defvar-local zerostack--send-function nil)
 (defvar-local zerostack--pending-permissions nil)
 (defvar-local zerostack--artifacts nil)
@@ -276,6 +278,11 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defcustom zerostack-notify-on-ready t
   "When non-nil, send notify-send when a session becomes ready for input."
   :type 'boolean)
+
+(defcustom zerostack-notice-timeout 2.0
+  "Seconds before transient zerostack prompt notices are cleared."
+  :type 'number)
+
 (defvar-local zerostack-board--snapshot nil)
 (defvar-local zerostack-board--fetch-function nil)
 (defvar-local zerostack-board--session-limits nil)
@@ -306,6 +313,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--reasoning-effort-supported nil)
   (setq-local zerostack--reasoning-effort nil)
   (setq-local zerostack--status nil)
+  (setq-local zerostack--notice nil)
+  (setq-local zerostack--notice-timer nil)
   (setq-local zerostack--pending-permissions (make-hash-table :test 'eql))
   (setq-local zerostack--latex-items (make-hash-table :test 'equal))
   (setq-local zerostack--artifacts nil)
@@ -402,6 +411,9 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (when zerostack--startup-timer
     (cancel-timer zerostack--startup-timer)
     (setq zerostack--startup-timer nil))
+  (when zerostack--notice-timer
+    (cancel-timer zerostack--notice-timer)
+    (setq zerostack--notice-timer nil))
   (when (process-live-p zerostack--process)
     (delete-process zerostack--process))
   (setq zerostack--process nil)
@@ -1719,7 +1731,7 @@ raising an error when no file/media clipboard content is available."
                     (zerostack--clipboard-text-file)))))
     (unless path
       (unless quiet
-        (zerostack--set-status "clipboard: no file path, image, or text found")
+        (zerostack--set-notice "clipboard: no file path, image, or text found")
         (user-error "Clipboard does not contain a file path, image, or text")))
     (when path
       (zerostack--set-status (format "attaching clipboard: %s"
@@ -2047,7 +2059,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
              requests))
      zerostack--pending-permissions)
     (if (null requests)
-        (zerostack--set-status "no pending permissions")
+        (zerostack--set-notice "no pending permissions")
       (let* ((label (completing-read "Permission: " (mapcar #'car requests) nil t))
              (request (cdr (assoc label requests)))
              (decision (completing-read "Decision: " '("allow-once" "allow-always" "deny") nil t))
@@ -2063,7 +2075,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
       (zerostack--update-session-metadata-from-board)
       (setq skills (zerostack--discover-skills)))
     (if (null skills)
-        (zerostack--set-status "no skills discovered")
+        (zerostack--set-notice "no skills discovered")
       (let* ((labels (mapcar (lambda (skill)
                                (cons (format "%s — %s"
                                              (plist-get skill :name)
@@ -2076,7 +2088,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
          (format "Use the %s skill at %s. "
                  (plist-get skill :name)
                  (plist-get skill :path)))
-        (zerostack--set-status (format "selected skill: %s" (plist-get skill :name)))))))
+        (zerostack--set-notice (format "selected skill: %s" (plist-get skill :name)))))))
 
 (defun zerostack--update-session-metadata-from-board ()
   "Refresh chat metadata from a board snapshot when status has not arrived yet."
@@ -2178,7 +2190,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
-  (zerostack--set-status
+  (zerostack--set-notice
    "commands: C-c / opens skill, attach, compact, fork, loop, thinking, provider, model, mcp, view, artifact"))
 
 (defun zerostack-disconnect ()
@@ -2260,8 +2272,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
   "Handle sessions response PLIST."
   (let ((items (plist-get plist :items)))
     (if items
-        (zerostack--set-status (format "sessions: %d live" (length items)))
-      (zerostack--set-status "sessions: none"))))
+        (zerostack--set-notice (format "sessions: %d live" (length items)))
+      (zerostack--set-notice "sessions: none"))))
 
 (defun zerostack--handle-status (plist)
   "Handle status response PLIST."
@@ -2276,7 +2288,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
     (when internal
       (setq zerostack--metadata-status-request nil))
     (unless internal
-      (zerostack--set-status
+      (zerostack--set-notice
        (format "status: %s pid:%s"
                (plist-get session :session)
                (plist-get session :pid))))))
@@ -2298,7 +2310,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
            zerostack--loop-label nil)
      (zerostack--clear-pending-permissions)
      (zerostack--set-thinking nil)
-     (zerostack--set-status
+     (zerostack--set-status nil)
+     (zerostack--set-notice
       (if (eq (plist-get plist :reason) 'max)
           "loop stopped: max iterations reached"
         "loop stopped")))
@@ -2337,7 +2350,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (setq zerostack--loop-active nil
            zerostack--loop-label nil)
      (zerostack--set-thinking nil)
-     (zerostack--set-status "aborted"))
+     (zerostack--set-status nil)
+     (zerostack--set-notice "aborted"))
     ('error
      (zerostack--clear-pending-permissions)
      (setq zerostack--loop-active nil
@@ -2732,7 +2746,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 FACE is accepted for compatibility with older call sites; local notices are not
 inserted into the transcript."
   (ignore face)
-  (zerostack--set-status text))
+  (zerostack--set-notice text))
 
 (defun zerostack--ensure-prompt ()
   "Ensure the input prompt exists in the current buffer."
@@ -2784,9 +2798,10 @@ inserted into the transcript."
   "Return prompt metadata prefix."
   (string-join
    (delq nil
-         (list zerostack--status
-                (and zerostack--reasoning-effort-supported zerostack--reasoning-effort
-                     (format "reasoning:%s" zerostack--reasoning-effort))
+          (list zerostack--notice
+                zerostack--status
+                 (and zerostack--reasoning-effort-supported zerostack--reasoning-effort
+                      (format "reasoning:%s" zerostack--reasoning-effort))
                 (and zerostack--thinking-level
                      (format "thinking:%s" zerostack--thinking-level))
                zerostack--model
@@ -2794,11 +2809,42 @@ inserted into the transcript."
    " | "))
 
 (defun zerostack--set-status (text)
-  "Set single-line prompt status TEXT without adding transcript lines."
-  (setq zerostack--last-notice text)
+  "Set durable single-line prompt status TEXT without adding transcript lines."
   (setq zerostack--status (and text (zerostack--status-text text)))
   (when text
     (message "%s" zerostack--status))
+  (when (and (markerp zerostack--prompt-start-marker)
+             (markerp zerostack--input-marker)
+             (marker-position zerostack--prompt-start-marker)
+              (marker-position zerostack--input-marker))
+    (zerostack--refresh-prompt)))
+
+(defun zerostack--set-notice (text)
+  "Set transient single-line prompt notice TEXT without adding transcript lines."
+  (when zerostack--notice-timer
+    (cancel-timer zerostack--notice-timer)
+    (setq zerostack--notice-timer nil))
+  (setq zerostack--last-notice text)
+  (setq zerostack--notice (and text (zerostack--status-text text)))
+  (when text
+    (message "%s" zerostack--notice)
+    (let ((buffer (current-buffer))
+          (notice zerostack--notice))
+      (setq zerostack--notice-timer
+            (run-at-time
+             zerostack-notice-timeout nil
+             (lambda (buffer notice)
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (when (equal zerostack--notice notice)
+                     (setq zerostack--notice nil)
+                     (setq zerostack--notice-timer nil)
+                     (when (and (markerp zerostack--prompt-start-marker)
+                                (markerp zerostack--input-marker)
+                                (marker-position zerostack--prompt-start-marker)
+                                (marker-position zerostack--input-marker))
+                       (zerostack--refresh-prompt))))))
+             buffer notice))))
   (when (and (markerp zerostack--prompt-start-marker)
              (markerp zerostack--input-marker)
              (marker-position zerostack--prompt-start-marker)

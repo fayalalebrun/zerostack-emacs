@@ -629,7 +629,8 @@
 
 (ert-deftest zerostack-test-startup-error-surfaces-stderr ()
   (let ((script (make-temp-file "zerostack-fail" nil nil
-                                "#!/bin/sh\nprintf '%s\n' 'Error: missing key' >&2\nexit 1\n"))
+                                 "#!/bin/sh\nprintf '%s\n' 'Error: missing key' >&2\nexit 1\n"))
+        (zerostack-notice-timeout 5.0)
         process
         stderr-buffer)
     (set-file-modes script #o700)
@@ -640,12 +641,14 @@
             (setq process zerostack--server-process)
             (setq stderr-buffer (process-get process 'zerostack-stderr-buffer))
             (zerostack-test--wait-until
-             (lambda ()
-               (and (not (process-live-p process))
-                    (not zerostack--startup-timer)
-                    zerostack--status
-                    (string-match-p "Error: missing key" zerostack--status))))
-            (should (string-match-p "server .*Error: missing key" zerostack--status))
+              (lambda ()
+                (and (not (process-live-p process))
+                     (not zerostack--startup-timer)
+                     zerostack--notice
+                     (string-match-p "Error: missing key" zerostack--notice))))
+            (should (string-match-p "server .*Error: missing key" zerostack--notice))
+            (should (equal zerostack--last-notice zerostack--notice))
+            (should-not zerostack--status)
             (should-not zerostack--startup-timer)
             (should-not zerostack--server-process)))
       (when (and process (process-live-p process))
@@ -1425,9 +1428,22 @@
    (goto-char (point-min))
    (search-forward "transcript")
    (let ((expected (point)))
+      (zerostack--set-status "permission #8 bash")
+      (should (= (point) expected))
+      (should (looking-back "transcript" (line-beginning-position))))))
+
+(ert-deftest zerostack-test-transient-notice-expires-without-clearing-status ()
+  (zerostack-test--with-buffer
+   (let ((zerostack-notice-timeout 0.05))
      (zerostack--set-status "permission #8 bash")
-     (should (= (point) expected))
-     (should (looking-back "transcript" (line-beginning-position))))))
+     (zerostack--set-notice "aborted")
+     (let ((text (buffer-string)))
+       (should (string-match-p "aborted" text))
+       (should (string-match-p "permission #8 bash" text)))
+     (zerostack-test--wait-until (lambda () (null zerostack--notice)) 1.0)
+     (let ((text (buffer-string)))
+       (should-not (string-match-p "aborted" text))
+       (should (string-match-p "permission #8 bash" text))))))
 
 (ert-deftest zerostack-test-prompt-indicates-thinking-until-done ()
   (zerostack-test--with-buffer
