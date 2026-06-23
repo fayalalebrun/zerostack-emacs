@@ -587,6 +587,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|e| (e.tool.to_string(), e.pattern.to_string()))
             .collect();
         let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+        guard.allow_session_tool_outputs(&session.id);
         guard.load_session_allowlist(&allowlist);
         if let Some(current_prompt) = &context.current_prompt {
             let (mode_directive, _) = crate::permission::parse_prompt_mode(current_prompt);

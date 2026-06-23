@@ -406,6 +406,15 @@ impl PermissionChecker {
         }
     }
 
+    pub fn allow_session_tool_outputs(&mut self, session_id: &str) {
+        let dir = crate::session::storage::tool_output_dir(session_id)
+            .to_string_lossy()
+            .to_string();
+        self.add_session_allowlist("list_dir".to_string(), &dir);
+        self.add_session_allowlist("list_dir".to_string(), &format!("{dir}/"));
+        self.add_session_allowlist("read".to_string(), &format!("{dir}/*"));
+    }
+
     pub fn set_mode(&mut self, mode: SecurityMode) {
         self.mode = mode;
         self.user_mode = mode;

@@ -1,6 +1,8 @@
 use crate::agent::tools::{
-    deny_repeated_reads, is_skip_dir, set_deny_repeated_reads, track_read, untrack_read_path,
+    deny_repeated_reads, is_skip_dir, set_active_session_id, set_deny_repeated_reads, track_read,
+    truncate_live_tool_output, untrack_read_path,
 };
+use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
 
 #[test]
 fn skip_node_modules() {
@@ -126,4 +128,23 @@ fn set_deny_repeated_reads_toggle() {
 
     set_deny_repeated_reads(true);
     assert!(deny_repeated_reads());
+}
+
+#[test]
+fn live_tool_output_is_truncated_before_model_replay() {
+    set_active_session_id(None);
+    let output = format!(
+        "{}{}{}",
+        "H".repeat(TOOL_RESULT_HEAD_CHARS),
+        "M".repeat(TOOL_RESULT_SAVE_THRESHOLD),
+        "T".repeat(TOOL_RESULT_TAIL_CHARS)
+    );
+
+    let truncated = truncate_live_tool_output("bash", &output);
+
+    assert!(truncated.len() < output.len());
+    assert!(truncated.contains("tool output truncated for live model context"));
+    assert!(truncated.contains("full output was not saved"));
+    assert!(truncated.starts_with(&"H".repeat(TOOL_RESULT_HEAD_CHARS)));
+    assert!(truncated.ends_with(&"T".repeat(TOOL_RESULT_TAIL_CHARS)));
 }

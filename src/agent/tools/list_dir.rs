@@ -180,6 +180,9 @@ impl Tool for ListDirTool {
         if let Some(msg) = coaching {
             result = format!("{}\n\n{}", msg, result);
         }
-        Ok(result)
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

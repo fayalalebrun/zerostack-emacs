@@ -39,6 +39,13 @@ mod unix_demo {
         "bash",
         "write_todo_list",
     ];
+    const DEMO_LONG_BASH_COMMAND: &str = concat!(
+        "i=0; ",
+        "while [ \"$i\" -lt 260 ]; do ",
+        "printf 'demo sidecar line %03d: this long bash output is saved outside session context for read-tool inspection\\n' \"$i\"; ",
+        "i=$((i + 1)); ",
+        "done; pwd",
+    );
 
     pub fn run() -> anyhow::Result<()> {
         let emacs = std::env::var_os("EMACS").unwrap_or_else(|| OsString::from("emacs"));
@@ -118,7 +125,7 @@ mod unix_demo {
             .map(|socket| {
                 let socket = emacs_lisp_string(&socket.to_string_lossy());
                 let prompt = emacs_lisp_string(
-                    "Show the native Emacs demo. Take multiple tool turns with visible thinking, use the project-local demo skills if relevant, exercise every available zerostack tool including a task subagent call, then return markdown with a table, code block, task list, inline LaTeX, and display LaTeX. The first tool call should ask me for permission; I can answer with the inline permission buttons below the prompt. I may press C-c C-c to abort while you are thinking.",
+                    "Show the native Emacs demo. Take multiple tool turns with visible thinking, use the project-local demo skills if relevant, exercise every available zerostack tool including a task subagent call, produce one long bash output that is saved outside the transcript, read the saved output path back with the read tool, then return markdown with a table, code block, task list, inline LaTeX, and display LaTeX. The first tool call should ask me for permission; I can answer with the inline permission buttons below the prompt. I may press C-c C-c to abort while you are thinking.",
                 );
                 format!(
                     "(let ((buf (zerostack-connect {socket}))) \
@@ -538,7 +545,7 @@ timeout_secs = 60
             &repo.join(".opencode").join("skills").join("tool-tour"),
             "tool-tour",
             "Walk through every built-in tool that the native Emacs demo provider offers.",
-            "Use this skill when the user asks for a demo tour. Mention that the demo intentionally exercises read, list_dir, find_files, grep, task subagents, write, edit, bash, and write_todo_list, with delayed reasoning so C-c C-c interruption can be tested.",
+            "Use this skill when the user asks for a demo tour. Mention that the demo intentionally exercises read, list_dir, find_files, grep, task subagents, write, edit, bash, and write_todo_list, then reads back the saved sidecar path for a deliberately long bash output. Delayed reasoning lets C-c C-c interruption be tested.",
         )?;
         Ok(())
     }
@@ -1481,6 +1488,13 @@ timeout_secs = 60
                 }
             }
         }
+        if names.iter().any(|name| name == "read")
+            && saved_tool_output_path(request)
+                .as_deref()
+                .is_some_and(|path| !read_requested_for_path(request, path))
+        {
+            return Some("read");
+        }
         None
     }
 
@@ -1527,10 +1541,68 @@ timeout_secs = 60
         names
     }
 
+    fn saved_tool_output_path(request: &Value) -> Option<String> {
+        let messages = request.get("messages").and_then(Value::as_array)?;
+        messages.iter().find_map(|message| {
+            let content = message.get("content")?.as_str()?;
+            extract_saved_tool_output_path(content)
+        })
+    }
+
+    fn extract_saved_tool_output_path(content: &str) -> Option<String> {
+        let marker = "[full output saved to: ";
+        let start = content.find(marker)? + marker.len();
+        let rest = &content[start..];
+        let end = rest
+            .find(';')
+            .or_else(|| rest.find(']'))
+            .unwrap_or(rest.len());
+        let path = rest[..end].trim();
+        (!path.is_empty()).then(|| path.to_string())
+    }
+
+    fn read_requested_for_path(request: &Value, path: &str) -> bool {
+        let Some(messages) = request.get("messages").and_then(Value::as_array) else {
+            return false;
+        };
+        messages.iter().any(|message| {
+            if message
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| {
+                    content.contains("[ToolCall]: read") && content.contains(path)
+                })
+            {
+                return true;
+            }
+            let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+                return false;
+            };
+            tool_calls.iter().any(|tool_call| {
+                let Some(function) = tool_call.get("function") else {
+                    return false;
+                };
+                function.get("name").and_then(Value::as_str) == Some("read")
+                    && function
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .is_some_and(|args| args.contains(path))
+            })
+        })
+    }
+
     fn demo_tool_arguments(tool: &str, request: &Value) -> String {
         let generated_path = demo_generated_path(request);
         match tool {
-            "read" => json!({ "path": "README.md", "offset": 1, "limit": 80 }).to_string(),
+            "read" => {
+                if let Some(path) = saved_tool_output_path(request)
+                    .filter(|path| !read_requested_for_path(request, path))
+                {
+                    json!({ "path": path, "offset": 1, "limit": 80 }).to_string()
+                } else {
+                    json!({ "path": "README.md", "offset": 1, "limit": 80 }).to_string()
+                }
+            }
             "list_dir" => json!({ "path": "." }).to_string(),
             "find_files" => json!({ "pattern": "README|WORKTREE|SKILL|main\\.rs|generated", "path": "." }).to_string(),
             "grep" => json!({ "pattern": "demo|Zerostack|skill|LaTeX", "path": ".", "context_lines": 1 }).to_string(),
@@ -1551,7 +1623,7 @@ timeout_secs = 60
             })
             .to_string(),
             "bash" => {
-                json!({ "command": "printf 'demo bash output\\n'; pwd", "timeout": 1000 }).to_string()
+                json!({ "command": DEMO_LONG_BASH_COMMAND, "timeout": 1000 }).to_string()
             }
             "write_todo_list" => json!({
                 "todos": [
@@ -1604,11 +1676,13 @@ timeout_secs = 60
 The local OpenAI-compatible provider returned **bold text**, *italic text*, `inline code`, and a [link](https://example.invalid) through the regular zerostack provider stack.
 
 > Reasoning and tool output were written as ephemeral artifacts under the live session runtime directory.
+> The long bash result is saved under the session tool-output directory and read back through the regular read tool.
 > This quoted line should use the quote face.
 
 - [x] styled span sexps
 - [x] real tool calls and tool-output artifacts
 - [x] built-in tool tour: read, list_dir, find_files, grep, task subagent, write, edit, bash, write_todo_list
+- [x] saved long tool output path discovered from the transcript and inspected with read
 - [x] project-local skills discovered from .claude/skills and .opencode/skills
 - [x] Rust-rendered inline LaTeX SVG artifacts
 - [ ] try `/compact` or open `M-x zerostack-board`
@@ -1933,6 +2007,70 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             let request = json!({ "messages": messages, "tools": tools });
             assert_eq!(choose_tool(&request), None);
             assert!(chat_completion_sse(&request, 99).contains("Zerostack Emacs demo"));
+        }
+
+        #[test]
+        fn provider_reads_saved_tool_output_after_normal_tool_tour() {
+            let tools = DEMO_TOOL_SEQUENCE
+                .iter()
+                .map(|name| json!({ "type": "function", "function": { "name": name } }))
+                .collect::<Vec<_>>();
+            let saved_path = "/tmp/zs/d/tool-outputs/session-id/0000-bash.txt";
+            let saved_notice = format!(
+                "bash:\nhead\n\n[tool output truncated: 14000 characters; 4000 omitted]\n[full output saved to: {saved_path}; use the read tool on this path to inspect the complete output]\n\ntail"
+            );
+            let mut messages = vec![json!({ "role": "user", "content": "demo" })];
+
+            for (idx, expected) in DEMO_TOOL_SEQUENCE.iter().enumerate() {
+                let request = json!({ "messages": messages.clone(), "tools": tools.clone() });
+                assert_eq!(choose_tool(&request), Some(*expected));
+                messages.push(json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": format!("call_{idx}"),
+                        "type": "function",
+                        "function": { "name": expected, "arguments": "{}" }
+                    }]
+                }));
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": format!("call_{idx}"),
+                    "content": if *expected == "bash" { saved_notice.clone() } else { "ok".to_string() }
+                }));
+            }
+
+            let request = json!({ "messages": messages.clone(), "tools": tools.clone() });
+            assert_eq!(choose_tool(&request), Some("read"));
+            let args: Value = serde_json::from_str(&demo_tool_arguments("read", &request)).unwrap();
+            assert_eq!(args["path"], saved_path);
+
+            let read_args = json!({ "path": saved_path, "offset": 1, "limit": 80 }).to_string();
+            messages.push(json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_sidecar_read",
+                    "type": "function",
+                    "function": { "name": "read", "arguments": read_args }
+                }]
+            }));
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": "call_sidecar_read",
+                "content": "demo sidecar line 000"
+            }));
+
+            let request_after_read = json!({ "messages": messages, "tools": tools });
+            assert_eq!(choose_tool(&request_after_read), None);
+        }
+
+        #[test]
+        fn demo_bash_tool_generates_sidecar_sized_output() {
+            let request = json!({ "messages": [{ "role": "user", "content": "demo" }] });
+            let args: Value = serde_json::from_str(&demo_tool_arguments("bash", &request)).unwrap();
+            let command = args["command"].as_str().unwrap();
+
+            assert!(command.contains("demo sidecar line"));
+            assert!(command.contains("-lt 260"));
         }
 
         #[test]

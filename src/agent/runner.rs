@@ -112,6 +112,7 @@ where
 }
 
 pub fn convert_history(session: &Session) -> Vec<Message> {
+    crate::agent::tools::set_active_session_id(Some(session.id.to_string()));
     let (summary, first_kept) = session.compacted_context();
     let remaining = session.messages.len().saturating_sub(first_kept);
     let extra = if summary.is_some() { 1 } else { 0 };

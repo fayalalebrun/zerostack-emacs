@@ -246,9 +246,13 @@ impl Tool for GrepTool {
             result
         };
 
-        Ok(match coaching {
+        let result = match coaching {
             Some(c) => format!("{}\n\n{}", c, result),
             None => result,
-        })
+        };
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

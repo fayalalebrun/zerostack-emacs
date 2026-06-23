@@ -621,6 +621,29 @@ fn session_allowlist_matches_relative_path_when_stored_as_absolute() {
     );
 }
 
+#[test]
+fn session_tool_output_access_allows_reading_current_session_sidecars() {
+    let mut checker = make_checker(SecurityMode::Standard);
+    checker.allow_session_tool_outputs("session-id");
+
+    let dir = crate::session::storage::tool_output_dir("session-id");
+    let file = dir.join("saved-bash.txt");
+
+    let read_result = checker.check_path("read", &file.to_string_lossy());
+    assert!(
+        matches!(read_result, CheckResult::Allowed),
+        "expected Allowed for current-session tool output file, got {:?}",
+        read_result,
+    );
+
+    let list_result = checker.check_path("list_dir", &dir.to_string_lossy());
+    assert!(
+        matches!(list_result, CheckResult::Allowed),
+        "expected Allowed for current-session tool output dir, got {:?}",
+        list_result,
+    );
+}
+
 // --- MCP tool config ---
 
 #[test]

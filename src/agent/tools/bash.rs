@@ -188,6 +188,9 @@ impl Tool for BashTool {
             Some(msg) => format!("{}\n\n{}", msg, result),
             None => result,
         };
-        Ok(result)
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

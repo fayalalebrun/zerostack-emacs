@@ -309,6 +309,13 @@ mod imp {
             registry_dir: registration.dir.clone(),
             socket_path: registration.socket_path.clone(),
         });
+        if let Some(permission) = &server.permission {
+            let session = server.session.lock().await;
+            permission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .allow_session_tool_outputs(&session.id);
+        }
 
         if let Some(ask_rx) = ask_rx {
             tokio::spawn(permission_pump(server.clone(), ask_rx));
@@ -1838,6 +1845,14 @@ mod imp {
         let _ = run_prompt_once(server, text, turn).await;
     }
 
+    fn tool_result_artifact_content(
+        session: &mut Session,
+        name: &str,
+        output: &str,
+    ) -> CompactString {
+        sanitize_output(&session.add_tool_result(name, output))
+    }
+
     async fn run_prompt_once(
         server: Arc<Server>,
         text: String,
@@ -2145,8 +2160,35 @@ mod imp {
                         )
                         .await;
                 }
+                    let safe = {
+                        let mut session = server.session.lock().await;
+                        let content = tool_result_artifact_content(&mut session, &name, &output);
+                        if !server.cli.no_session {
+                            crate::session::storage::save_session(&session)?;
+                        }
+                        content
+                    };
+>>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
+=======
                 AgentEvent::ToolResult { name, output } => {
-                    let safe = sanitize_output(&output);
+                    let safe = {
+                        let mut session = server.session.lock().await;
+                        let content = tool_result_artifact_content(&mut session, &name, &output);
+                        if !server.cli.no_session {
+                            crate::session::storage::save_session(&session)?;
+                        }
+                        content
+                    };
+=======
+                    let safe = {
+                        let mut session = server.session.lock().await;
+                        let content = tool_result_artifact_content(&mut session, &name, &output);
+                        if !server.cli.no_session {
+                            crate::session::storage::save_session(&session)?;
+                        }
+                        content
+                    };
+>>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
                     let artifact = match server
                         .create_artifact(turn, "tool-output", &name, &safe)
                         .await
@@ -3962,7 +4004,96 @@ mod imp {
             assert!(encoded.contains(":message-index 1 :role assistant"));
         }
 
+        fn session_render_lines_include_persisted_tool_events() {
+            let mut session = Session::new("openai", "gpt", 1000);
+            session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
+            session.add_tool_result("bash", "hi");
+            session.add_message(MessageRole::Assistant, "done");
+
+            let encoded = lines_to_sexp(&session_render_lines(&session));
+
+            assert!(
+                encoded.contains("tool"),
+                "expected tool lines in {encoded}"
+            );
+            assert!(
+                encoded.contains("bash"),
+                "expected tool name in {encoded}"
+            );
+            assert!(
+                encoded.contains("hi"),
+                "expected tool output in {encoded}"
+            );
+            assert!(
+                encoded.contains("done"),
+                "expected assistant response in {encoded}"
+            );
+        }
+
         #[test]
+>>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
+        fn with_source_lines_adds_message_source_metadata() {
+=======
+        #[test]
+        fn session_render_lines_include_persisted_tool_events() {
+            let mut session = Session::new("openai", "gpt", 1000);
+            session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
+            session.add_tool_result("bash", "hi");
+            session.add_message(MessageRole::Assistant, "done");
+
+            let encoded = lines_to_sexp(&session_render_lines(&session));
+
+            assert!(
+                encoded.contains("tool"),
+                "expected tool lines in {encoded}"
+            );
+            assert!(
+                encoded.contains("bash"),
+                "expected tool name in {encoded}"
+            );
+            assert!(
+                encoded.contains("hi"),
+                "expected tool output in {encoded}"
+            );
+            assert!(
+                encoded.contains("done"),
+                "expected assistant response in {encoded}"
+            );
+        }
+
+        #[test]
+        fn with_source_lines_adds_message_source_metadata() {
+=======
+        fn session_render_lines_include_persisted_tool_events() {
+            let mut session = Session::new("openai", "gpt", 1000);
+            session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
+            session.add_tool_result("bash", "hi\n");
+            session.add_subagent_tool_call("task", &serde_json::json!({ "prompts": ["find x"] }));
+            let cli = Cli::default();
+            let cfg = Config::default();
+            let context = crate::context::load(true);
+            let encoded = lines_to_sexp(&render_session_lines(&session, &cli, &cfg, &context, 100));
+
+            assert!(encoded.contains(":role tool-call"));
+            assert!(encoded.contains("◈"));
+            assert!(encoded.contains(":role tool-result"));
+            assert!(encoded.contains("hi"));
+            assert!(encoded.contains(":role subagent-tool-call"));
+            assert!(encoded.contains("⌥"));
+        }
+
+        #[test]
+        fn tool_output_artifact_content_matches_session_transcript() {
+            let mut session = Session::new("openai", "gpt", 1000);
+
+            let content = tool_result_artifact_content(&mut session, "bash", "hi\n");
+
+            assert_eq!(content, "bash:\nhi\n");
+            assert_eq!(session.messages[0].content.as_str(), content);
+        }
+
+        #[test]
+>>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
         fn with_source_lines_adds_message_source_metadata() {
             let encoded = lines_to_sexp(&with_source_lines(
                 render_user_lines("hello"),

@@ -114,9 +114,13 @@ impl Tool for FindFilesTool {
         } else {
             format!("{} files found:\n{}", total, results.join("\n"))
         };
-        Ok(match coaching {
+        let result = match coaching {
             Some(c) => format!("{}\n\n{}", c, result),
             None => result,
-        })
+        };
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

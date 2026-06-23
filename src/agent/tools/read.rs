@@ -183,6 +183,7 @@ impl Tool for ReadTool {
             Some(msg) => format!("{}\n\n{}", msg, info),
             None => info,
         };
+        let info = crate::agent::tools::truncate_live_tool_output(Self::NAME, &info);
 
         Ok(info)
     }

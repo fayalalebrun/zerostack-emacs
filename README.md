@@ -248,7 +248,9 @@ sessions to demonstrate `show 5 more`, and non-Git workspaces so the separate
 category is visible. The mock provider
 streams visible reasoning, cycles through the built-in tools it is offered
 (`read`, `list_dir`, `find_files`, `grep`, `task` subagent, `write`, `edit`,
-`bash`, and `write_todo_list`), then returns rendered Markdown and Rust-rendered inline LaTeX
+`bash`, and `write_todo_list`), deliberately produces one long bash result that
+is saved under the session tool-output directory, reads that saved path back
+through the normal `read` tool, then returns rendered Markdown and Rust-rendered inline LaTeX
 SVGs. The auto-opened live worker runs in restrictive permission mode, so the
 first tool call requests permission; the remaining built-in demo tools are
 pre-allowed in that isolated seeded session so the demo only shows one permission

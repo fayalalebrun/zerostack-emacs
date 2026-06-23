@@ -40,6 +40,49 @@ pub(crate) fn deny_repeated_reads() -> bool {
 }
 
 static READ_TRACKER: Mutex<Vec<(String, usize, usize)>> = Mutex::new(Vec::new());
+static ACTIVE_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn set_active_session_id(id: impl Into<Option<String>>) {
+    *ACTIVE_SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = id.into();
+}
+
+pub(crate) fn truncate_live_tool_output(tool_name: &str, output: &str) -> String {
+    let output_chars = output.chars().count();
+    if output_chars <= crate::session::TOOL_RESULT_SAVE_THRESHOLD {
+        return output.to_string();
+    }
+
+    let head: String = output
+        .chars()
+        .take(crate::session::TOOL_RESULT_HEAD_CHARS)
+        .collect();
+    let tail: String = output
+        .chars()
+        .skip(output_chars.saturating_sub(crate::session::TOOL_RESULT_TAIL_CHARS))
+        .collect();
+    let omitted = output_chars.saturating_sub(
+        crate::session::TOOL_RESULT_HEAD_CHARS + crate::session::TOOL_RESULT_TAIL_CHARS,
+    );
+    let saved = ACTIVE_SESSION_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .and_then(|id| crate::session::storage::save_tool_output(&id, tool_name, output).ok())
+        .map(|path| {
+            format!(
+                "\n[full output saved to: {}; use the read tool on this path to inspect the complete output]",
+                path.display()
+            )
+        })
+        .unwrap_or_else(|| {
+            "\n[full output was not saved; rerun a narrower command if more detail is needed]"
+                .to_string()
+        });
+
+    format!(
+        "{head}\n\n[tool output truncated for live model context: {output_chars} characters; {omitted} omitted]{saved}\n\n{tail}"
+    )
+}
 
 pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<String> {
     if !deny_repeated_reads() {

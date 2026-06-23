@@ -549,9 +549,13 @@ permission; the remaining built-in demo tools are pre-allowed in that isolated
 seeded session so the demo only shows one permission request. Answer it with the
 inline buttons below the input prompt. It walks
 through the built-in tools it is offered (`read`, `list_dir`, `find_files`,
-`grep`, `task` subagent, `write`, `edit`, `bash`, and `write_todo_list`) before returning markdown
-containing tables, task lists, code, links, and LaTeX so the native Emacs client
-can show rendered lines, project-local skill discovery, ephemeral thinking/tool artifacts, and inline SVG math.
+`grep`, `task` subagent, `write`, `edit`, `bash`, and `write_todo_list`),
+deliberately emits one long bash result that is saved under the session
+tool-output directory, and reads that saved path back through the normal `read`
+tool before returning markdown containing tables, task lists, code, links, and
+LaTeX so the native Emacs client can show rendered lines, project-local skill
+discovery, ephemeral thinking/tool artifacts, saved-output readback, and inline
+SVG math.
 
 The demo does not auto-attach a file. If you manually use `C-c / -> attach` and
 then send a prompt, the local OpenAI-compatible provider detects the incoming
