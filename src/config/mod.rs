@@ -29,13 +29,10 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    /// Provider-specific JSON shallow-merged into every completion request body
-    /// as a global default. A matching `quick_models` entry's `extra_body`
-    /// overrides this. Note: body params are provider-specific, so a global
-    /// value does not follow model switches — bundle per-`quick_models` when in
-    /// doubt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "reasoning-effort")]
+    pub reasoning_effort: Option<CompactString>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,10 +297,6 @@ impl Config {
         self.temperature.map(|t| t.clamp(0.0, 2.0))
     }
 
-    /// Resolves provider-specific request-body params: quick-model `extra_body` >
-    /// global `extra_body`. Returns `None` when neither is configured. The
-    /// resolved value is shallow-merged into the completion request body at
-    /// agent-build time.
     pub fn resolve_extra_body(
         &self,
         model_id: &str,
@@ -317,6 +310,32 @@ impl Config {
             }
         }
         self.extra_body.clone()
+    }
+
+    pub fn resolve_reasoning_effort(
+        &self,
+        cli: &crate::cli::Cli,
+        provider: &str,
+        model_id: &str,
+        qm: &HashMap<String, types::QuickModelConfig>,
+    ) -> Option<CompactString> {
+        if !crate::provider::supports_reasoning_effort(provider, model_id) {
+            return None;
+        }
+        let quick_effort = qm.values().find_map(|qmc| {
+            (qmc.provider.as_str() == provider && qmc.model.as_str() == model_id)
+                .then(|| qmc.reasoning_effort.as_deref())
+                .flatten()
+        });
+        let effort = cli
+            .reasoning_effort
+            .as_deref()
+            .or(quick_effort)
+            .or(self.reasoning_effort.as_deref())?;
+        match effort {
+            "minimal" | "low" | "medium" | "high" => Some(CompactString::new(effort)),
+            _ => None,
+        }
     }
 
     pub fn resolve_compact_enabled(&self) -> bool {
@@ -471,10 +490,19 @@ pub fn resolve_temperature(cli: &crate::cli::Cli, cfg: &Config, model_id: &str) 
     cfg.resolve_temperature(cli, model_id, &qm)
 }
 
-/// Convenience: resolves extra body params (quick model, global config).
 pub fn resolve_extra_body(cfg: &Config, model_id: &str) -> Option<serde_json::Value> {
     let qm = quick_models_map(cfg);
     cfg.resolve_extra_body(model_id, &qm)
+}
+
+pub fn resolve_reasoning_effort(
+    cli: &crate::cli::Cli,
+    cfg: &Config,
+    provider: &str,
+    model_id: &str,
+) -> Option<CompactString> {
+    let qm = quick_models_map(cfg);
+    cfg.resolve_reasoning_effort(cli, provider, model_id, &qm)
 }
 
 impl ShowToolDetails {

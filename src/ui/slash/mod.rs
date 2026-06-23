@@ -72,6 +72,13 @@ impl SlashCtx<'_> {
                 self.ask_tx.clone(),
                 self.sandbox.clone(),
                 *self.reasoning_enabled,
+                crate::config::resolve_reasoning_effort(
+                    self.cli,
+                    self.cfg,
+                    &self.session.provider,
+                    &self.session.model,
+                )
+                .as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -111,6 +118,13 @@ impl SlashCtx<'_> {
                 self.ask_tx.clone(),
                 self.sandbox.clone(),
                 new_reasoning,
+                crate::config::resolve_reasoning_effort(
+                    self.cli,
+                    self.cfg,
+                    provider,
+                    &self.session.model,
+                )
+                .as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -256,6 +270,8 @@ pub async fn handle_compress(
             ask_tx.clone(),
             sandbox.clone(),
             reasoning_enabled,
+            crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model)
+                .as_deref(),
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]

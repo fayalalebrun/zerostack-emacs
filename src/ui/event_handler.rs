@@ -53,6 +53,8 @@ pub async fn ensure_agent(
             ask_tx.clone(),
             sandbox.clone(),
             reasoning_enabled,
+            crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model)
+                .as_deref(),
             temperature,
             extra_body,
             mcp_manager,
@@ -94,6 +96,8 @@ pub async fn ensure_agent(
             ask_tx.clone(),
             sandbox.clone(),
             reasoning_enabled,
+            crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model)
+                .as_deref(),
             temperature,
             extra_body,
         )
@@ -542,6 +546,13 @@ async fn handle_agent_done(
                     ask_tx.clone(),
                     sandbox.clone(),
                     true,
+                    crate::config::resolve_reasoning_effort(
+                        cli,
+                        cfg,
+                        &session.provider,
+                        &session.model,
+                    )
+                    .as_deref(),
                     temperature,
                     extra_body,
                     #[cfg(feature = "mcp")]
@@ -588,6 +599,13 @@ async fn handle_agent_done(
                         ask_tx.clone(),
                         sandbox.clone(),
                         true,
+                        crate::config::resolve_reasoning_effort(
+                            cli,
+                            cfg,
+                            &session.provider,
+                            &session.model,
+                        )
+                        .as_deref(),
                         temperature,
                         extra_body,
                         #[cfg(feature = "mcp")]

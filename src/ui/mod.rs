@@ -910,6 +910,13 @@ pub async fn run_interactive(
                         ask_tx.clone(),
                         sandbox.clone(),
                         reasoning_enabled,
+                        crate::config::resolve_reasoning_effort(
+                            cli,
+                            cfg,
+                            &session.provider,
+                            &session.model,
+                        )
+                        .as_deref(),
                         temperature,
                         extra_body,
                         #[cfg(feature = "mcp")]
@@ -953,6 +960,13 @@ pub async fn run_interactive(
                         ask_tx.clone(),
                         sandbox.clone(),
                         reasoning_enabled,
+                        crate::config::resolve_reasoning_effort(
+                            cli,
+                            cfg,
+                            &session.provider,
+                            &session.model,
+                        )
+                        .as_deref(),
                         temperature,
                         extra_body,
                         #[cfg(feature = "mcp")]
@@ -1850,6 +1864,8 @@ pub async fn run_interactive(
                                                     ask_tx.clone(),
                                                     sandbox.clone(),
                                                     reasoning_enabled,
+                                                    crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model)
+                                                    .as_deref(),
                                                     temperature,
                                                     extra_body,
                                                     #[cfg(feature = "mcp")] mcp_ref,

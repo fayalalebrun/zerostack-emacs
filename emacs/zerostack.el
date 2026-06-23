@@ -262,6 +262,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--loop-active nil)
 (defvar-local zerostack--loop-label nil)
 (defvar-local zerostack--thinking-level "on")
+(defvar-local zerostack--reasoning-effort-supported nil)
+(defvar-local zerostack--reasoning-effort nil)
 (defvar-local zerostack--status nil)
 (defvar-local zerostack--send-function nil)
 (defvar-local zerostack--pending-permissions nil)
@@ -301,6 +303,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--loop-active nil)
   (setq-local zerostack--loop-label nil)
   (setq-local zerostack--thinking-level "on")
+  (setq-local zerostack--reasoning-effort-supported nil)
+  (setq-local zerostack--reasoning-effort nil)
   (setq-local zerostack--status nil)
   (setq-local zerostack--pending-permissions (make-hash-table :test 'eql))
   (setq-local zerostack--latex-items (make-hash-table :test 'equal))
@@ -1538,13 +1542,35 @@ Return non-nil when DIRECTORY was newly added."
   (interactive)
   (zerostack--send-command 'mcp :request (zerostack--next-request)))
 
-(defun zerostack-thinking-menu (level)
+(defun zerostack--reasoning-effort-supported-p ()
+  "Return non-nil when the current model supports OpenAI reasoning effort."
+  (and (boundp 'zerostack--reasoning-effort-supported)
+       zerostack--reasoning-effort-supported))
+
+(defun zerostack-reasoning-effort-menu (&optional level)
+  "Set OpenAI reasoning effort LEVEL when supported by the current model."
+  (interactive)
+  (unless (zerostack--reasoning-effort-supported-p)
+    (user-error "Current model does not support reasoning effort"))
+  (let ((level (or level
+                   (completing-read "Reasoning effort: "
+                                    '("minimal" "low" "medium" "high")
+                                    nil t nil nil zerostack--reasoning-effort))))
+    (zerostack--send-command 'thinking
+                             :request (zerostack--next-request)
+                             :level level)))
+
+(defun zerostack-thinking-menu (&optional level)
   "Set native zerostack thinking/reasoning LEVEL."
-  (interactive
-   (list (completing-read "Thinking: " '("on" "off") nil t nil nil zerostack--thinking-level)))
-  (zerostack--send-command 'thinking
-                           :request (zerostack--next-request)
-                           :level level))
+  (interactive)
+  (let* ((choices (append '("on" "off")
+                          (when (zerostack--reasoning-effort-supported-p)
+                            '("minimal" "low" "medium" "high"))))
+         (level (or level
+                    (completing-read "Thinking: " choices nil t nil nil zerostack--thinking-level))))
+    (zerostack--send-command 'thinking
+                             :request (zerostack--next-request)
+                             :level level)))
 
 (defun zerostack-send-prompt (text)
   "Send TEXT as a zerostack prompt."
@@ -1967,7 +1993,7 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _p_ provider  _m_ model  _M_ MCP  _v_ view  _o_ artifact
+_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _M_ MCP  _v_ view  _o_ artifact
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -1975,6 +2001,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _p_ provid
     ("f" zerostack-fork)
     ("l" zerostack-loop)
     ("t" zerostack-thinking-menu)
+    ("r" zerostack-reasoning-effort-menu)
     ("p" zerostack-provider-menu)
     ("m" zerostack-model-menu)
     ("M" zerostack-mcp)
@@ -1990,7 +2017,10 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _p_ provid
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "fork" "loop" "thinking" "provider" "model" "mcp" "view" "artifact"))
+  (let* ((commands (append '("skill" "attach" "compact" "fork" "loop" "thinking")
+                           (when (zerostack--reasoning-effort-supported-p)
+                             '("reasoning"))
+                           '("provider" "model" "mcp" "view" "artifact")))
           (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
@@ -1999,6 +2029,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _p_ provid
       ("fork" (call-interactively #'zerostack-fork))
       ("loop" (call-interactively #'zerostack-loop))
       ("thinking" (call-interactively #'zerostack-thinking-menu))
+      ("reasoning" (call-interactively #'zerostack-reasoning-effort-menu))
       ("provider" (call-interactively #'zerostack-provider-menu))
       ("model" (call-interactively #'zerostack-model-menu))
       ("mcp" (call-interactively #'zerostack-mcp))
@@ -2202,6 +2233,13 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _p_ provid
     (setq zerostack--context-window window))
   (when-let ((level (plist-get plist :thinking)))
     (setq zerostack--thinking-level (format "%s" level)))
+  (when (plist-member plist :reasoning-effort-supported)
+    (setq zerostack--reasoning-effort-supported
+          (not (null (plist-get plist :reasoning-effort-supported)))))
+  (when (plist-member plist :reasoning-effort)
+    (setq zerostack--reasoning-effort
+          (when-let ((effort (plist-get plist :reasoning-effort)))
+            (format "%s" effort))))
   (when (and (markerp zerostack--prompt-start-marker)
              (markerp zerostack--input-marker)
              (marker-position zerostack--prompt-start-marker)
@@ -2747,8 +2785,10 @@ inserted into the transcript."
   (string-join
    (delq nil
          (list zerostack--status
-               (and zerostack--thinking-level
-                    (format "thinking:%s" zerostack--thinking-level))
+                (and zerostack--reasoning-effort-supported zerostack--reasoning-effort
+                     (format "reasoning:%s" zerostack--reasoning-effort))
+                (and zerostack--thinking-level
+                     (format "thinking:%s" zerostack--thinking-level))
                zerostack--model
                (zerostack--format-token-usage zerostack--tokens zerostack--context-window)))
    " | "))

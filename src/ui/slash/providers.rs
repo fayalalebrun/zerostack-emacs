@@ -121,6 +121,13 @@ async fn apply_model(ctx: &mut SlashCtx<'_>, model_id: &str) {
             ctx.ask_tx.clone(),
             ctx.sandbox.clone(),
             *ctx.reasoning_enabled,
+            crate::config::resolve_reasoning_effort(
+                ctx.cli,
+                ctx.cfg,
+                &ctx.session.provider,
+                &new_model,
+            )
+            .as_deref(),
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]
@@ -582,6 +589,7 @@ mod tests {
                 output_token_cost: 0.0,
                 reserve_tokens: None,
                 temperature: None,
+                reasoning_effort: None,
             },
         );
         quick.insert(
@@ -593,6 +601,7 @@ mod tests {
                 output_token_cost: 0.0,
                 reserve_tokens: None,
                 temperature: None,
+                reasoning_effort: None,
             },
         );
         let cfg = Config {

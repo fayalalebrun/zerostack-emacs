@@ -223,6 +223,9 @@ fn ensure_codex_instructions(body: bytes::Bytes) -> http_client::Result<bytes::B
             serde_json::Value::String(instructions),
         );
     }
+    if let Some(reasoning) = object.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
+        reasoning.remove("summary");
+    }
     normalize_codex_input_content(object.get_mut("input"));
     serde_json::to_vec(&value)
         .map(bytes::Bytes::from)
@@ -408,10 +411,6 @@ pub(crate) fn openrouter_anthropic_routing(model_id: &str) -> Option<serde_json:
     })
 }
 
-/// Shallow-merges user-configured `extra_body` into provider-internal routing
-/// params (e.g. OpenRouter's `provider.order`). Top-level keys from `extra_body`
-/// win on collision. Returns `None` when both are absent so callers can avoid an
-/// empty `additional_params` call.
 pub(crate) fn merge_extra_body(
     base: Option<serde_json::Value>,
     extra: Option<serde_json::Value>,
@@ -423,9 +422,27 @@ pub(crate) fn merge_extra_body(
         }
         (base, None) => base,
         (None, extra) => extra,
-        // Non-object base (shouldn't happen for routing) — user value takes over.
         (Some(_), extra) => extra,
     }
+}
+
+pub fn supports_reasoning_effort(provider: &str, model: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider == "openai-codex" || provider == "codex" {
+        return true;
+    }
+    let model = model.trim().to_ascii_lowercase();
+    if provider == "demo-openai" && model == "zerostack-demo-random" {
+        return true;
+    }
+    if provider != "openai" {
+        return false;
+    }
+    model.starts_with('o') || model.starts_with("gpt-5")
+}
+
+pub(crate) fn valid_reasoning_effort(effort: &str) -> bool {
+    matches!(effort, "minimal" | "low" | "medium" | "high")
 }
 
 impl AnyClient {
@@ -1062,6 +1079,12 @@ fn build_openrouter_client(key: &str, base_url: Option<&str>) -> anyhow::Result<
     Ok(AnyClient::OpenRouter(builder.build()?))
 }
 
+fn openai_reasoning_params(effort: Option<&str>) -> Option<serde_json::Value> {
+    effort
+        .filter(|effort| valid_reasoning_effort(effort))
+        .map(|effort| serde_json::json!({ "reasoning": { "effort": effort } }))
+}
+
 /// Builds an OpenAiModel (Responses / Completions) into the matching OpenAiAgent.
 #[allow(clippy::too_many_arguments)]
 async fn build_openai_agent(
@@ -1073,6 +1096,7 @@ async fn build_openai_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
@@ -1089,7 +1113,7 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                extra_body,
+                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body.clone()),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -1106,7 +1130,7 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                extra_body,
+                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body.clone()),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -1123,7 +1147,7 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                None,
+                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -1142,6 +1166,7 @@ pub async fn build_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
@@ -1174,6 +1199,7 @@ pub async fn build_agent(
                 ask_tx,
                 sandbox.clone(),
                 reasoning_enabled,
+                reasoning_effort,
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]

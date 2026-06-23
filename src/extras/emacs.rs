@@ -53,6 +53,10 @@ mod imp {
         pub socket: String,
         #[serde(default = "default_thinking_level")]
         pub thinking: String,
+        #[serde(default)]
+        pub reasoning_effort_supported: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub reasoning_effort: Option<String>,
     }
 
     fn default_thinking_level() -> String {
@@ -88,6 +92,7 @@ mod imp {
         line_count: usize,
         running: bool,
         reasoning_enabled: bool,
+        reasoning_effort: Option<CompactString>,
         abort_handle: Option<tokio::task::AbortHandle>,
         turn: u64,
         #[cfg(feature = "loop")]
@@ -297,6 +302,7 @@ mod imp {
                 line_count: initial_line_count,
                 running: false,
                 reasoning_enabled: true,
+                reasoning_effort: None,
                 abort_handle: None,
                 turn: 0,
                 #[cfg(feature = "loop")]
@@ -418,6 +424,8 @@ mod imp {
                 protocol: PROTOCOL_VERSION,
                 socket: socket_path.to_string_lossy().to_string(),
                 thinking: "on".to_string(),
+                reasoning_effort_supported: false,
+                reasoning_effort: None,
             }
         }
     }
@@ -497,6 +505,7 @@ mod imp {
                 meta.updated_at = last_event_at;
             }
             meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
+            apply_reasoning_effort_meta(&mut meta, &self.cfg, &mutable);
             if let Err(e) = write_meta_atomic(&self.registry_dir, &meta) {
                 tracing::warn!("failed to update Emacs session metadata: {e}");
             }
@@ -856,6 +865,7 @@ mod imp {
             *current = client.clone();
         }
         update_session_provider_model(server, &provider, &model).await?;
+        clear_unsupported_reasoning_effort(server).await;
         sync_subagent_with_main(server, &client, &provider, &model).await;
 
         let message = format!("switched to provider: {provider} (model: {model})");
@@ -882,11 +892,39 @@ mod imp {
         let level = string_arg(cmd, "level")
             .or_else(|| atom_arg(cmd, "level"))
             .unwrap_or_else(|| "toggle".to_string());
+        if crate::provider::valid_reasoning_effort(&level) {
+            let mut mutable = server.mutable.lock().await;
+            let (provider, model) = current_provider_model(server).await;
+            if !crate::provider::supports_reasoning_effort(&provider, &model) {
+                anyhow::bail!("reasoning effort is not supported by {provider}/{model}");
+            }
+            mutable.reasoning_effort = Some(CompactString::new(&level));
+            let label = thinking_label(mutable.reasoning_enabled);
+            let effort = mutable
+                .reasoning_effort
+                .as_deref()
+                .unwrap_or(level.as_str());
+            send_ok(
+                out,
+                request_arg(cmd),
+                format!(
+                    " :thinking {} :reasoning-effort-supported t :reasoning-effort {} :message {}",
+                    sexp_quote(label),
+                    sexp_quote(effort),
+                    sexp_quote(&format!("reasoning effort: {effort}")),
+                ),
+            )
+            .await;
+            return Ok(());
+        }
         let enabled = match level.as_str() {
             "on" | "true" | "t" | "enabled" => true,
             "off" | "false" | "nil" | "disabled" => false,
             "toggle" => !server.mutable.lock().await.reasoning_enabled,
-            other => anyhow::bail!("unknown thinking level '{}'; use on or off", other),
+            other => anyhow::bail!(
+                "unknown thinking level '{}'; use on, off, minimal, low, medium, or high",
+                other
+            ),
         };
         server.mutable.lock().await.reasoning_enabled = enabled;
         let label = thinking_label(enabled);
@@ -1003,6 +1041,7 @@ mod imp {
             session.provider.to_string()
         };
         update_session_provider_model(server, &provider, &model).await?;
+        clear_unsupported_reasoning_effort(server).await;
         let client = server.client.lock().await.clone();
         sync_subagent_with_main(server, &client, &provider, &model).await;
 
@@ -1831,7 +1870,11 @@ mod imp {
             let session = server.session.lock().await;
             SessionMeta::from_session(&session, &server.socket_path)
         };
-        meta.thinking = thinking_label(server.mutable.lock().await.reasoning_enabled).to_string();
+        {
+            let mutable = server.mutable.lock().await;
+            meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
+            apply_reasoning_effort_meta(&mut meta, &server.cfg, &mutable);
+        }
         out.send(format!(
             "(status :request {} :session {})",
             request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
@@ -1977,9 +2020,21 @@ mod imp {
             let session = server.session.lock().await;
             session.model.to_string()
         });
-        let temperature = {
+        let (temperature, reasoning_effort) = {
             let session = server.session.lock().await;
-            config::resolve_temperature(&server.cli, &server.cfg, &session.model)
+            let temperature = config::resolve_temperature(&server.cli, &server.cfg, &session.model);
+            let reasoning_effort = {
+                let mutable = server.mutable.lock().await;
+                mutable.reasoning_effort.clone().or_else(|| {
+                    crate::config::resolve_reasoning_effort(
+                        &server.cli,
+                        &server.cfg,
+                        &session.provider,
+                        &session.model,
+                    )
+                })
+            };
+            (temperature, reasoning_effort)
         };
         let reasoning_enabled = server.mutable.lock().await.reasoning_enabled;
         let context = server.context.lock().await;
@@ -2008,6 +2063,7 @@ mod imp {
                 server.ask_tx.clone(),
                 server.sandbox.clone(),
                 reasoning_enabled,
+                reasoning_effort.as_deref(),
                 temperature,
                 #[cfg(feature = "mcp")]
                 mcp_guard.as_ref(),
@@ -3461,9 +3517,43 @@ mod imp {
         if enabled { "on" } else { "off" }
     }
 
+    fn apply_reasoning_effort_meta(meta: &mut SessionMeta, cfg: &Config, mutable: &MutableState) {
+        meta.reasoning_effort_supported =
+            crate::provider::supports_reasoning_effort(&meta.provider, &meta.model);
+        meta.reasoning_effort = if meta.reasoning_effort_supported {
+            mutable
+                .reasoning_effort
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| {
+                    crate::config::resolve_reasoning_effort(
+                        &Cli::default(),
+                        cfg,
+                        &meta.provider,
+                        &meta.model,
+                    )
+                    .map(|s| s.to_string())
+                })
+        } else {
+            None
+        };
+    }
+
+    async fn current_provider_model(server: &Arc<Server>) -> (String, String) {
+        let session = server.session.lock().await;
+        (session.provider.to_string(), session.model.to_string())
+    }
+
+    async fn clear_unsupported_reasoning_effort(server: &Arc<Server>) {
+        let (provider, model) = current_provider_model(server).await;
+        if !crate::provider::supports_reasoning_effort(&provider, &model) {
+            server.mutable.lock().await.reasoning_effort = None;
+        }
+    }
+
     fn meta_to_sexp(meta: &SessionMeta) -> String {
         format!(
-            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :context-window {} :protocol {} :socket {} :thinking {})",
+            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {})",
             sexp_quote(&meta.session_id),
             meta.pid,
             sexp_quote(&meta.cwd),
@@ -3477,6 +3567,15 @@ mod imp {
             meta.protocol,
             sexp_quote(&meta.socket),
             sexp_quote(&meta.thinking),
+            if meta.reasoning_effort_supported {
+                "t"
+            } else {
+                "nil"
+            },
+            meta.reasoning_effort
+                .as_deref()
+                .map(sexp_quote)
+                .unwrap_or_else(|| "nil".to_string()),
         )
     }
 
@@ -4112,6 +4211,7 @@ mod imp {
                 line_count: 0,
                 running: true,
                 reasoning_enabled: true,
+                reasoning_effort: None,
                 abort_handle: None,
                 turn: 2,
                 #[cfg(feature = "loop")]
@@ -4440,6 +4540,7 @@ mod imp {
                     line_count: 0,
                     running: false,
                     reasoning_enabled: true,
+                    reasoning_effort: None,
                     abort_handle: None,
                     turn: 0,
                     #[cfg(feature = "loop")]

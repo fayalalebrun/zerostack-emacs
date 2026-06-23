@@ -1136,9 +1136,14 @@ timeout_secs = 60
 
     fn chat_completion_frames(request: &Value, sequence: u64) -> Vec<String> {
         let tool = choose_tool(request);
+        let reasoning_effort = request
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(Value::as_str)
+            .filter(|effort| matches!(*effort, "minimal" | "low" | "medium" | "high"));
 
         let mut frames = Vec::new();
-        for reasoning in demo_reasoning_chunks(sequence, tool) {
+        for reasoning in demo_reasoning_chunks(sequence, tool, reasoning_effort) {
             frames.push(sse_chunk(json!({
                 "id": format!("chatcmpl-demo-{sequence}"),
                 "object": "chat.completion.chunk",
@@ -1652,14 +1657,19 @@ timeout_secs = 60
         format!("demo-output/generated-{user_messages}.md")
     }
 
-    fn demo_reasoning_chunks(sequence: u64, next_tool: Option<&str>) -> Vec<String> {
+    fn demo_reasoning_chunks(
+        sequence: u64,
+        next_tool: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) -> Vec<String> {
         let next = next_tool.unwrap_or("final response");
+        let effort = reasoning_effort.unwrap_or("default");
         vec![
             format!(
-                "Demo reasoning #{sequence}: inspect the conversation and decide the next action. "
+                "Demo reasoning #{sequence}: reasoning effort is {effort}; inspect the conversation and decide the next action. "
             ),
             format!(
-                "Next action: {next}. This delayed reasoning chunk is intentionally visible so C-c C-c can abort the running turn."
+                "Next action: {next}. The demo provider acknowledged reasoning effort {effort} in this visible reasoning chunk."
             ),
         ]
     }
@@ -1926,6 +1936,7 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             });
             let sse = chat_completion_sse(&request, 7);
             assert!(sse.contains("reasoning_content"));
+            assert!(sse.contains("reasoning effort is default"));
             assert!(sse.contains("tool_calls"));
             assert!(sse.contains(r#""name":"read""#));
             assert!(sse.contains(r#""finish_reason":"tool_calls""#));
@@ -1941,6 +1952,17 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             assert!(final_sse.contains("Zerostack Emacs demo"));
             assert!(final_sse.contains("$E = mc^2$"));
             assert!(final_sse.contains("data: [DONE]"));
+        }
+
+        #[test]
+        fn provider_acknowledges_requested_reasoning_effort() {
+            let request = json!({
+                "messages": [{ "role": "user", "content": "demo" }],
+                "reasoning": { "effort": "high" }
+            });
+            let sse = chat_completion_sse(&request, 9);
+            assert!(sse.contains("reasoning effort is high"));
+            assert!(sse.contains("acknowledged reasoning effort high"));
         }
 
         #[test]
