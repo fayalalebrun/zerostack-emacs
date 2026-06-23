@@ -332,10 +332,8 @@ impl Config {
             .as_deref()
             .or(quick_effort)
             .or(self.reasoning_effort.as_deref())?;
-        match effort {
-            "minimal" | "low" | "medium" | "high" => Some(CompactString::new(effort)),
-            _ => None,
-        }
+        crate::provider::normalize_reasoning_effort_value(provider, model_id, effort)
+            .map(CompactString::new)
     }
 
     pub fn resolve_compact_enabled(&self) -> bool {

@@ -78,8 +78,8 @@ pub struct Cli {
 
     #[arg(
         long = "reasoning-effort",
-        value_parser = ["minimal", "low", "medium", "high"],
-        help = "OpenAI reasoning effort for supported models"
+        value_parser = ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        help = "OpenAI reasoning effort for supported models (off/none, low, medium, high, max/xhigh)"
     )]
     pub reasoning_effort: Option<String>,
 
@@ -345,7 +345,7 @@ impl Cli {
         }
         if self.provider.is_some()
             && let Some((model, _)) =
-                crate::provider::default_model_for_provider(&self.resolve_provider(cfg), cfg)
+            crate::provider::default_model_for_provider(&self.resolve_provider(cfg), cfg)
         {
             return CompactString::new(model);
         }
@@ -357,7 +357,7 @@ impl Cli {
         // OpenRouter default id; otherwise keep the historic deepseek default.
         if (self.provider.is_some() || cfg.provider.is_some())
             && let Some((model, _)) =
-                crate::provider::default_model_for_provider(&self.resolve_provider(cfg), cfg)
+            crate::provider::default_model_for_provider(&self.resolve_provider(cfg), cfg)
         {
             return CompactString::new(model);
         }

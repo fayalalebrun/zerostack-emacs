@@ -279,10 +279,15 @@ pub async fn handle_agent_event(
                 }
             }
         }
-        AgentEvent::Done { response, usage } => {
+        AgentEvent::Done {
+            response,
+            usage,
+            reasoning,
+        } => {
             handle_agent_done(
                 response,
                 usage,
+                reasoning,
                 renderer,
                 session,
                 cfg,
@@ -351,6 +356,7 @@ fn save_session_if_enabled(
 async fn handle_agent_done(
     response: CompactString,
     usage: crate::event::TokenUsage,
+    reasoning: Vec<crate::session::ProviderReasoning>,
     renderer: &mut Renderer,
     session: &mut Session,
     cfg: &Config,
@@ -391,12 +397,15 @@ async fn handle_agent_done(
 
     renderer.write_line("", Color::White)?;
     renderer.write_line("", Color::White)?;
-    session.add_message(MessageRole::Assistant, &response);
+    session.add_message_with_reasoning(MessageRole::Assistant, &response, reasoning);
     let billable_input_tokens = usage.billable_input_tokens();
     let billable_output_tokens = usage.billable_output_tokens();
     session.total_input_tokens = session
         .total_input_tokens
         .saturating_add(billable_input_tokens);
+    session.total_cached_input_tokens = session
+        .total_cached_input_tokens
+        .saturating_add(usage.cached_input_tokens);
     session.total_output_tokens = session
         .total_output_tokens
         .saturating_add(billable_output_tokens);

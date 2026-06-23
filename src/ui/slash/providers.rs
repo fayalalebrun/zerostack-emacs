@@ -179,6 +179,7 @@ async fn sync_subagent_with_main(ctx: &mut SlashCtx<'_>) {
         ctx.cli.api_key.as_deref(),
         &ctx.cfg.custom_providers_map(),
         ctx.cfg.api_keys.as_ref(),
+        None,
     ) {
         Ok(client) => subagents::set_client_and_model(client, model),
         Err(e) => tracing::warn!(
@@ -524,6 +525,7 @@ async fn handle_models_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyho
                 ctx.cli.api_key.as_deref(),
                 &ctx.cfg.custom_providers_map(),
                 ctx.cfg.api_keys.as_ref(),
+                Some(ctx.session.id.as_str()),
             )?;
             let model = new_client.completion_model(q.model.to_string());
             model_for_subagent(ctx, model).await?;

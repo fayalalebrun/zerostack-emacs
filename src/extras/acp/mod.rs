@@ -245,11 +245,13 @@ async fn run_prompt(
         model_str = custom_model.clone();
     }
 
+    let codex_prompt_cache_key = session_id.to_string();
     let client = crate::provider::create_client(
         &provider_str,
         None,
         &state.cfg.custom_providers_map(),
         state.cfg.api_keys.as_ref(),
+        Some(codex_prompt_cache_key.as_str()),
     )
     .map_err(|e| agent_client_protocol::Error::new(-32603, e.to_string()))?;
 

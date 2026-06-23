@@ -1,5 +1,7 @@
 use compact_str::CompactString;
 
+use crate::session::ProviderReasoning;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -101,6 +103,7 @@ pub enum AgentEvent {
     Done {
         response: CompactString,
         usage: TokenUsage,
+        reasoning: Vec<ProviderReasoning>,
     },
 }
 

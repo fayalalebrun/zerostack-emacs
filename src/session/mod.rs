@@ -4,6 +4,8 @@ pub mod storage;
 use std::path::Path;
 
 use compact_str::CompactString;
+use rig::OneOrMany;
+use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent, Text};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,6 +29,86 @@ pub struct SessionMessage {
     pub role: MessageRole,
     pub content: CompactString,
     pub estimated_tokens: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_reasoning: Vec<ProviderReasoning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ProviderReasoningContent {
+    Summary(String),
+    Encrypted(String),
+    Redacted(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderReasoning {
+    pub id: String,
+    pub content: Vec<ProviderReasoningContent>,
+}
+
+impl ProviderReasoning {
+    pub fn from_rig(reasoning: &Reasoning) -> Option<Self> {
+        let id = reasoning.id.clone()?;
+        let content = reasoning
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                ReasoningContent::Summary(text) => {
+                    Some(ProviderReasoningContent::Summary(text.clone()))
+                }
+                ReasoningContent::Encrypted(data) => {
+                    Some(ProviderReasoningContent::Encrypted(data.clone()))
+                }
+                ReasoningContent::Redacted { data } => {
+                    Some(ProviderReasoningContent::Redacted(data.clone()))
+                }
+                ReasoningContent::Text { .. } => None,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!content.is_empty()).then_some(Self { id, content })
+    }
+
+    fn to_rig(&self) -> Reasoning {
+        let mut reasoning = Reasoning::summaries(Vec::new()).with_id(self.id.clone());
+        reasoning.content = self
+            .content
+            .iter()
+            .map(|item| match item {
+                ProviderReasoningContent::Summary(text) => ReasoningContent::Summary(text.clone()),
+                ProviderReasoningContent::Encrypted(data) => {
+                    ReasoningContent::Encrypted(data.clone())
+                }
+                ProviderReasoningContent::Redacted(data) => {
+                    ReasoningContent::Redacted { data: data.clone() }
+                }
+            })
+            .collect();
+        reasoning
+    }
+}
+
+pub fn assistant_message_with_reasoning(
+    content: &str,
+    reasoning: &[ProviderReasoning],
+) -> rig::completion::Message {
+    if reasoning.is_empty() {
+        return rig::completion::Message::assistant(content.to_string());
+    }
+
+    let mut items = reasoning
+        .iter()
+        .map(|item| AssistantContent::Reasoning(item.to_rig()))
+        .collect::<Vec<_>>();
+    if !content.is_empty() {
+        items.push(AssistantContent::Text(Text::new(content.to_string())));
+    }
+
+    rig::completion::Message::Assistant {
+        id: None,
+        content: OneOrMany::many(items).expect("assistant reasoning message is non-empty"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +136,8 @@ pub struct Session {
     pub updated_at: CompactString,
     #[serde(default)]
     pub total_input_tokens: u64,
+    #[serde(default)]
+    pub total_cached_input_tokens: u64,
     #[serde(default)]
     pub total_output_tokens: u64,
     pub total_cost: f64,
@@ -156,6 +240,7 @@ impl Session {
             created_at: now.clone(),
             updated_at: now,
             total_input_tokens: 0,
+            total_cached_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
             total_estimated_tokens: 0,
@@ -277,11 +362,21 @@ impl Session {
     }
 
     pub fn add_message(&mut self, role: MessageRole, content: &str) {
+        self.add_message_with_reasoning(role, content, Vec::new());
+    }
+
+    pub fn add_message_with_reasoning(
+        &mut self,
+        role: MessageRole,
+        content: &str,
+        provider_reasoning: Vec<ProviderReasoning>,
+    ) {
         let tokens = Self::estimate_tokens(content);
         self.messages.push(SessionMessage {
             role,
             content: CompactString::new(content),
             estimated_tokens: tokens,
+            provider_reasoning,
         });
         self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
         self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
@@ -404,6 +499,7 @@ impl Session {
             .truncate(message_index.min(fork.messages.len()));
         fork.total_estimated_tokens = fork.messages.iter().map(|m| m.estimated_tokens).sum();
         fork.total_input_tokens = 0;
+        fork.total_cached_input_tokens = 0;
         fork.total_output_tokens = 0;
         fork.total_cost = 0.0;
         fork.input_token_cost = 0.0;
@@ -637,6 +733,7 @@ impl Session {
             role: MessageRole::System,
             content: CompactString::from(summary.clone()),
             estimated_tokens: summary_tokens,
+            provider_reasoning: Vec::new(),
         };
 
         // Remove summarized messages and insert summary

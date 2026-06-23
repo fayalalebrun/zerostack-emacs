@@ -98,6 +98,7 @@ impl SlashCtx<'_> {
             self.cli.api_key.as_deref(),
             &self.cfg.custom_providers_map(),
             self.cfg.api_keys.as_ref(),
+            Some(self.session.id.as_str()),
         )?;
         let model = self.client.completion_model(self.session.model.to_string());
         let temperature =
@@ -149,26 +150,43 @@ pub(crate) fn write_error(renderer: &mut Renderer, msg: impl std::fmt::Display) 
 }
 
 pub fn undo_last(session: &mut Session) -> usize {
-    let len = session.messages.len();
-    if len == 0 {
-        return 0;
+    let mut removed = 0;
+    while session.messages.last().is_some_and(|m| {
+        matches!(
+            m.role,
+            MessageRole::ToolCall | MessageRole::ToolResult | MessageRole::SubagentToolCall
+        )
+    }) {
+        session.messages.pop();
+        removed += 1;
     }
-    let removed = if session.messages[len - 1].role == MessageRole::Assistant {
-        if len >= 2 && session.messages[len - 2].role == MessageRole::User {
-            2
-        } else {
-            1
-        }
-    } else if session.messages[len - 1].role == MessageRole::User {
-        1
-    } else {
-        0
-    };
-    // Truncate via the session helper so the context figure tracks the
-    // shortened history (subtracts the removed turn from the calibration anchor
-    // rather than going stale or resetting to a cold estimate).
+    if session
+        .messages
+        .last()
+        .is_some_and(|m| m.role == MessageRole::Assistant)
+    {
+        session.messages.pop();
+        removed += 1;
+    }
+    while session.messages.last().is_some_and(|m| {
+        matches!(
+            m.role,
+            MessageRole::ToolCall | MessageRole::ToolResult | MessageRole::SubagentToolCall
+        )
+    }) {
+        session.messages.pop();
+        removed += 1;
+    }
+    if session
+        .messages
+        .last()
+        .is_some_and(|m| m.role == MessageRole::User)
+    {
+        session.messages.pop();
+        removed += 1;
+    }
     if removed > 0 {
-        session.truncate_to(len - removed);
+        session.truncate_to(session.messages.len());
     }
     removed
 }

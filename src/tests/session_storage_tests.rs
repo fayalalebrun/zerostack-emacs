@@ -1,8 +1,8 @@
-use crate::session::MessageRole;
 use crate::session::Session;
 use crate::session::storage::{
     delete_session, find_all_sessions, find_sessions_by_prefix, load_suffix, save_session, suffix_path,
 };
+use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
 use std::env;
 use std::path::Path;
@@ -90,6 +90,34 @@ fn save_session_preserves_messages() {
 >>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
 fn find_all_sessions_returns_saved_sessions_newest_first() {
 =======
+#[test]
+fn save_session_preserves_provider_reasoning() {
+    let env = setup_test_env();
+    let mut s = Session::new("openai-codex", "gpt-5.5", 400000);
+    s.add_message_with_reasoning(
+        MessageRole::Assistant,
+        "answer",
+        vec![ProviderReasoning {
+            id: "rs_123".to_string(),
+            content: vec![
+                ProviderReasoningContent::Summary("summary".to_string()),
+                ProviderReasoningContent::Encrypted("encrypted_blob".to_string()),
+            ],
+        }],
+    );
+    save_session(&s).unwrap();
+
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].messages[0].provider_reasoning.len(), 1);
+    assert_eq!(found[0].messages[0].provider_reasoning[0].id, "rs_123");
+    assert_eq!(
+        found[0].messages[0].provider_reasoning[0].content[1],
+        ProviderReasoningContent::Encrypted("encrypted_blob".to_string())
+    );
+    drop(env);
+}
+
 #[test]
 fn save_session_preserves_tool_messages() {
     let env = setup_test_env();

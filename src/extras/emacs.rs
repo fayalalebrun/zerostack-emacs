@@ -240,6 +240,9 @@ mod imp {
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
             MessageRole::System => "system",
+            MessageRole::ToolCall => "tool-call",
+            MessageRole::ToolResult => "tool-result",
+            MessageRole::SubagentToolCall => "subagent-tool-call",
         }
     }
 
@@ -486,7 +489,7 @@ mod imp {
                     lines_to_sexp(&lines),
                 ),
             )
-            .await;
+		.await;
         }
 
         async fn append_lines(&self, event_type: &str, turn: u64, lines: Vec<WireLine>) {
@@ -545,7 +548,7 @@ mod imp {
                 contents,
                 "text/plain; charset=utf-8",
             )
-            .await
+		.await
         }
 
         async fn write_artifact_file_with_mime(
@@ -700,7 +703,7 @@ mod imp {
                 sexp_quote(server.socket_path.to_string_lossy().as_ref()),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -729,7 +732,7 @@ mod imp {
             sexp_quote(&server.current_session_id().await),
             lines_to_sexp(&lines),
         ))
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -807,7 +810,7 @@ mod imp {
                 )),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -828,7 +831,7 @@ mod imp {
                 sexp_quote(&attachment_list_message(&items)),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -851,12 +854,17 @@ mod imp {
             let session = server.session.lock().await;
             session.model.to_string()
         };
+        let session_id = {
+            let session = server.session.lock().await;
+            session.id.clone()
+        };
 
         let client = crate::provider::create_client(
             &provider,
             server.cli.api_key.as_deref(),
             &server.cfg.custom_providers_map(),
             server.cfg.api_keys.as_ref(),
+            Some(session_id.as_str()),
         )?;
 
         ensure_idle_for_switch(server, "provider").await?;
@@ -879,7 +887,7 @@ mod imp {
                 sexp_quote(&message),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -895,15 +903,14 @@ mod imp {
         if crate::provider::valid_reasoning_effort(&level) {
             let mut mutable = server.mutable.lock().await;
             let (provider, model) = current_provider_model(server).await;
-            if !crate::provider::supports_reasoning_effort(&provider, &model) {
-                anyhow::bail!("reasoning effort is not supported by {provider}/{model}");
-            }
-            mutable.reasoning_effort = Some(CompactString::new(&level));
+            let Some(effort) =
+                crate::provider::normalize_reasoning_effort_value(&provider, &model, &level)
+            else {
+                anyhow::bail!("reasoning effort '{level}' is not supported by {provider}/{model}");
+            };
+            mutable.reasoning_effort = Some(CompactString::new(effort));
             let label = thinking_label(mutable.reasoning_enabled);
-            let effort = mutable
-                .reasoning_effort
-                .as_deref()
-                .unwrap_or(level.as_str());
+            let effort = mutable.reasoning_effort.as_deref().unwrap_or(effort);
             send_ok(
                 out,
                 request_arg(cmd),
@@ -914,7 +921,7 @@ mod imp {
                     sexp_quote(&format!("reasoning effort: {effort}")),
                 ),
             )
-            .await;
+		.await;
             return Ok(());
         }
         let enabled = match level.as_str() {
@@ -922,7 +929,7 @@ mod imp {
             "off" | "false" | "nil" | "disabled" => false,
             "toggle" => !server.mutable.lock().await.reasoning_enabled,
             other => anyhow::bail!(
-                "unknown thinking level '{}'; use on, off, minimal, low, medium, or high",
+                "unknown thinking level '{}'; use on, off, none, minimal, low, medium, high, xhigh, or max",
                 other
             ),
         };
@@ -937,7 +944,7 @@ mod imp {
                 sexp_quote(&format!("thinking: {label}")),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -953,7 +960,7 @@ mod imp {
                 request_arg(cmd),
                 format!(" :message {}", sexp_quote("MCP support not enabled")),
             )
-            .await;
+		.await;
             return Ok(());
         }
 
@@ -965,7 +972,7 @@ mod imp {
                     request_arg(cmd),
                     format!(" :message {}", sexp_quote("no MCP servers configured")),
                 )
-                .await;
+                    .await;
                 return Ok(());
             };
             if configs.is_empty() {
@@ -974,7 +981,7 @@ mod imp {
                     request_arg(cmd),
                     format!(" :message {}", sexp_quote("no MCP servers configured")),
                 )
-                .await;
+                    .await;
                 return Ok(());
             }
 
@@ -991,7 +998,7 @@ mod imp {
                     request_arg(cmd),
                     format!(" :message {}", sexp_quote("no MCP servers connected")),
                 )
-                .await;
+                    .await;
                 return Ok(());
             }
 
@@ -1019,7 +1026,7 @@ mod imp {
                 request_arg(cmd),
                 format!(" :message {}", sexp_quote(&lines.join("\n"))),
             )
-            .await;
+		.await;
             Ok(())
         }
     }
@@ -1056,7 +1063,7 @@ mod imp {
                 sexp_quote(&message),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -1148,6 +1155,7 @@ mod imp {
             server.cli.api_key.as_deref(),
             &server.cfg.custom_providers_map(),
             server.cfg.api_keys.as_ref(),
+            None,
         ) {
             Ok(client) => subagents::set_client_and_model(client, sub_model),
             Err(e) => tracing::warn!(
@@ -1509,7 +1517,7 @@ mod imp {
             request_arg(cmd),
             format!(" :stopped {}", bool_atom(stopped)),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -1593,7 +1601,7 @@ mod imp {
                 )),
             ),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -1755,7 +1763,7 @@ mod imp {
             request_arg(cmd),
             format!(" :aborted {}", bool_atom(aborted)),
         )
-        .await;
+            .await;
         Ok(())
     }
 
@@ -1857,7 +1865,7 @@ mod imp {
             request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
             rendered,
         ))
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -1880,7 +1888,7 @@ mod imp {
             request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
             meta_to_sexp(&meta),
         ))
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -2068,7 +2076,7 @@ mod imp {
                 #[cfg(feature = "mcp")]
                 mcp_guard.as_ref(),
             )
-            .await
+		.await
         };
         drop(context);
         let mut runner = agent.spawn_runner(text, history);
@@ -2178,6 +2186,13 @@ mod imp {
                     // `thinking: ...` does not delete the tool rows appended below.
                     reset_reasoning_render_segment(&mut reasoning_start_line);
                     let summary = format_tool_call_summary(&name, &args);
+                    {
+                        let mut session = server.session.lock().await;
+                        session.add_tool_call(&name, &args);
+                        if !server.cli.no_session {
+                            crate::session::storage::save_session(&session)?;
+                        }
+                    }
                     server
                         .append_lines(
                             "tool-render",
@@ -2203,6 +2218,23 @@ mod imp {
                 }
                 AgentEvent::SubagentToolCall { name, args } => {
                     let summary = format_tool_call_summary(&name, &args);
+                    {
+                        let mut session = server.session.lock().await;
+                        session.add_subagent_tool_call(&name, &args);
+                        if !server.cli.no_session {
+                            crate::session::storage::save_session(&session)?;
+                        }
+                    }
+                    server
+                        .append_lines(
+                            "tool-render",
+                            turn,
+                            vec![WireLine::new(
+                                format!("⌥ {}", sanitize_output(&summary)),
+                                "zs-tool",
+                            )],
+                        )
+                        .await;
                     server
                         .broadcast_event(
                             "subagent-tool-call",
@@ -2216,16 +2248,6 @@ mod imp {
                         )
                         .await;
                 }
-                    let safe = {
-                        let mut session = server.session.lock().await;
-                        let content = tool_result_artifact_content(&mut session, &name, &output);
-                        if !server.cli.no_session {
-                            crate::session::storage::save_session(&session)?;
-                        }
-                        content
-                    };
->>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
-=======
                 AgentEvent::ToolResult { name, output } => {
                     let safe = {
                         let mut session = server.session.lock().await;
@@ -2235,16 +2257,6 @@ mod imp {
                         }
                         content
                     };
-=======
-                    let safe = {
-                        let mut session = server.session.lock().await;
-                        let content = tool_result_artifact_content(&mut session, &name, &output);
-                        if !server.cli.no_session {
-                            crate::session::storage::save_session(&session)?;
-                        }
-                        content
-                    };
->>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
                     let artifact = match server
                         .create_artifact(turn, "tool-output", &name, &safe)
                         .await
@@ -2306,7 +2318,11 @@ mod imp {
                         )
                         .await;
                 }
-                AgentEvent::Done { response, usage } => {
+                AgentEvent::Done {
+                    response,
+                    usage,
+                    reasoning,
+                } => {
                     let cols = server.mutable.lock().await.cols;
                     let start = match response_start_line {
                         Some(start) => start,
@@ -2325,12 +2341,19 @@ mod imp {
                         .await;
                     let (tokens, context_window, billable_input_tokens, billable_output_tokens) = {
                         let mut session = server.session.lock().await;
-                        session.add_message(MessageRole::Assistant, &response);
+                        session.add_message_with_reasoning(
+                            MessageRole::Assistant,
+                            &response,
+                            reasoning,
+                        );
                         let billable_input_tokens = usage.billable_input_tokens();
                         let billable_output_tokens = usage.billable_output_tokens();
                         session.total_input_tokens = session
                             .total_input_tokens
                             .saturating_add(billable_input_tokens);
+                        session.total_cached_input_tokens = session
+                            .total_cached_input_tokens
+                            .saturating_add(usage.cached_input_tokens);
                         session.total_output_tokens = session
                             .total_output_tokens
                             .saturating_add(billable_output_tokens);
@@ -2597,6 +2620,37 @@ mod imp {
                                 .with_source(message_index, msg.role),
                         );
                     }
+                    out.push(blank_line().with_source(message_index, msg.role));
+                }
+                MessageRole::ToolCall => {
+                    out.push(
+                        WireLine::new(format!("◈ {}", sanitize_output(&msg.content)), "zs-tool")
+                            .with_source(message_index, msg.role),
+                    );
+                    out.push(blank_line().with_source(message_index, msg.role));
+                }
+                MessageRole::ToolResult => {
+                    let output = msg
+                        .content
+                        .split_once(":\n")
+                        .map(|(_, output)| output)
+                        .unwrap_or(&msg.content);
+                    for line in output.lines() {
+                        out.push(
+                            WireLine::new(
+                                format!("◈ result {}", sanitize_output(line)),
+                                "zs-muted",
+                            )
+				.with_source(message_index, msg.role),
+                        );
+                    }
+                    out.push(blank_line().with_source(message_index, msg.role));
+                }
+                MessageRole::SubagentToolCall => {
+                    out.push(
+                        WireLine::new(format!("⌥ {}", sanitize_output(&msg.content)), "zs-tool")
+                            .with_source(message_index, msg.role),
+                    );
                     out.push(blank_line().with_source(message_index, msg.role));
                 }
             }
@@ -3202,9 +3256,9 @@ mod imp {
                 .args(["-interaction=nonstopmode", "-halt-on-error", tex_filename])
                 .output(),
         )
-        .await
-        .context("LaTeX timed out")?
-        .context("run latex")?;
+            .await
+            .context("LaTeX timed out")?
+            .context("run latex")?;
         if !output.status.success() {
             anyhow::bail!(
                 "latex exited with {}: {}",
@@ -3235,9 +3289,9 @@ mod imp {
                 ])
                 .output(),
         )
-        .await
-        .context("dvisvgm timed out")?
-        .context("run dvisvgm")?;
+            .await
+            .context("dvisvgm timed out")?
+            .context("run dvisvgm")?;
         if !output.status.success() {
             anyhow::bail!(
                 "dvisvgm exited with {}: {}",
@@ -3532,7 +3586,7 @@ mod imp {
                         &meta.provider,
                         &meta.model,
                     )
-                    .map(|s| s.to_string())
+			.map(|s| s.to_string())
                 })
         } else {
             None
@@ -4033,7 +4087,7 @@ mod imp {
             let cmd = parse_command(
                 "(compact :request 12 :instructions \"preserve test failure details\")",
             )
-            .unwrap();
+		.unwrap();
             assert_eq!(cmd.name, "compact");
             assert_eq!(request_arg(&cmd).as_deref(), Some("12"));
             assert_eq!(
@@ -4103,66 +4157,7 @@ mod imp {
             assert!(encoded.contains(":message-index 1 :role assistant"));
         }
 
-        fn session_render_lines_include_persisted_tool_events() {
-            let mut session = Session::new("openai", "gpt", 1000);
-            session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
-            session.add_tool_result("bash", "hi");
-            session.add_message(MessageRole::Assistant, "done");
-
-            let encoded = lines_to_sexp(&session_render_lines(&session));
-
-            assert!(
-                encoded.contains("tool"),
-                "expected tool lines in {encoded}"
-            );
-            assert!(
-                encoded.contains("bash"),
-                "expected tool name in {encoded}"
-            );
-            assert!(
-                encoded.contains("hi"),
-                "expected tool output in {encoded}"
-            );
-            assert!(
-                encoded.contains("done"),
-                "expected assistant response in {encoded}"
-            );
-        }
-
         #[test]
->>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
-        fn with_source_lines_adds_message_source_metadata() {
-=======
-        #[test]
-        fn session_render_lines_include_persisted_tool_events() {
-            let mut session = Session::new("openai", "gpt", 1000);
-            session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
-            session.add_tool_result("bash", "hi");
-            session.add_message(MessageRole::Assistant, "done");
-
-            let encoded = lines_to_sexp(&session_render_lines(&session));
-
-            assert!(
-                encoded.contains("tool"),
-                "expected tool lines in {encoded}"
-            );
-            assert!(
-                encoded.contains("bash"),
-                "expected tool name in {encoded}"
-            );
-            assert!(
-                encoded.contains("hi"),
-                "expected tool output in {encoded}"
-            );
-            assert!(
-                encoded.contains("done"),
-                "expected assistant response in {encoded}"
-            );
-        }
-
-        #[test]
-        fn with_source_lines_adds_message_source_metadata() {
-=======
         fn session_render_lines_include_persisted_tool_events() {
             let mut session = Session::new("openai", "gpt", 1000);
             session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
@@ -4192,7 +4187,6 @@ mod imp {
         }
 
         #[test]
->>>>>>> 4ff8b97 (Save long tool outputs as sidecars)
         fn with_source_lines_adds_message_source_metadata() {
             let encoded = lines_to_sexp(&with_source_lines(
                 render_user_lines("hello"),
@@ -4260,7 +4254,7 @@ mod imp {
             let cmd = parse_command(
                 "(loop-start :request 8 :prompt \"fix bugs\" :max 3 :plan \"PLAN.md\" :run \"cargo test\")",
             )
-            .unwrap();
+		.unwrap();
             assert_eq!(cmd.name, "loop-start");
             assert_eq!(request_arg(&cmd).as_deref(), Some("8"));
             assert_eq!(string_arg(&cmd, "prompt").as_deref(), Some("fix bugs"));
@@ -4569,8 +4563,8 @@ mod imp {
                     }
                 }
             })
-            .await
-            .unwrap()
+		.await
+		.unwrap()
         }
 
         async fn wait_for_prompt(prompts: &Arc<std::sync::Mutex<Vec<String>>>, prompt: &str) {

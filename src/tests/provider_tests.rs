@@ -167,6 +167,7 @@ fn serialize_single_user_message() {
         role: MessageRole::User,
         content: CompactString::new("hello"),
         estimated_tokens: 1,
+        provider_reasoning: Vec::new(),
     }];
     let result = serialize_conversation(&msgs);
     assert!(result.contains("[User]: hello"));
@@ -179,26 +180,31 @@ fn serialize_multiple_roles() {
             role: MessageRole::User,
             content: CompactString::new("hi"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
         },
         SessionMessage {
             role: MessageRole::Assistant,
             content: CompactString::new("hey"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
         },
         SessionMessage {
             role: MessageRole::System,
             content: CompactString::new("note"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
         },
         SessionMessage {
             role: MessageRole::ToolCall,
             content: CompactString::new("read {path}"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
         },
         SessionMessage {
             role: MessageRole::ToolResult,
             content: CompactString::new("read:\ncontents"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
         },
     ];
     let result = serialize_conversation(&msgs);
@@ -257,14 +263,14 @@ fn resolve_builtin_openai_codex() {
 
 #[test]
 fn openai_codex_client_builds_without_static_api_key() {
-    let client = create_client("openai-codex", None, &HashMap::new(), None).unwrap();
+    let client = create_client("openai-codex", None, &HashMap::new(), None, None).unwrap();
     assert_eq!(client.provider_name(), "openai-codex");
     assert!(matches!(client, AnyClient::OpenAI(OpenAiClient::Codex(_))));
 }
 
 #[tokio::test]
 async fn openai_codex_lists_static_zerostack_defaults() {
-    let client = create_client("openai-codex", None, &HashMap::new(), None).unwrap();
+    let client = create_client("openai-codex", None, &HashMap::new(), None, None).unwrap();
     let models = client.list_models().await.unwrap();
     let openai_catalog = crate::models_catalog::catalog_entries("openai").unwrap();
     let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();

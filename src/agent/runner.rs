@@ -11,7 +11,7 @@ use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingCha
 use tokio::sync::mpsc;
 
 use crate::event::{AgentEvent, BtwEvent, TokenUsage};
-use crate::session::{MessageRole, Session};
+use crate::session::{MessageRole, ProviderReasoning, Session, assistant_message_with_reasoning};
 
 pub struct AgentRunner {
     pub event_rx: mpsc::Receiver<AgentEvent>,
@@ -19,6 +19,12 @@ pub struct AgentRunner {
     /// interrupted run keeps driving its stream — and therefore keeps executing
     /// tools (edit/write/bash) — invisibly. Aborting stops it for real.
     pub abort_handle: tokio::task::AbortHandle,
+}
+
+pub struct PrintRunResult {
+    pub response: String,
+    pub reasoning: Vec<ProviderReasoning>,
+    pub usage: TokenUsage,
 }
 
 /// Handle to an in-flight `/btw` side-question task. The `abort_handle` lets the
@@ -39,6 +45,15 @@ fn streamed_reasoning_text<R>(content: &StreamedAssistantContent<R>) -> Option<C
                 Some(CompactString::from(reasoning.as_str()))
             }
         }
+        _ => None,
+    }
+}
+
+fn streamed_provider_reasoning<R>(
+    content: &StreamedAssistantContent<R>,
+) -> Option<ProviderReasoning> {
+    match content {
+        StreamedAssistantContent::Reasoning(reasoning) => ProviderReasoning::from_rig(reasoning),
         _ => None,
     }
 }
@@ -139,7 +154,10 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
     for msg in &session.messages[first_kept..] {
         match msg.role {
             MessageRole::User => messages.push(Message::user(msg.content.to_string())),
-            MessageRole::Assistant => messages.push(Message::assistant(msg.content.to_string())),
+            MessageRole::Assistant => messages.push(assistant_message_with_reasoning(
+                &msg.content,
+                &msg.provider_reasoning,
+            )),
             // Convert non-user transcript records to Assistant for the
             // same reason as the summary above: the templates that reject
             // mid-stream System/tool roles tolerate Assistant, and code-symmetry with
@@ -262,8 +280,8 @@ pub fn build_btw_snapshot(
     if main_running && !turn_trace.is_empty() {
         snapshot.push(Message::user(format!(
             "(Context only — the main assistant is working in parallel right now. \
-Its progress so far this turn:\n{}\nThe last step may still be running. Use this \
-only if the user's question is about what the main assistant is doing.)",
+	     Its progress so far this turn:\n{}\nThe last step may still be running. Use this \
+	     only if the user's question is about what the main assistant is doing.)",
             turn_trace.join("\n")
         )));
     }
@@ -287,6 +305,7 @@ where
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
         let mut usage_total = TokenUsage::default();
+        let mut response_reasoning: Vec<ProviderReasoning> = Vec::new();
 
         let mut stream = agent.stream_chat(prompt, history).await;
 
@@ -294,6 +313,13 @@ where
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                        if let Some(reasoning) = streamed_provider_reasoning(&content) {
+                            tool_interactions.push(assistant_message_with_reasoning(
+                                "",
+                                std::slice::from_ref(&reasoning),
+                            ));
+                            response_reasoning.push(reasoning);
+                        }
                         if let Some(reasoning) = streamed_reasoning_text(&content) {
                             let _ = event_tx.send(AgentEvent::Reasoning(reasoning)).await;
                             continue;
@@ -306,6 +332,7 @@ where
                                     .await;
                             }
                             StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                                response_reasoning.clear();
                                 last_tool_name = Some(tool_call.function.name.clone());
                                 tool_interactions.push(tool_call.clone().into());
                                 let _ = event_tx
@@ -349,10 +376,12 @@ where
                             } else {
                                 usage_total
                             };
+                            let reasoning = std::mem::take(&mut response_reasoning);
                             let _ = event_tx
                                 .send(AgentEvent::Done {
                                     response: CompactString::from(response_text),
                                     usage,
+                                    reasoning,
                                 })
                                 .await;
                             return;
@@ -424,7 +453,7 @@ pub async fn run_print<M, P>(
     prompt: &str,
     max_turns: usize,
     pure_stdout: bool,
-) -> anyhow::Result<String>
+) -> anyhow::Result<PrintRunResult>
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
@@ -436,6 +465,8 @@ where
         .await;
 
     let mut full_response = String::new();
+    let mut response_reasoning = Vec::new();
+    let mut usage_total = TokenUsage::default();
     let mut last_tool_name: Option<String> = None;
 
     while let Some(item) = stream.next().await {
@@ -449,6 +480,9 @@ where
                 r,
             ))) => {
                 eprint!("{}", r.display_text());
+                if let Some(reasoning) = ProviderReasoning::from_rig(&r) {
+                    response_reasoning.push(reasoning);
+                }
                 let _ = std::io::Write::flush(&mut std::io::stderr());
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
@@ -488,6 +522,11 @@ where
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
             }
+            Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                if let Some(usage) = call.usage {
+                    usage_total += TokenUsage::from(usage);
+                }
+            }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
             Ok(_) => {}
             Err(e) => {
@@ -498,7 +537,11 @@ where
     }
 
     println!();
-    Ok(full_response)
+    Ok(PrintRunResult {
+        response: full_response,
+        reasoning: response_reasoning,
+        usage: usage_total,
+    })
 }
 
 fn format_tool_args_summary(args_json: &serde_json::Value) -> String {
@@ -594,7 +637,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::streamed_reasoning_text;
+    use super::{convert_history, streamed_provider_reasoning, streamed_reasoning_text};
+    use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent, Session};
+    use rig::completion::Message;
+    use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent};
     use rig::streaming::StreamedAssistantContent;
 
     #[test]
@@ -618,5 +664,48 @@ mod tests {
         };
 
         assert!(streamed_reasoning_text(&content).is_none());
+    }
+
+    #[test]
+    fn streamed_encrypted_reasoning_is_preserved() {
+        let mut reasoning =
+            Reasoning::summaries(vec!["short summary".to_string()]).with_id("rs_1".to_string());
+        reasoning
+            .content
+            .push(ReasoningContent::Encrypted("enc_blob".to_string()));
+        let content = StreamedAssistantContent::<()>::Reasoning(reasoning);
+
+        let stored = streamed_provider_reasoning(&content).unwrap();
+        assert_eq!(stored.id, "rs_1");
+        assert_eq!(
+            stored.content,
+            vec![
+                ProviderReasoningContent::Summary("short summary".to_string()),
+                ProviderReasoningContent::Encrypted("enc_blob".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn convert_history_retransmits_provider_reasoning_before_text() {
+        let mut session = Session::new("openai-codex", "gpt-5.5", 400000);
+        session.add_message_with_reasoning(
+            MessageRole::Assistant,
+            "final answer",
+            vec![ProviderReasoning {
+                id: "rs_1".to_string(),
+                content: vec![ProviderReasoningContent::Encrypted("enc_blob".to_string())],
+            }],
+        );
+
+        let history = convert_history(&session);
+        let Message::Assistant { content, .. } = &history[0] else {
+            panic!("expected assistant message");
+        };
+        let items = content.iter().collect::<Vec<_>>();
+        assert!(
+            matches!(items[0], AssistantContent::Reasoning(reasoning) if reasoning.id.as_deref() == Some("rs_1"))
+        );
+        assert!(matches!(items[1], AssistantContent::Text(text) if text.text == "final answer"));
     }
 }

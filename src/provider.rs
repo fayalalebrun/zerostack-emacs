@@ -160,11 +160,15 @@ pub enum OpenAiAgent {
 #[derive(Clone, Debug, Default)]
 pub struct CodexHttpClient {
     inner: reqwest::Client,
+    prompt_cache_key: Option<String>,
 }
 
 impl CodexHttpClient {
-    fn new(inner: reqwest::Client) -> Self {
-        Self { inner }
+    fn new(inner: reqwest::Client, prompt_cache_key: Option<String>) -> Self {
+        Self {
+            inner,
+            prompt_cache_key,
+        }
     }
 
     async fn authorize_headers(&self, headers: &mut HeaderMap) -> http_client::Result<()> {
@@ -176,6 +180,15 @@ impl CodexHttpClient {
             HeaderValue::from_str(&format!("Bearer {}", auth.access_token))?,
         );
         headers.insert(
+            reqwest::header::USER_AGENT,
+            HeaderValue::from_str(&format!(
+                "zerostack/{} ({}; {})",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ))?,
+        );
+        headers.insert(
             HeaderName::from_static("chatgpt-account-id"),
             HeaderValue::from_str(&auth.account_id)?,
         );
@@ -183,6 +196,16 @@ impl CodexHttpClient {
             HeaderName::from_static("originator"),
             HeaderValue::from_static("zerostack"),
         );
+        if let Some(key) = self
+            .prompt_cache_key
+            .as_deref()
+            .filter(|key| !key.is_empty())
+        {
+            headers.insert(
+                HeaderName::from_static("session_id"),
+                HeaderValue::from_str(key)?,
+            );
+        }
         headers.insert(
             HeaderName::from_static("openai-beta"),
             HeaderValue::from_static("responses=experimental"),
@@ -196,13 +219,16 @@ impl CodexHttpClient {
         body: bytes::Bytes,
     ) -> http_client::Result<bytes::Bytes> {
         self.authorize_headers(headers).await?;
-        let patched = ensure_codex_instructions(body)?;
+        let patched = ensure_codex_instructions(body, self.prompt_cache_key.as_deref())?;
         headers.remove(reqwest::header::CONTENT_LENGTH);
         Ok(patched)
     }
 }
 
-fn ensure_codex_instructions(body: bytes::Bytes) -> http_client::Result<bytes::Bytes> {
+fn ensure_codex_instructions(
+    body: bytes::Bytes,
+    prompt_cache_key: Option<&str>,
+) -> http_client::Result<bytes::Bytes> {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return Ok(body);
     };
@@ -213,6 +239,13 @@ fn ensure_codex_instructions(body: bytes::Bytes) -> http_client::Result<bytes::B
         .get("instructions")
         .is_none_or(serde_json::Value::is_null);
     object.insert("store".to_string(), serde_json::Value::Bool(false));
+    if let Some(key) = prompt_cache_key.filter(|key| !key.is_empty()) {
+        object.insert(
+            "prompt_cache_key".to_string(),
+            serde_json::Value::String(key.to_string()),
+        );
+    }
+    ensure_codex_reasoning_include(object);
     object.remove("max_output_tokens");
     if needs_instructions {
         let instructions = take_system_instructions(object.get_mut("input"))
@@ -230,6 +263,29 @@ fn ensure_codex_instructions(body: bytes::Bytes) -> http_client::Result<bytes::B
     serde_json::to_vec(&value)
         .map(bytes::Bytes::from)
         .map_err(|e| http_client::Error::Instance(Box::new(e)))
+}
+
+fn ensure_codex_reasoning_include(object: &mut serde_json::Map<String, serde_json::Value>) {
+    const REASONING_INCLUDE: &str = "reasoning.encrypted_content";
+
+    match object.get_mut("include") {
+        Some(serde_json::Value::Array(items)) => {
+            let already_present = items
+                .iter()
+                .any(|item| item.as_str() == Some(REASONING_INCLUDE));
+            if !already_present {
+                items.push(serde_json::Value::String(REASONING_INCLUDE.to_string()));
+            }
+        }
+        Some(_) | None => {
+            object.insert(
+                "include".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::String(
+                    REASONING_INCLUDE.to_string(),
+                )]),
+            );
+        }
+    }
 }
 
 fn normalize_codex_input_content(input: Option<&mut serde_json::Value>) {
@@ -315,8 +371,8 @@ impl HttpClientExt for CodexHttpClient {
         &self,
         req: http_client::Request<T>,
     ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
-    + Send
-    + 'static
+	+ Send
+	+ 'static
     where
         T: Into<bytes::Bytes> + Send,
         U: From<bytes::Bytes> + Send + 'static,
@@ -335,8 +391,8 @@ impl HttpClientExt for CodexHttpClient {
         &self,
         req: http_client::Request<MultipartForm>,
     ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
-    + Send
-    + 'static
+	+ Send
+	+ 'static
     where
         U: From<bytes::Bytes> + Send + 'static,
     {
@@ -442,7 +498,49 @@ pub fn supports_reasoning_effort(provider: &str, model: &str) -> bool {
 }
 
 pub(crate) fn valid_reasoning_effort(effort: &str) -> bool {
+    matches!(
+        effort,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+pub(crate) fn supports_reasoning_effort_value(provider: &str, model: &str, effort: &str) -> bool {
+    let Some(effort) = canonical_reasoning_effort(effort) else {
+        return false;
+    };
+    if !supports_reasoning_effort(provider, model) {
+        return false;
+    }
+    let provider = provider.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+    if provider == "openai-codex" || provider == "codex" {
+        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh");
+    }
+    if provider == "openai" && model.starts_with("gpt-5") {
+        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh");
+    }
     matches!(effort, "minimal" | "low" | "medium" | "high")
+}
+
+pub(crate) fn normalize_reasoning_effort_value(
+    provider: &str,
+    model: &str,
+    effort: &str,
+) -> Option<&'static str> {
+    let effort = canonical_reasoning_effort(effort)?;
+    supports_reasoning_effort_value(provider, model, effort).then_some(effort)
+}
+
+fn canonical_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort {
+        "off" | "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "max" => Some("xhigh"),
+        _ => None,
+    }
 }
 
 impl AnyClient {
@@ -531,8 +629,8 @@ pub fn is_agent_model(m: &ModelEntry) -> bool {
             "tts",
             "speech",
         ]
-        .iter()
-        .any(|k| t.contains(k))
+            .iter()
+            .any(|k| t.contains(k))
         {
             return false;
         }
@@ -628,15 +726,15 @@ pub async fn list_models_manual(
     }
     let resp: Resp = req.send().await?.error_for_status()?.json().await?;
     Ok(resp
-        .data
-        .into_iter()
-        .map(|i| ModelEntry {
-            display: i.id.clone(),
-            id: i.id,
-            context_length: None,
-            kind: None,
-        })
-        .collect())
+       .data
+       .into_iter()
+       .map(|i| ModelEntry {
+           display: i.id.clone(),
+           id: i.id,
+           context_length: None,
+           kind: None,
+       })
+       .collect())
 }
 
 async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result<String> {
@@ -756,7 +854,7 @@ impl AnyAgent {
         prompt: &str,
         max_turns: usize,
         pure_stdout: bool,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<runner::PrintRunResult> {
         match self {
             AnyAgent::OpenRouter(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             AnyAgent::OpenAI(a) => match a {
@@ -772,7 +870,11 @@ impl AnyAgent {
             AnyAgent::Gemini(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             AnyAgent::Ollama(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             #[cfg(test)]
-            AnyAgent::Test(_) => Ok(prompt.to_string()),
+            AnyAgent::Test(_) => Ok(runner::PrintRunResult {
+                response: prompt.to_string(),
+                reasoning: Vec::new(),
+                usage: crate::event::TokenUsage::default(),
+            }),
         }
     }
 
@@ -989,6 +1091,7 @@ pub fn create_client(
     api_key: Option<&str>,
     custom_providers: &HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&HashMap<String, String>>,
+    codex_prompt_cache_key: Option<&str>,
 ) -> anyhow::Result<AnyClient> {
     let config = resolve_provider_config(provider_name, custom_providers)?;
     let base_url = resolve_base_url(&config);
@@ -997,7 +1100,10 @@ pub fn create_client(
         let custom = custom_providers.get(provider_name);
         let http_client =
             build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
-        return Ok(AnyClient::OpenAI(build_codex_client(http_client)?));
+        return Ok(AnyClient::OpenAI(build_codex_client(
+            http_client,
+            codex_prompt_cache_key,
+        )?));
     }
 
     let resolver = AuthResolver::new(config.kind)
@@ -1027,11 +1133,17 @@ pub fn create_client(
     }
 }
 
-fn build_codex_client(http_client: reqwest::Client) -> anyhow::Result<OpenAiClient> {
+fn build_codex_client(
+    http_client: reqwest::Client,
+    prompt_cache_key: Option<&str>,
+) -> anyhow::Result<OpenAiClient> {
     let client = openai::Client::builder()
         .api_key("dynamic-codex-auth")
         .base_url(OPENAI_CODEX_BASE_URL)
-        .http_client(CodexHttpClient::new(http_client))
+        .http_client(CodexHttpClient::new(
+            http_client,
+            prompt_cache_key.map(ToOwned::to_owned),
+        ))
         .build()?;
     Ok(OpenAiClient::Codex(client))
 }
@@ -1117,7 +1229,7 @@ async fn build_openai_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         OpenAiModel::Completions(m) => OpenAiAgent::Completions(
             builder::build_agent_inner(
@@ -1134,7 +1246,7 @@ async fn build_openai_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         OpenAiModel::Codex(m) => OpenAiAgent::Codex(
             builder::build_agent_inner(
@@ -1151,7 +1263,7 @@ async fn build_openai_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
     }
 }
@@ -1187,7 +1299,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         AnyModel::OpenAI(m) => AnyAgent::OpenAI(
             build_openai_agent(
@@ -1205,7 +1317,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(
             builder::build_agent_inner(
@@ -1222,7 +1334,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         AnyModel::Gemini(m) => AnyAgent::Gemini(
             builder::build_agent_inner(
@@ -1239,7 +1351,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         AnyModel::Ollama(m) => AnyAgent::Ollama(
             builder::build_agent_inner(
@@ -1256,7 +1368,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-            .await,
+		.await,
         ),
         #[cfg(test)]
         AnyModel::Test(c) => AnyAgent::Test(TestAgent {
@@ -1293,6 +1405,7 @@ impl TestAgent {
                         output_tokens: 1,
                         ..Default::default()
                     },
+                    reasoning: Vec::new(),
                 })
                 .await;
         });
@@ -1408,7 +1521,10 @@ pub fn build_btw_agent(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_codex_instructions, openrouter_anthropic_routing};
+    use super::{
+        ensure_codex_instructions, normalize_reasoning_effort_value, openrouter_anthropic_routing,
+        supports_reasoning_effort_value,
+    };
     use bytes::Bytes;
     use serde_json::json;
 
@@ -1423,6 +1539,30 @@ mod tests {
             assert_eq!(extra["provider"]["order"][0], "Anthropic");
             assert_eq!(extra["provider"]["allow_fallbacks"], true);
         }
+    }
+
+    #[test]
+    fn codex_reasoning_efforts_match_supported_api_values() {
+        for effort in ["none", "low", "medium", "high", "xhigh"] {
+            assert!(supports_reasoning_effort_value(
+                "openai-codex",
+                "gpt-5.5",
+                effort
+            ));
+        }
+        assert!(!supports_reasoning_effort_value(
+            "openai-codex",
+            "gpt-5.5",
+            "minimal"
+        ));
+        assert_eq!(
+            normalize_reasoning_effort_value("openai-codex", "gpt-5.5", "off"),
+            Some("none")
+        );
+        assert_eq!(
+            normalize_reasoning_effort_value("openai-codex", "gpt-5.5", "max"),
+            Some("xhigh")
+        );
     }
 
     #[test]
@@ -1484,10 +1624,11 @@ mod tests {
             ]
         });
 
-        let patched = ensure_codex_instructions(Bytes::from(body.to_string())).unwrap();
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string()), None).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
         assert_eq!(value["instructions"], json!("Follow project rules."));
         assert_eq!(value["store"], json!(false));
+        assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
         assert!(value.get("max_output_tokens").is_none());
         let input = value["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
@@ -1495,5 +1636,46 @@ mod tests {
         assert_eq!(input[0]["content"][0]["type"], json!("input_text"));
         assert_eq!(input[1]["role"], json!("assistant"));
         assert_eq!(input[1]["content"][0]["type"], json!("output_text"));
+    }
+
+    #[test]
+    fn codex_request_body_preserves_existing_include_items() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "instructions": "Use tools carefully.",
+            "include": ["web_search_call.action.sources"],
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello" }]
+            }]
+        });
+
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string()), None).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(
+            value["include"],
+            json!([
+                "web_search_call.action.sources",
+                "reasoning.encrypted_content"
+            ])
+        );
+    }
+
+    #[test]
+    fn codex_request_body_sets_prompt_cache_key() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello" }]
+            }]
+        });
+
+        let patched =
+            ensure_codex_instructions(Bytes::from(body.to_string()), Some("session-123")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(value["prompt_cache_key"], json!("session-123"));
     }
 }

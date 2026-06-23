@@ -245,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
         cli.api_key.as_deref(),
         &cfg.custom_providers_map(),
         cfg.api_keys.as_ref(),
+        Some(session.id.as_str()),
     )?;
 
     #[cfg(feature = "subagents")]
@@ -277,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.api_key.as_deref(),
                 &cfg.custom_providers_map(),
                 cfg.api_keys.as_ref(),
+                None,
             ) {
                 Ok(c) => c,
                 Err(e) => {
@@ -353,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.api_key.as_deref(),
                 &cfg.custom_providers_map(),
                 cfg.api_keys.as_ref(),
+                None,
             ) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -524,12 +527,13 @@ async fn main() -> anyhow::Result<()> {
                 content.clone()
             };
 
-            let caps: &[&str] = &[
-                #[cfg(feature = "memory")]
-                "- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)",
-                #[cfg(feature = "subagents")]
-                "- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool",
-            ];
+            #[allow(unused_mut)]
+            let mut caps: Vec<&str> = Vec::new();
+            #[cfg(feature = "memory")]
+            caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
+            #[cfg(feature = "subagents")]
+            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
+
 
             if !caps.is_empty() {
                 prompt_text.push_str("\n\n## Available Capabilities\n\n");
@@ -552,12 +556,13 @@ async fn main() -> anyhow::Result<()> {
                 content.clone()
             };
 
-            let caps: &[&str] = &[
-                #[cfg(feature = "memory")]
-                "- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)",
-                #[cfg(feature = "subagents")]
-                "- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool",
-            ];
+            #[allow(unused_mut)]
+            let mut caps: Vec<&str> = Vec::new();
+            #[cfg(feature = "memory")]
+            caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
+            #[cfg(feature = "subagents")]
+            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
+
 
             if !caps.is_empty() {
                 prompt_text.push_str("\n\n## Available Capabilities\n\n");
@@ -621,16 +626,16 @@ async fn main() -> anyhow::Result<()> {
     let arch_msg: Option<String> = if arch_created {
         Some(
             "I've just created an empty ARCHITECTURE.md template at the project root. \
-            Explore the codebase thoroughly using the `task` tool (delegating parallel exploration to subagents) \
-            and fill ARCHITECTURE.md with a high-level architecture document covering:\n\
-            - Directory layout and module responsibilities\n\
-            - Key types, traits, and their relationships\n\
-            - Control flow (how requests/events flow through the system)\n\
-            - Data flow (how data is transformed from input to output)\n\
-            - Design decisions and rationale\n\
-            - External dependencies and how they are used\n\
-            - Entry points for different execution modes\n\n\
-            Keep the document under ~300 lines of code total. Keep entries concise and reference specific source files."
+             Explore the codebase thoroughly using the `task` tool (delegating parallel exploration to subagents) \
+             and fill ARCHITECTURE.md with a high-level architecture document covering:\n\
+             - Directory layout and module responsibilities\n\
+             - Key types, traits, and their relationships\n\
+             - Control flow (how requests/events flow through the system)\n\
+             - Data flow (how data is transformed from input to output)\n\
+             - Design decisions and rationale\n\
+             - External dependencies and how they are used\n\
+             - Entry points for different execution modes\n\n\
+             Keep the document under ~300 lines of code total. Keep entries concise and reference specific source files."
                 .to_string(),
         )
     } else {
@@ -701,6 +706,7 @@ async fn main() -> anyhow::Result<()> {
                     role: MessageRole::User,
                     content: CompactString::new(&msg),
                     estimated_tokens: Session::estimate_tokens(&msg),
+                    provider_reasoning: Vec::new(),
                 });
                 crate::extras::advisor::set_session_messages(msgs);
             }
@@ -713,10 +719,23 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ss) = status_signals.as_ref() {
                 ss.send_stop();
             }
-            let response = response_result?;
+            let print_result = response_result?;
             if !cli.no_session {
                 session.add_message(MessageRole::User, &msg);
-                session.add_message(MessageRole::Assistant, &response);
+                session.add_message_with_reasoning(
+                    MessageRole::Assistant,
+                    &print_result.response,
+                    print_result.reasoning,
+                );
+                session.total_input_tokens = session
+                    .total_input_tokens
+                    .saturating_add(print_result.usage.input_tokens);
+                session.total_cached_input_tokens = session
+                    .total_cached_input_tokens
+                    .saturating_add(print_result.usage.cached_input_tokens);
+                session.total_output_tokens = session
+                    .total_output_tokens
+                    .saturating_add(print_result.usage.output_tokens);
                 session::storage::save_session(&session)?;
                 let _ =
                     session::chat_history::append_entry(&session::chat_history::ChatHistoryEntry {
@@ -1083,7 +1102,7 @@ async fn run_headless_loop(
                 if let Some(ss) = status_signals.as_ref() {
                     ss.send_stop();
                 }
-                r
+                r.response
             }
             Err(e) => {
                 if let Some(ss) = status_signals.as_ref() {
