@@ -1,4 +1,5 @@
 When compiling zerostack:
+- Use `nix develop` to enter the development environment before running cargo commands
 - Never run `cargo build`
 - Don't use `--release` during development
 - Never run `cargo check` (instead use `cargo test`)
