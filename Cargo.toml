@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'multimodal', 'pdf']
+default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'multimodal', 'pdf', 'rtk']
 status-signals = []
 loop = []
 git-worktree = []
@@ -30,6 +30,7 @@ multithread = ["tokio/rt-multi-thread"]
 multimodal = ["rig/image"]               
 pdf = ["multimodal", "rig/pdf"]   
 advisor = []
+rtk = []
 
 [dependencies]
 rig = { version = "0.39", features = ["rmcp"] }

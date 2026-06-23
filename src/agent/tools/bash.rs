@@ -102,6 +102,30 @@ impl BashTool {
     }
 }
 
+#[cfg(any(feature = "rtk", test))]
+pub(crate) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(feature = "rtk", test))]
+pub(crate) fn rtk_wrap_command(command: &str) -> String {
+    let trimmed = command.trim_start();
+    if trimmed == "rtk" || trimmed.starts_with("rtk ") {
+        command.to_string()
+    } else {
+        format!("rtk bash -lc {}", shell_quote(command))
+    }
+}
+
+#[cfg(any(feature = "rtk", test))]
+pub(crate) fn rtk_command_for_call(command: &str, disable_rtk: bool) -> String {
+    if disable_rtk {
+        command.to_string()
+    } else {
+        rtk_wrap_command(command)
+    }
+}
+
 impl Tool for BashTool {
     const NAME: &'static str = "bash";
 
@@ -110,15 +134,39 @@ impl Tool for BashTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let properties = {
+            #[cfg(feature = "rtk")]
+            {
+                let mut properties = serde_json::json!({
+                    "command": { "type": "string", "description": "Bash command to execute" },
+                    "timeout": { "type": "integer", "description": "Timeout in milliseconds (optional)" }
+                });
+                if let Some(properties) = properties.as_object_mut() {
+                    properties.insert(
+                        "disable_rtk".to_string(),
+                        serde_json::json!({
+                            "type": "boolean",
+                            "description": "Set true to execute this command without RTK wrapping when raw output is needed"
+                        }),
+                    );
+                }
+                properties
+            }
+            #[cfg(not(feature = "rtk"))]
+            {
+                serde_json::json!({
+                    "command": { "type": "string", "description": "Bash command to execute" },
+                    "timeout": { "type": "integer", "description": "Timeout in milliseconds (optional)" }
+                })
+            }
+        };
+
         ToolDefinition {
             name: "bash".to_string(),
             description: "Execute a bash command in the current working directory. Returns stdout and stderr.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "Bash command to execute" },
-                    "timeout": { "type": "integer", "description": "Timeout in milliseconds (optional)" }
-                },
+                "properties": properties,
                 "required": ["command"]
             }),
         }
@@ -132,10 +180,15 @@ impl Tool for BashTool {
             }
         }
 
+        #[cfg(feature = "rtk")]
+        let command = rtk_command_for_call(&args.command, args.disable_rtk.unwrap_or(false));
+        #[cfg(not(feature = "rtk"))]
+        let command = args.command.clone();
+
         let output = if let Some(secs) = args.timeout {
             match timeout(
                 Duration::from_millis(secs),
-                self.sandbox.output_command(&args.command),
+                self.sandbox.output_command(&command),
             )
             .await
             {
@@ -146,7 +199,7 @@ impl Tool for BashTool {
                 }
             }
         } else {
-            self.sandbox.output_command(&args.command).await
+            self.sandbox.output_command(&command).await
         }?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);

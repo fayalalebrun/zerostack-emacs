@@ -199,6 +199,13 @@ Accepted top-level keys:
 | `acp_port`                | integer | TCP bind port for ACP server mode (equivalent to `--acp-port`, default: 7243).                                                                                               |
 | `colors`                  | object  | Background color overrides for the TUI. See the colors section below.                                                                                                       |
 
+RTK bash wrapping is controlled by the `rtk` Cargo feature, not by runtime
+configuration. Builds compiled with `--features rtk` execute every bash tool
+command as `rtk bash -lc <command>` while still checking permissions against the
+original command. Builds without the feature keep the historical bash execution
+path. When compiled with `rtk`, the bash tool exposes a per-call `disable_rtk`
+boolean so the agent can bypass RTK for commands that need raw output.
+
 ## Mid-turn compaction
 
 By default zerostack only compacts the conversation *between* turns, after a

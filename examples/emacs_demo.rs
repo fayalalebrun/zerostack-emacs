@@ -9,6 +9,7 @@ mod unix_demo {
     use std::fs::{self, File};
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
@@ -37,9 +38,17 @@ mod unix_demo {
         "write",
         "edit",
         "bash",
+        "bash",
         "write_todo_list",
     ];
+    const DEMO_RTK_BASH_COMMAND: &str = concat!(
+        "printf 'RTK demo command: disable_rtk is omitted, so an rtk-enabled build wraps this call.\\n'; ",
+        "printf 'rtk sample line %03d\\n' 1; ",
+        "printf 'rtk sample line %03d\\n' 2; ",
+        "pwd",
+    );
     const DEMO_LONG_BASH_COMMAND: &str = concat!(
+        "printf 'Raw demo command: disable_rtk=true bypasses RTK for complete output.\\n'; ",
         "i=0; ",
         "while [ \"$i\" -lt 260 ]; do ",
         "printf 'demo sidecar line %03d: this long bash output is saved outside session context for read-tool inspection\\n' \"$i\"; ",
@@ -62,6 +71,7 @@ mod unix_demo {
         };
         env.create_dirs()?;
         fs::write(env.lisp.join("zerostack.el"), EMACS_LISP)?;
+        install_demo_rtk_shim(&env)?;
         let provider = ProviderServer::start(env.attachments.clone())?;
         let provider_url = provider.base_url();
         write_config(&env.config, &provider_url)?;
@@ -105,6 +115,7 @@ mod unix_demo {
             .env("ZS_DATA_DIR", &env.data)
             .env("ZS_RUNTIME_DIR", &env.runtime)
             .env("ZS_CONFIG_DIR", &env.config)
+            .env("PATH", demo_path(&env))
             .env("ZEROSTACK_DEMO_API_KEY", API_KEY)
             .status()
             .with_context(|| format!("launching {}", Path::new(&emacs).display()))?;
@@ -187,13 +198,14 @@ mod unix_demo {
             .arg("--bin")
             .arg("zerostack")
             .arg("--features")
-            .arg("multimodal")
+            .arg("multimodal,rtk")
             .arg("--")
             .arg("--print-config")
             .current_dir(&manifest_dir)
             .env("ZS_DATA_DIR", &env.data)
             .env("ZS_RUNTIME_DIR", &env.runtime)
             .env("ZS_CONFIG_DIR", &env.config)
+            .env("PATH", demo_path(env))
             .env("ZEROSTACK_DEMO_API_KEY", API_KEY)
             .output()
             .with_context(|| format!("running {}", Path::new(&cargo).display()))?;
@@ -213,6 +225,35 @@ mod unix_demo {
             );
         }
         Ok(binary)
+    }
+
+    fn install_demo_rtk_shim(env: &DemoEnv) -> anyhow::Result<()> {
+        let bin = env.root.join("bin");
+        fs::create_dir_all(&bin)?;
+        let rtk = bin.join("rtk");
+        fs::write(
+            &rtk,
+            concat!(
+                "#!/usr/bin/env bash\n",
+                "printf '[demo rtk wrapper] executing via RTK path:'\n",
+                "for arg in \"$@\"; do printf ' %q' \"$arg\"; done\n",
+                "printf '\\n'\n",
+                "exec \"$@\"\n",
+            ),
+        )?;
+        let mut permissions = fs::metadata(&rtk)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&rtk, permissions)?;
+        Ok(())
+    }
+
+    fn demo_path(env: &DemoEnv) -> OsString {
+        let mut path = env.root.join("bin").into_os_string();
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(existing);
+        }
+        path
     }
 
     fn cargo_target_debug_dir(manifest_dir: &Path) -> PathBuf {
@@ -833,6 +874,7 @@ timeout_secs = 60
             .env("ZS_DATA_DIR", &env.data)
             .env("ZS_RUNTIME_DIR", &env.runtime)
             .env("ZS_CONFIG_DIR", &env.config)
+            .env("PATH", demo_path(env))
             .env("ZEROSTACK_DEMO_API_KEY", API_KEY)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1484,11 +1526,18 @@ timeout_secs = 60
         let used = used_tool_names(request);
         let result_count = request_tool_result_count(request);
         let mut advertised_index = 0usize;
+        let mut preferred_seen = std::collections::HashMap::<&str, usize>::new();
         for preferred in DEMO_TOOL_SEQUENCE {
             if names.iter().any(|name| name == preferred) {
                 let fallback_used = advertised_index < result_count;
                 advertised_index += 1;
-                if !fallback_used && !used.iter().any(|name| name == *preferred) {
+                let seen = preferred_seen.entry(*preferred).or_insert(0);
+                *seen += 1;
+                let used_count = used
+                    .iter()
+                    .filter(|name| name.as_str() == *preferred)
+                    .count();
+                if !fallback_used && used_count < *seen {
                     return Some(*preferred);
                 }
             }
@@ -1521,6 +1570,13 @@ timeout_secs = 60
             }
         }
         names
+    }
+
+    fn used_tool_count(request: &Value, tool: &str) -> usize {
+        used_tool_names(request)
+            .iter()
+            .filter(|name| name.as_str() == tool)
+            .count()
     }
 
     fn tool_names(request: &Value) -> Vec<String> {
@@ -1628,7 +1684,11 @@ timeout_secs = 60
             })
             .to_string(),
             "bash" => {
-                json!({ "command": DEMO_LONG_BASH_COMMAND, "timeout": 1000 }).to_string()
+                if used_tool_count(request, "bash") == 0 {
+                    json!({ "command": DEMO_RTK_BASH_COMMAND, "timeout": 1000 }).to_string()
+                } else {
+                    json!({ "command": DEMO_LONG_BASH_COMMAND, "timeout": 1000, "disable_rtk": true }).to_string()
+                }
             }
             "write_todo_list" => json!({
                 "todos": [
@@ -2088,10 +2148,34 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
         #[test]
         fn demo_bash_tool_generates_sidecar_sized_output() {
             let request = json!({ "messages": [{ "role": "user", "content": "demo" }] });
-            let args: Value = serde_json::from_str(&demo_tool_arguments("bash", &request)).unwrap();
+            let first_args: Value =
+                serde_json::from_str(&demo_tool_arguments("bash", &request)).unwrap();
+            let first_command = first_args["command"].as_str().unwrap();
+
+            assert!(first_command.contains("RTK demo command"));
+            assert!(first_args.get("disable_rtk").is_none());
+
+            let second_request = json!({
+                "messages": [
+                    { "role": "user", "content": "demo" },
+                    {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_bash_1",
+                            "type": "function",
+                            "function": { "name": "bash", "arguments": first_args.to_string() }
+                        }]
+                    },
+                    { "role": "tool", "tool_call_id": "call_bash_1", "content": "ok" }
+                ]
+            });
+            let args: Value =
+                serde_json::from_str(&demo_tool_arguments("bash", &second_request)).unwrap();
             let command = args["command"].as_str().unwrap();
 
+            assert_eq!(args["disable_rtk"], true);
             assert!(command.contains("demo sidecar line"));
+            assert!(command.contains("Raw demo command"));
             assert!(command.contains("-lt 260"));
         }
 

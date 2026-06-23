@@ -532,8 +532,8 @@ normal custom-provider config pointing at that server; starts ordinary
 workers; launches graphical Emacs on `M-x zerostack-board`; connects to one live session;
 and sends an initial delayed prompt that exercises rendered markdown, tool
 artifacts, Rust-rendered inline LaTeX SVGs, permission requests, and interruption.
-The app uses a Nix-built regular `zerostack` binary with the `multimodal` feature
-enabled. The dummy projects also contain project-local skills under
+The app uses a Nix-built regular `zerostack` binary with the `multimodal` and
+`rtk` features enabled. The dummy projects also contain project-local skills under
 `.claude/skills` and `.opencode/skills`, so the workers discover them through the
 same normal skill pipeline as real sessions. The saved data includes one huge
 transcript, one crowded worktree with more than ten sessions for board pagination,
@@ -550,8 +550,9 @@ seeded session so the demo only shows one permission request. Answer it with the
 inline buttons below the input prompt. It walks
 through the built-in tools it is offered (`read`, `list_dir`, `find_files`,
 `grep`, `task` subagent, `write`, `edit`, `bash`, and `write_todo_list`),
-deliberately emits one long bash result that is saved under the session
-tool-output directory, and reads that saved path back through the normal `read`
+executes one bash command through the demo RTK path and a second bash command
+with `disable_rtk: true`, deliberately emits one long raw bash result that is
+saved under the session tool-output directory, and reads that saved path back through the normal `read`
 tool before returning markdown containing tables, task lists, code, links, and
 LaTeX so the native Emacs client can show rendered lines, project-local skill
 discovery, ephemeral thinking/tool artifacts, saved-output readback, and inline

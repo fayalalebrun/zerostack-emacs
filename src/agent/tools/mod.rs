@@ -188,6 +188,8 @@ pub(crate) struct EditOp {
 pub struct BashArgs {
     pub command: String,
     pub timeout: Option<u64>,
+    #[cfg(feature = "rtk")]
+    pub disable_rtk: Option<bool>,
 }
 
 #[derive(Deserialize)]

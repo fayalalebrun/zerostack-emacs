@@ -1,4 +1,6 @@
-use crate::agent::tools::bash::split_bash_commands;
+use crate::agent::tools::bash::{
+    rtk_command_for_call, rtk_wrap_command, shell_quote, split_bash_commands,
+};
 
 #[test]
 fn split_simple_semicolon() {
@@ -112,4 +114,32 @@ fn split_escaped_backslash_before_quote() {
 fn split_newline_not_separator() {
     let cmds = split_bash_commands("ls\npwd");
     assert_eq!(cmds, vec!["ls\npwd"]);
+}
+
+#[test]
+fn shell_quote_wraps_single_quotes() {
+    assert_eq!(shell_quote("echo 'hi'"), "'echo '\\''hi'\\'''");
+}
+
+#[test]
+fn rtk_wrap_preserves_arbitrary_bash_syntax() {
+    assert_eq!(
+        rtk_wrap_command("cargo test && cargo fmt"),
+        "rtk bash -lc 'cargo test && cargo fmt'"
+    );
+}
+
+#[test]
+fn rtk_wrap_does_not_double_wrap_rtk_commands() {
+    assert_eq!(rtk_wrap_command("rtk cargo test"), "rtk cargo test");
+    assert_eq!(rtk_wrap_command("  rtk cargo test"), "  rtk cargo test");
+}
+
+#[test]
+fn rtk_command_for_call_can_disable_wrapping() {
+    assert_eq!(
+        rtk_command_for_call("cargo test", false),
+        "rtk bash -lc 'cargo test'"
+    );
+    assert_eq!(rtk_command_for_call("cargo test", true), "cargo test");
 }

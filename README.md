@@ -106,8 +106,14 @@ cargo install zerostack
 cargo install zerostack --all-features
 
 # With specific features
-cargo install zerostack --features acp,memory,multithread
+cargo install zerostack --features acp,memory,multithread,rtk
 ```
+
+The `rtk` feature wraps all bash tool commands through `rtk bash -lc <command>`
+at build time. There is no user-facing runtime toggle; build without the feature
+to keep the historical bash execution path. When compiled with `rtk`, the bash
+tool exposes a per-call `disable_rtk` boolean so the agent can request raw command
+output for commands where RTK filtering would get in the way.
 
 Once installed, run `/prompt autoconfig` inside zerostack to explore the documentation and configure the tool interactively.
 
@@ -236,7 +242,7 @@ mock native server.
 
 For a live no-API-key demo, run `nix run .#demo` from a checkout. The flake app
 uses a Nix-built demo runner, graphical Emacs, TeX/dvisvgm, and a regular
-`zerostack` binary built with the `multimodal` feature enabled. The example
+`zerostack` binary built with the `multimodal` and `rtk` features enabled. The example
 creates isolated data/runtime/config dirs, dummy Git projects and worktrees,
 saved sessions, a local OpenAI-compatible mock provider, starts ordinary
 `zerostack --emacs` workers, opens graphical Emacs on `zerostack-board`, connects
@@ -248,8 +254,9 @@ sessions to demonstrate `show 5 more`, and non-Git workspaces so the separate
 category is visible. The mock provider
 streams visible reasoning, cycles through the built-in tools it is offered
 (`read`, `list_dir`, `find_files`, `grep`, `task` subagent, `write`, `edit`,
-`bash`, and `write_todo_list`), deliberately produces one long bash result that
-is saved under the session tool-output directory, reads that saved path back
+`bash`, and `write_todo_list`), runs one bash command through the demo RTK path
+and a second bash command with `disable_rtk: true`, deliberately produces one
+long raw bash result that is saved under the session tool-output directory, reads that saved path back
 through the normal `read` tool, then returns rendered Markdown and Rust-rendered inline LaTeX
 SVGs. The auto-opened live worker runs in restrictive permission mode, so the
 first tool call requests permission; the remaining built-in demo tools are
