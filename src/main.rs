@@ -707,6 +707,7 @@ async fn main() -> anyhow::Result<()> {
                     content: CompactString::new(&msg),
                     estimated_tokens: Session::estimate_tokens(&msg),
                     provider_reasoning: Vec::new(),
+                    provider_usage: None,
                 });
                 crate::extras::advisor::set_session_messages(msgs);
             }
@@ -722,10 +723,11 @@ async fn main() -> anyhow::Result<()> {
             let print_result = response_result?;
             if !cli.no_session {
                 session.add_message(MessageRole::User, &msg);
-                session.add_message_with_reasoning(
+                session.add_message_with_reasoning_and_usage(
                     MessageRole::Assistant,
                     &print_result.response,
                     print_result.reasoning,
+                    Some(print_result.usage.into()),
                 );
                 session.total_input_tokens = session
                     .total_input_tokens

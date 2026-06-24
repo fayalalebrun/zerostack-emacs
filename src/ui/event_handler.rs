@@ -397,7 +397,12 @@ async fn handle_agent_done(
 
     renderer.write_line("", Color::White)?;
     renderer.write_line("", Color::White)?;
-    session.add_message_with_reasoning(MessageRole::Assistant, &response, reasoning);
+    session.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        &response,
+        reasoning,
+        Some(usage.into()),
+    );
     let billable_input_tokens = usage.billable_input_tokens();
     let billable_output_tokens = usage.billable_output_tokens();
     session.total_input_tokens = session
@@ -416,11 +421,9 @@ async fn handle_agent_done(
         session.input_token_cost,
         session.output_token_cost,
     );
-    // Anchor context-size accounting to the provider's real usage. Context
-    // measurement needs the full prompt size, so use the cache-inclusive count
-    // (Anthropic reports input_tokens excluding cached/cache-creation tokens,
-    // which would otherwise collapse the context meter to ~0 on cache hits).
-    // Must come after add_message so the anchor includes the just-appended response.
+    // Kept for old saved-session compatibility; current context pressure is
+    // derived from the latest assistant message's provider_usage.
+
     session.set_calibration(usage.input_tokens, usage.output_tokens);
     *agent_line_started = false;
     response_buf.clear();

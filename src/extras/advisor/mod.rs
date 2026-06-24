@@ -353,6 +353,7 @@ mod tests {
             content: content.into(),
             estimated_tokens: 0,
             provider_reasoning: Vec::new(),
+            provider_usage: None,
         }
     }
 

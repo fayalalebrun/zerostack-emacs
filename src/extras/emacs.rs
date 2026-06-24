@@ -2345,10 +2345,11 @@ mod imp {
                         .await;
                     let (tokens, context_window, billable_input_tokens, billable_output_tokens) = {
                         let mut session = server.session.lock().await;
-                        session.add_message_with_reasoning(
+                        session.add_message_with_reasoning_and_usage(
                             MessageRole::Assistant,
                             &response,
                             reasoning,
+                            Some(usage.into()),
                         );
                         let billable_input_tokens = usage.billable_input_tokens();
                         let billable_output_tokens = usage.billable_output_tokens();

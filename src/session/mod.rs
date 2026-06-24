@@ -31,6 +31,38 @@ pub struct SessionMessage {
     pub estimated_tokens: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_reasoning: Vec<ProviderReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage: Option<SessionTokenUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+}
+
+impl SessionTokenUsage {
+    pub fn context_tokens(self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
+impl From<crate::event::TokenUsage> for SessionTokenUsage {
+    fn from(usage: crate::event::TokenUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,12 +403,23 @@ impl Session {
         content: &str,
         provider_reasoning: Vec<ProviderReasoning>,
     ) {
+        self.add_message_with_reasoning_and_usage(role, content, provider_reasoning, None);
+    }
+
+    pub fn add_message_with_reasoning_and_usage(
+        &mut self,
+        role: MessageRole,
+        content: &str,
+        provider_reasoning: Vec<ProviderReasoning>,
+        provider_usage: Option<SessionTokenUsage>,
+    ) {
         let tokens = Self::estimate_tokens(content);
         self.messages.push(SessionMessage {
             role,
             content: CompactString::new(content),
             estimated_tokens: tokens,
             provider_reasoning,
+            provider_usage,
         });
         self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
         self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
@@ -615,16 +658,6 @@ impl Session {
         self.calibrated_msg_count = 0;
     }
 
-    /// Truncate the conversation to `new_len` messages while keeping the context
-    /// figure accurate (used by `/undo` and the failed-send rollback).
-    ///
-    /// If any removed message was part of the calibration anchor, subtract its
-    /// estimated tokens from the anchor rather than discarding the whole
-    /// calibration. Resetting to a cold estimate would undercount (the estimate
-    /// omits tool schemas), and leaving the anchor untouched would overcount by
-    /// the removed turn — subtracting keeps the figure ≈ the real remaining
-    /// size. Messages beyond the anchor were never in it, so removing them only
-    /// shrinks the estimated tail.
     pub fn truncate_to(&mut self, new_len: usize) {
         if new_len >= self.messages.len() {
             return;
@@ -639,18 +672,30 @@ impl Session {
             self.calibrated_msg_count = new_len;
         }
         self.messages.truncate(new_len);
-        self.total_estimated_tokens = self.messages.iter().map(|m| m.estimated_tokens).sum();
+        self.total_estimated_tokens = self.estimated_message_tokens();
     }
 
-    /// True while the context figure is still an estimate — no provider usage
-    /// has been reported yet (or it was reset by `/clear`). The status bar marks
-    /// the estimated value so the snap to the real number on the first response
-    /// reads as a refinement rather than a surprise.
     pub fn ctx_is_estimated(&self) -> bool {
-        self.calibrated_tokens == 0
+        self.latest_provider_context_tokens().is_none() && self.calibrated_tokens == 0
+    }
+
+    fn estimated_message_tokens(&self) -> u64 {
+        self.messages.iter().map(|m| m.estimated_tokens).sum()
+    }
+
+    pub fn latest_provider_context_tokens(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .rev()
+            .filter(|msg| msg.role == MessageRole::Assistant)
+            .filter_map(|msg| msg.provider_usage.map(SessionTokenUsage::context_tokens))
+            .find(|tokens| *tokens > 0)
     }
 
     pub fn effective_context_tokens(&self) -> u64 {
+        if let Some(tokens) = self.latest_provider_context_tokens() {
+            return tokens;
+        }
         if self.calibrated_tokens == 0 {
             // No real usage yet: per-message estimates cover only `messages`, so
             // add the fixed overhead (system prompt, tools, context files) that
@@ -659,6 +704,7 @@ impl Session {
             return self
                 .overhead_tokens
                 .saturating_add(self.total_estimated_tokens);
+
         }
         let start = self.calibrated_msg_count.min(self.messages.len());
         let delta: u64 = self.messages[start..]
@@ -668,23 +714,6 @@ impl Session {
         self.calibrated_tokens.saturating_add(delta)
     }
 
-    /// Pick the compaction boundary: `messages[..cut]` get summarized and
-    /// `messages[cut..]` are kept as recent context. Walks backward summing
-    /// per-message `estimated_tokens` until `keep_recent` is covered.
-    ///
-    /// This deliberately stays in the per-message estimate scale rather than
-    /// the calibrated total: it is a *relative* comparison among messages (how
-    /// far back does `keep_recent` reach), so any uniform estimator bias
-    /// cancels out. Calibration only matters for the absolute total in
-    /// `effective_context_tokens`.
-    ///
-    /// Returns 0 ("nothing old enough to summarize") when every message fits
-    /// within `keep_recent`. The initial value is 0, not `messages.len()`, so
-    /// an oversized `keep_recent` keeps the recent messages instead of
-    /// summarizing the entire history, a case made reachable now that the
-    /// compaction gate measures context against real usage (system prompt and
-    /// context files can push the real total over budget while the messages
-    /// themselves stay small).
     pub fn select_compaction_cut(messages: &[SessionMessage], keep_recent: u64) -> usize {
         let mut accumulated = 0u64;
         let mut cut_idx = 0;
@@ -734,11 +763,16 @@ impl Session {
             content: CompactString::from(summary.clone()),
             estimated_tokens: summary_tokens,
             provider_reasoning: Vec::new(),
+            provider_usage: None,
         };
 
         // Remove summarized messages and insert summary
         self.messages.drain(..first_kept_index);
         self.messages.insert(0, summary_msg);
+        for msg in &mut self.messages {
+            msg.provider_usage = None;
+        }
+        self.total_estimated_tokens = self.estimated_message_tokens();
 
         // Recompute total from remaining messages so the count is always
         // consistent — no underflow risk when token_savings is stale.
