@@ -18,6 +18,7 @@ mod imp {
     use tokio::time::{Duration, timeout};
 
     use crate::agent::runner::convert_history;
+    use crate::agent::tools::bash::{BashLiveOutputRequest, set_bash_live_output_sender};
     use crate::cli::Cli;
     use crate::config::{self, Config};
     use crate::context::ContextFiles;
@@ -329,6 +330,9 @@ mod imp {
         if let Some(ask_rx) = ask_rx {
             tokio::spawn(permission_pump(server.clone(), ask_rx));
         }
+        let (live_output_tx, live_output_rx) = mpsc::channel::<BashLiveOutputRequest>(16);
+        set_bash_live_output_sender(Some(live_output_tx));
+        tokio::spawn(live_output_pump(server.clone(), live_output_rx));
 
         eprintln!(
             "zerostack Emacs session {}",
@@ -489,7 +493,7 @@ mod imp {
                     lines_to_sexp(&lines),
                 ),
             )
-		.await;
+            .await;
         }
 
         async fn append_lines(&self, event_type: &str, turn: u64, lines: Vec<WireLine>) {
@@ -548,7 +552,7 @@ mod imp {
                 contents,
                 "text/plain; charset=utf-8",
             )
-		.await
+            .await
         }
 
         async fn write_artifact_file_with_mime(
@@ -703,7 +707,7 @@ mod imp {
                 sexp_quote(server.socket_path.to_string_lossy().as_ref()),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -732,7 +736,7 @@ mod imp {
             sexp_quote(&server.current_session_id().await),
             lines_to_sexp(&lines),
         ))
-            .await?;
+        .await?;
         Ok(())
     }
 
@@ -810,7 +814,7 @@ mod imp {
                 )),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -831,7 +835,7 @@ mod imp {
                 sexp_quote(&attachment_list_message(&items)),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -887,7 +891,7 @@ mod imp {
                 sexp_quote(&message),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -921,7 +925,7 @@ mod imp {
                     sexp_quote(&format!("reasoning effort: {effort}")),
                 ),
             )
-		.await;
+            .await;
             return Ok(());
         }
         let enabled = match level.as_str() {
@@ -944,7 +948,7 @@ mod imp {
                 sexp_quote(&format!("thinking: {label}")),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -960,7 +964,7 @@ mod imp {
                 request_arg(cmd),
                 format!(" :message {}", sexp_quote("MCP support not enabled")),
             )
-		.await;
+            .await;
             return Ok(());
         }
 
@@ -972,7 +976,7 @@ mod imp {
                     request_arg(cmd),
                     format!(" :message {}", sexp_quote("no MCP servers configured")),
                 )
-                    .await;
+                .await;
                 return Ok(());
             };
             if configs.is_empty() {
@@ -981,7 +985,7 @@ mod imp {
                     request_arg(cmd),
                     format!(" :message {}", sexp_quote("no MCP servers configured")),
                 )
-                    .await;
+                .await;
                 return Ok(());
             }
 
@@ -998,7 +1002,7 @@ mod imp {
                     request_arg(cmd),
                     format!(" :message {}", sexp_quote("no MCP servers connected")),
                 )
-                    .await;
+                .await;
                 return Ok(());
             }
 
@@ -1026,7 +1030,7 @@ mod imp {
                 request_arg(cmd),
                 format!(" :message {}", sexp_quote(&lines.join("\n"))),
             )
-		.await;
+            .await;
             Ok(())
         }
     }
@@ -1063,7 +1067,7 @@ mod imp {
                 sexp_quote(&message),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -1517,7 +1521,7 @@ mod imp {
             request_arg(cmd),
             format!(" :stopped {}", bool_atom(stopped)),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -1601,7 +1605,7 @@ mod imp {
                 )),
             ),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -1763,7 +1767,7 @@ mod imp {
             request_arg(cmd),
             format!(" :aborted {}", bool_atom(aborted)),
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -1865,7 +1869,7 @@ mod imp {
             request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
             rendered,
         ))
-            .await?;
+        .await?;
         Ok(())
     }
 
@@ -1888,7 +1892,7 @@ mod imp {
             request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
             meta_to_sexp(&meta),
         ))
-            .await?;
+        .await?;
         Ok(())
     }
 
@@ -2076,7 +2080,7 @@ mod imp {
                 #[cfg(feature = "mcp")]
                 mcp_guard.as_ref(),
             )
-		.await
+            .await
         };
         drop(context);
         let mut runner = agent.spawn_runner(text, history);
@@ -2567,6 +2571,36 @@ mod imp {
         }
     }
 
+    async fn live_output_pump(server: Arc<Server>, mut rx: mpsc::Receiver<BashLiveOutputRequest>) {
+        while let Some(req) = rx.recv().await {
+            let turn = server.mutable.lock().await.turn;
+            let artifact = match server
+                .create_artifact(turn, "live-tool-output", "bash-live-output", "")
+                .await
+            {
+                Ok(artifact) => artifact,
+                Err(e) => {
+                    tracing::warn!("failed to create live bash output artifact: {e}");
+                    let _ = req.reply.send(None);
+                    continue;
+                }
+            };
+            let path = artifact.path.clone();
+            server
+                .append_lines(
+                    "tool-render",
+                    turn,
+                    vec![WireLine::with_artifact(
+                        format!("  live output: {}", sanitize_output(&req.command)),
+                        "zs-link",
+                        artifact,
+                    )],
+                )
+                .await;
+            let _ = req.reply.send(Some(path));
+        }
+    }
+
     fn render_session_lines(
         session: &Session,
         cli: &Cli,
@@ -2641,7 +2675,7 @@ mod imp {
                                 format!("◈ result {}", sanitize_output(line)),
                                 "zs-muted",
                             )
-				.with_source(message_index, msg.role),
+                            .with_source(message_index, msg.role),
                         );
                     }
                     out.push(blank_line().with_source(message_index, msg.role));
@@ -3256,9 +3290,9 @@ mod imp {
                 .args(["-interaction=nonstopmode", "-halt-on-error", tex_filename])
                 .output(),
         )
-            .await
-            .context("LaTeX timed out")?
-            .context("run latex")?;
+        .await
+        .context("LaTeX timed out")?
+        .context("run latex")?;
         if !output.status.success() {
             anyhow::bail!(
                 "latex exited with {}: {}",
@@ -3289,9 +3323,9 @@ mod imp {
                 ])
                 .output(),
         )
-            .await
-            .context("dvisvgm timed out")?
-            .context("run dvisvgm")?;
+        .await
+        .context("dvisvgm timed out")?
+        .context("run dvisvgm")?;
         if !output.status.success() {
             anyhow::bail!(
                 "dvisvgm exited with {}: {}",
@@ -3586,7 +3620,7 @@ mod imp {
                         &meta.provider,
                         &meta.model,
                     )
-			.map(|s| s.to_string())
+                    .map(|s| s.to_string())
                 })
         } else {
             None
@@ -4087,7 +4121,7 @@ mod imp {
             let cmd = parse_command(
                 "(compact :request 12 :instructions \"preserve test failure details\")",
             )
-		.unwrap();
+            .unwrap();
             assert_eq!(cmd.name, "compact");
             assert_eq!(request_arg(&cmd).as_deref(), Some("12"));
             assert_eq!(
@@ -4563,8 +4597,8 @@ mod imp {
                     }
                 }
             })
-		.await
-		.unwrap()
+            .await
+            .unwrap()
         }
 
         async fn wait_for_prompt(prompts: &Arc<std::sync::Mutex<Vec<String>>>, prompt: &str) {

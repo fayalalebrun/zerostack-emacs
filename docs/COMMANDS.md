@@ -260,8 +260,9 @@ Assistant markdown is rendered by zerostack and streamed as events like
 `(event :type assistant-render :replace-from N :lines ((:text "< hi" :face zs-normal)))`.
 Emacs should delete from `:replace-from` and insert the provided line batch.
 
-Reasoning chunks and tool outputs are written to files inside the live session
-runtime directory instead of being sent inline. Events include an artifact plist:
+Reasoning chunks and final tool outputs are written to files inside the live
+session runtime directory instead of being sent inline. Events include an
+artifact plist:
 
 ```lisp
 (event :type tool-result
@@ -279,10 +280,32 @@ runtime directory instead of being sent inline. Events include an artifact plist
 ```
 
 Rendered lines may also carry `:artifact`, for example
-`(:text "  output: bash (17.9 KB)" :face zs-link :artifact (...))`. Artifacts
-are not persisted in session JSON and disappear on normal process exit when the
-session runtime directory is removed. Crash cleanup is best-effort via runtime
-directory lifetime and stale session sweeping.
+`(:text "  output: bash (17.9 KB)" :face zs-link :artifact (...))`. Bash tool
+calls in native Emacs sessions also create a live output artifact before the
+command starts and write combined stdout/stderr to that file while the command is
+running:
+
+```lisp
+(event :type tool-render
+       :turn 3
+       :replace-from 12
+       :lines ((:text "  live output: cargo test"
+                :face zs-link
+                :artifact (:kind live-tool-output
+                           :path "/run/user/1000/zerostack/sessions/<id>/artifacts/turn-3/0002-bash-live-output.txt"
+                           :mime "text/plain; charset=utf-8"
+                           :bytes 0
+                           :preview ""
+                           :ephemeral t
+                           :expires process-exit))))
+```
+
+The final `tool-result` still reports the exact text given back to the agent.
+The Emacs client opens `live-tool-output` artifacts with tail auto-revert when
+available so the file updates live without streaming output chunks over the
+protocol. Artifacts are not persisted in session JSON and disappear on normal
+process exit when the session runtime directory is removed. Crash cleanup is
+best-effort via runtime directory lifetime and stale session sweeping.
 
 Assistant renders may include LaTeX metadata for inline SVG display. Zerostack
 writes ephemeral `.tex` source artifacts, renders them to ephemeral SVG artifacts
@@ -551,8 +574,8 @@ inline buttons below the input prompt. It walks
 through the built-in tools it is offered (`read`, `list_dir`, `find_files`,
 `grep`, `task` subagent, `write`, `edit`, `bash`, and `write_todo_list`),
 executes one bash command through the demo RTK path and a second bash command
-with `disable_rtk: true`, deliberately emits one long raw bash result that is
-saved under the session tool-output directory, and reads that saved path back through the normal `read`
+with `disable_rtk: true`, deliberately emits one slow 30-second raw bash result so
+the live output artifact visibly tails in Emacs, and reads that saved path back through the normal `read`
 tool before returning markdown containing tables, task lists, code, links, and
 LaTeX so the native Emacs client can show rendered lines, project-local skill
 discovery, ephemeral thinking/tool artifacts, saved-output readback, and inline

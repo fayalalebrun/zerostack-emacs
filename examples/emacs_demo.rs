@@ -48,11 +48,12 @@ mod unix_demo {
         "pwd",
     );
     const DEMO_LONG_BASH_COMMAND: &str = concat!(
-        "printf 'Raw demo command: disable_rtk=true bypasses RTK for complete output.\\n'; ",
+        "printf 'Raw live-output demo: disable_rtk=true bypasses RTK and writes a tailing artifact.\\n'; ",
         "i=0; ",
         "while [ \"$i\" -lt 260 ]; do ",
-        "printf 'demo sidecar line %03d: this long bash output is saved outside session context for read-tool inspection\\n' \"$i\"; ",
+        "printf 'demo live output line %03d: this long bash output is saved outside session context for read-tool inspection\\n' \"$i\"; ",
         "i=$((i + 1)); ",
+        "sleep 0.12; ",
         "done; pwd",
     );
 
@@ -1687,7 +1688,7 @@ timeout_secs = 60
                 if used_tool_count(request, "bash") == 0 {
                     json!({ "command": DEMO_RTK_BASH_COMMAND, "timeout": 1000 }).to_string()
                 } else {
-                    json!({ "command": DEMO_LONG_BASH_COMMAND, "timeout": 1000, "disable_rtk": true }).to_string()
+                    json!({ "command": DEMO_LONG_BASH_COMMAND, "timeout": 45000, "disable_rtk": true }).to_string()
                 }
             }
             "write_todo_list" => json!({
@@ -2174,9 +2175,11 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             let command = args["command"].as_str().unwrap();
 
             assert_eq!(args["disable_rtk"], true);
-            assert!(command.contains("demo sidecar line"));
-            assert!(command.contains("Raw demo command"));
+            assert_eq!(args["timeout"], 45000);
+            assert!(command.contains("demo live output line"));
+            assert!(command.contains("Raw live-output demo"));
             assert!(command.contains("-lt 260"));
+            assert!(command.contains("sleep 0.12"));
         }
 
         #[test]

@@ -256,8 +256,8 @@ streams visible reasoning, cycles through the built-in tools it is offered
 (`read`, `list_dir`, `find_files`, `grep`, `task` subagent, `write`, `edit`,
 `bash`, and `write_todo_list`), runs one bash command through the demo RTK path
 and a second bash command with `disable_rtk: true`, deliberately produces one
-long raw bash result that is saved under the session tool-output directory, reads that saved path back
-through the normal `read` tool, then returns rendered Markdown and Rust-rendered inline LaTeX
+slow 30-second raw bash result so the live output artifact visibly tails in Emacs,
+reads that saved path back through the normal `read` tool, then returns rendered Markdown and Rust-rendered inline LaTeX
 SVGs. The auto-opened live worker runs in restrictive permission mode, so the
 first tool call requests permission; the remaining built-in demo tools are
 pre-allowed in that isolated seeded session so the demo only shows one permission

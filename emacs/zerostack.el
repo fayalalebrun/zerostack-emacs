@@ -816,11 +816,11 @@ The root is resolved with Projectile when available, then `project.el', then
     (add-text-properties
      start (point)
      `(,@(when face `(face ,face))
-            mouse-face highlight
-            help-echo "RET opens this zerostack board item"
-            keymap ,zerostack-board-mode-map
-            follow-link t
-            zerostack-board-item ,item))
+       mouse-face highlight
+       help-echo "RET opens this zerostack board item"
+       keymap ,zerostack-board-mode-map
+       follow-link t
+       zerostack-board-item ,item))
     (insert "  ")
     (apply #'zerostack-board--insert-load-more-inline load-more)
     (insert "\n")))
@@ -963,11 +963,11 @@ The root is resolved with Projectile when available, then `project.el', then
     (add-text-properties
      start (point)
      `(,@(when face `(face ,face))
-	    mouse-face highlight
-	    help-echo "RET opens this zerostack board item"
-	    keymap ,zerostack-board-mode-map
-	    follow-link t
-	    zerostack-board-item ,item))
+       mouse-face highlight
+       help-echo "RET opens this zerostack board item"
+       keymap ,zerostack-board-mode-map
+       follow-link t
+       zerostack-board-item ,item))
     (insert "\n")))
 
 (defun zerostack-board--alive-marker (alive)
@@ -1371,7 +1371,7 @@ Return non-nil when DIRECTORY was newly added."
     (setq zerostack--server-process process)
     (setq zerostack--startup-timer
           (run-at-time 0.05 0.05 #'zerostack--poll-server-startup
-                        client-buffer stderr-buffer))))
+                       client-buffer stderr-buffer))))
 
 (defun zerostack--poll-server-startup (client-buffer stderr-buffer)
   "Poll STDERR-BUFFER until CLIENT-BUFFER can connect to the printed socket."
@@ -1531,23 +1531,23 @@ Return non-nil when DIRECTORY was newly added."
   (interactive "nColumns: ")
   (setq zerostack--cols (max 20 cols))
   (zerostack--send-command 'set-view
-                            :request (zerostack--next-request)
-                            :cols zerostack--cols))
+                           :request (zerostack--next-request)
+                           :cols zerostack--cols))
 
 (defun zerostack-provider-menu (provider)
   "Switch the current zerostack session to PROVIDER."
   (interactive (list (zerostack--read-provider "Session provider: " zerostack--provider)))
   (zerostack--send-command 'provider
-                            :request (zerostack--next-request)
-                            :provider provider))
+                           :request (zerostack--next-request)
+                           :provider provider))
 
 (defun zerostack-model-menu (model)
   "Switch the current zerostack session to MODEL."
   (interactive
    (list (zerostack--read-model zerostack--provider zerostack--model)))
   (zerostack--send-command 'model
-                            :request (zerostack--next-request)
-                            :model model))
+                           :request (zerostack--next-request)
+                           :model model))
 
 (defun zerostack-mcp ()
   "List configured MCP servers and tools."
@@ -1600,12 +1600,12 @@ Return non-nil when DIRECTORY was newly added."
   "Fork the current session before message INDEX, defaulting to point/region."
   (interactive)
   (let* ((index (or index
-                   (and (use-region-p)
-                        (save-excursion
-                          (goto-char (region-beginning))
-                          (zerostack--message-index-at-point)))
-                   (zerostack--message-index-at-point)
-                   (read-number "Fork before message index: ")))
+                    (and (use-region-p)
+                         (save-excursion
+                           (goto-char (region-beginning))
+                           (zerostack--message-index-at-point)))
+                    (zerostack--message-index-at-point)
+                    (read-number "Fork before message index: ")))
          (request (zerostack--next-request)))
     (zerostack--set-status (format "forking before message %s" index))
     (zerostack--send-command 'fork :request request :index index)))
@@ -2033,7 +2033,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
                            (when (zerostack--reasoning-effort-supported-p)
                              '("reasoning"))
                            '("provider" "model" "mcp" "view" "artifact")))
-          (choice (completing-read "Zerostack command: " commands nil t)))
+         (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
       ("attach" (zerostack-attachment-menu))
@@ -2282,8 +2282,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
          (internal (and zerostack--metadata-status-request
                         (equal request zerostack--metadata-status-request))))
     (zerostack--set-session-metadata (plist-get session :title)
-                                      (plist-get session :cwd)
-                                      (plist-get session :cwd))
+                                     (plist-get session :cwd)
+                                     (plist-get session :cwd))
     (zerostack--update-provider-model session)
     (when internal
       (setq zerostack--metadata-status-request nil))
@@ -2718,14 +2718,14 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
                                  (overlay-get overlay 'zerostack-artifact))
                                (overlays-at (point))))))
     (if artifact
-        (find-file (plist-get artifact :path))
+        (zerostack--open-artifact artifact)
       (zerostack--append-local-line "no artifact at point" 'zs-error))))
 
 (defun zerostack-open-last-artifact ()
   "Open the most recently advertised artifact."
   (interactive)
   (if-let ((artifact (car (last zerostack--artifacts))))
-      (find-file (plist-get artifact :path))
+      (zerostack--open-artifact artifact)
     (zerostack--append-local-line "no artifacts yet" 'zs-error)))
 
 (defun zerostack-open-last-latex-artifact ()
@@ -2737,8 +2737,18 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
             (eq (plist-get artifact :kind) 'latex-source))
           zerostack--artifacts)))
     (if-let ((artifact (car (last latex-artifacts))))
-        (find-file (plist-get artifact :path))
+        (zerostack--open-artifact artifact)
       (zerostack--append-local-line "no LaTeX artifacts yet" 'zs-error))))
+
+(defun zerostack--open-artifact (artifact)
+  "Open ARTIFACT, enabling live reload for live tool-output artifacts."
+  (find-file (plist-get artifact :path))
+  (when (eq (plist-get artifact :kind) 'live-tool-output)
+    (cond
+     ((fboundp 'auto-revert-tail-mode)
+      (auto-revert-tail-mode 1))
+     ((fboundp 'auto-revert-mode)
+      (auto-revert-mode 1)))))
 
 (defun zerostack--append-local-line (text face)
   "Record local TEXT as single-line prompt status.
@@ -2798,12 +2808,12 @@ inserted into the transcript."
   "Return prompt metadata prefix."
   (string-join
    (delq nil
-          (list zerostack--notice
-                zerostack--status
-                 (and zerostack--reasoning-effort-supported zerostack--reasoning-effort
-                      (format "reasoning:%s" zerostack--reasoning-effort))
-                (and zerostack--thinking-level
-                     (format "thinking:%s" zerostack--thinking-level))
+         (list zerostack--notice
+               zerostack--status
+               (and zerostack--reasoning-effort-supported zerostack--reasoning-effort
+                    (format "reasoning:%s" zerostack--reasoning-effort))
+               (and zerostack--thinking-level
+                    (format "thinking:%s" zerostack--thinking-level))
                zerostack--model
                (zerostack--format-token-usage zerostack--tokens zerostack--context-window)))
    " | "))
@@ -2816,7 +2826,7 @@ inserted into the transcript."
   (when (and (markerp zerostack--prompt-start-marker)
              (markerp zerostack--input-marker)
              (marker-position zerostack--prompt-start-marker)
-              (marker-position zerostack--input-marker))
+             (marker-position zerostack--input-marker))
     (zerostack--refresh-prompt)))
 
 (defun zerostack--set-notice (text)

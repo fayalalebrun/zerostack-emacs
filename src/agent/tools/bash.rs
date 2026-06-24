@@ -1,10 +1,37 @@
+use std::path::PathBuf;
+use std::process::Output;
+use std::sync::Mutex;
+
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
 use crate::agent::tools::{AskSender, BashArgs, PermCheck, ToolError, check_perm};
 use crate::extras::truncate::head_lines;
 use crate::sandbox::Sandbox;
+
+pub(crate) struct BashLiveOutputRequest {
+    pub command: String,
+    pub reply: oneshot::Sender<Option<PathBuf>>,
+}
+
+pub(crate) type BashLiveOutputSender = mpsc::Sender<BashLiveOutputRequest>;
+
+static BASH_LIVE_OUTPUT_TX: Mutex<Option<BashLiveOutputSender>> = Mutex::new(None);
+
+pub(crate) fn set_bash_live_output_sender(sender: Option<BashLiveOutputSender>) {
+    *BASH_LIVE_OUTPUT_TX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = sender;
+}
+
+fn bash_live_output_sender() -> Option<BashLiveOutputSender> {
+    BASH_LIVE_OUTPUT_TX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
 
 pub(crate) fn split_bash_commands(input: &str) -> Vec<String> {
     let mut result = Vec::new();
@@ -100,6 +127,29 @@ impl BashTool {
             max_output_lines,
         }
     }
+
+    async fn run_buffered_command(
+        &self,
+        command: &str,
+        timeout_millis: Option<u64>,
+    ) -> Result<Output, ToolError> {
+        if let Some(secs) = timeout_millis {
+            match timeout(
+                Duration::from_millis(secs),
+                self.sandbox.output_command(command),
+            )
+            .await
+            {
+                Ok(output) => Ok(output?),
+                Err(_) => {
+                    self.sandbox.kill_active();
+                    Err(ToolError::Msg("Command timed out".to_string()))
+                }
+            }
+        } else {
+            Ok(self.sandbox.output_command(command).await?)
+        }
+    }
 }
 
 #[cfg(any(feature = "rtk", test))]
@@ -185,26 +235,53 @@ impl Tool for BashTool {
         #[cfg(not(feature = "rtk"))]
         let command = args.command.clone();
 
-        let output = if let Some(secs) = args.timeout {
-            match timeout(
-                Duration::from_millis(secs),
-                self.sandbox.output_command(&command),
-            )
-            .await
-            {
-                Ok(output) => output,
-                Err(_) => {
-                    self.sandbox.kill_active();
-                    return Err(ToolError::Msg("Command timed out".to_string()));
-                }
+        let (stdout, stderr, exit_code) = if let Some(sender) = bash_live_output_sender() {
+            let (reply, response) = oneshot::channel();
+            let _ = sender
+                .send(BashLiveOutputRequest {
+                    command: args.command.clone(),
+                    reply,
+                })
+                .await;
+            if let Ok(Some(path)) = response.await {
+                let status = if let Some(secs) = args.timeout {
+                    match timeout(
+                        Duration::from_millis(secs),
+                        self.sandbox.output_command_to_file(&command, &path),
+                    )
+                    .await
+                    {
+                        Ok(status) => status,
+                        Err(_) => {
+                            self.sandbox.kill_active();
+                            return Err(ToolError::Msg("Command timed out".to_string()));
+                        }
+                    }
+                } else {
+                    self.sandbox.output_command_to_file(&command, &path).await
+                }?;
+                let output = tokio::fs::read(&path).await?;
+                (
+                    String::from_utf8_lossy(&output).to_string(),
+                    String::new(),
+                    status.code().unwrap_or(-1),
+                )
+            } else {
+                let output = self.run_buffered_command(&command, args.timeout).await?;
+                (
+                    String::from_utf8_lossy(&output.stdout).to_string(),
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                    output.status.code().unwrap_or(-1),
+                )
             }
         } else {
-            self.sandbox.output_command(&command).await
-        }?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
+            let output = self.run_buffered_command(&command, args.timeout).await?;
+            (
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+                output.status.code().unwrap_or(-1),
+            )
+        };
 
         let mut result = String::new();
         if !stdout.is_empty() {
