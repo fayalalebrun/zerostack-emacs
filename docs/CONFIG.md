@@ -12,10 +12,19 @@ at any priority, a default `config.toml` is created in the lowest-priority
 directory (`~/.local/share/zerostack/`). On macOS the XDG config path above
 resolves to `~/Library/Application Support/zerostack/`.
 
-Prompts and themes are loaded from the same data directory:
+Prompts and themes are loaded from multiple sources, with later sources
+overriding earlier ones for same-named files:
 
-- Prompts: `~/.local/share/zerostack/prompts/`
-- Themes: `~/.local/share/zerostack/themes/`
+**Prompts** (priority low to high):
+1. Embedded at compile time
+2. `~/.local/share/zerostack/prompts/` (global, user-level)
+3. `prompts/` (project-local, relative to CWD)
+4. `.zerostack/prompts/` (project-level config, highest priority)
+
+**Themes** (priority low to high):
+1. Embedded at compile time
+2. `~/.local/share/zerostack/themes/` (global, user-level)
+3. `themes/` (project-local, relative to CWD)
 
 If `ZS_CONFIG_DIR` is set, it overrides the data directory for the config file
 location only (prompts and themes still use `ZS_DATA_DIR` / the default data
