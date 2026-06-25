@@ -102,7 +102,13 @@ pub enum AgentEvent {
     },
     Done {
         response: CompactString,
+        /// Cumulative usage across provider calls in this turn. Use for cost
+        /// and lifetime token totals.
         usage: TokenUsage,
+        /// Usage from the latest provider call in this turn. Use for current
+        /// context pressure; summing prompt tokens across tool calls double-counts
+        /// the same conversation prefix.
+        context_usage: TokenUsage,
         reasoning: Vec<ProviderReasoning>,
     },
 }

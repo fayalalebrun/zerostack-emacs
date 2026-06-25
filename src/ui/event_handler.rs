@@ -282,11 +282,13 @@ pub async fn handle_agent_event(
         AgentEvent::Done {
             response,
             usage,
+            context_usage,
             reasoning,
         } => {
             handle_agent_done(
                 response,
                 usage,
+                context_usage,
                 reasoning,
                 renderer,
                 session,
@@ -356,6 +358,7 @@ fn save_session_if_enabled(
 async fn handle_agent_done(
     response: CompactString,
     usage: crate::event::TokenUsage,
+    context_usage: crate::event::TokenUsage,
     reasoning: Vec<crate::session::ProviderReasoning>,
     renderer: &mut Renderer,
     session: &mut Session,
@@ -401,7 +404,7 @@ async fn handle_agent_done(
         MessageRole::Assistant,
         &response,
         reasoning,
-        Some(usage.into()),
+        Some(context_usage.into()),
     );
     let billable_input_tokens = usage.billable_input_tokens();
     let billable_output_tokens = usage.billable_output_tokens();

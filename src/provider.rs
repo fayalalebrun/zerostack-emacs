@@ -1405,6 +1405,11 @@ impl TestAgent {
                         output_tokens: 1,
                         ..Default::default()
                     },
+                    context_usage: crate::event::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
                     reasoning: Vec::new(),
                 })
                 .await;

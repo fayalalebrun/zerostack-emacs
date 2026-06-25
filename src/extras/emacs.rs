@@ -2325,6 +2325,7 @@ mod imp {
                 AgentEvent::Done {
                     response,
                     usage,
+                    context_usage,
                     reasoning,
                 } => {
                     let cols = server.mutable.lock().await.cols;
@@ -2349,7 +2350,7 @@ mod imp {
                             MessageRole::Assistant,
                             &response,
                             reasoning,
-                            Some(usage.into()),
+                            Some(context_usage.into()),
                         );
                         let billable_input_tokens = usage.billable_input_tokens();
                         let billable_output_tokens = usage.billable_output_tokens();

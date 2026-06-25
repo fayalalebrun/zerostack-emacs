@@ -33,6 +33,20 @@ pub struct BtwRunner {
     pub abort_handle: tokio::task::AbortHandle,
 }
 
+fn done_usages(
+    usage_total: TokenUsage,
+    latest_usage: Option<TokenUsage>,
+    final_usage: TokenUsage,
+) -> (TokenUsage, TokenUsage) {
+    let billing_usage = if usage_total == TokenUsage::default() {
+        final_usage
+    } else {
+        usage_total
+    };
+    let context_usage = latest_usage.unwrap_or(billing_usage);
+    (billing_usage, context_usage)
+}
+
 fn streamed_reasoning_text<R>(content: &StreamedAssistantContent<R>) -> Option<CompactString> {
     match content {
         StreamedAssistantContent::Reasoning(reasoning) => {
@@ -305,6 +319,7 @@ where
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
         let mut usage_total = TokenUsage::default();
+        let mut latest_usage: Option<TokenUsage> = None;
         let mut response_reasoning: Vec<ProviderReasoning> = Vec::new();
 
         let mut stream = agent.stream_chat(prompt, history).await;
@@ -368,19 +383,17 @@ where
                     }
                     Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                         let response_text = res.response();
-                        let usage = res.usage();
+                        let final_usage = res.usage().into();
 
                         if !response_text.is_empty() {
-                            let usage = if usage_total == TokenUsage::default() {
-                                usage.into()
-                            } else {
-                                usage_total
-                            };
+                            let (usage, context_usage) =
+                                done_usages(usage_total, latest_usage, final_usage);
                             let reasoning = std::mem::take(&mut response_reasoning);
                             let _ = event_tx
                                 .send(AgentEvent::Done {
                                     response: CompactString::from(response_text),
                                     usage,
+                                    context_usage,
                                     reasoning,
                                 })
                                 .await;
@@ -405,6 +418,7 @@ where
                         if let Some(usage) = call.usage {
                             let usage = TokenUsage::from(usage);
                             usage_total += usage;
+                            latest_usage = Some(usage);
                             let _ = event_tx
                                 .send(AgentEvent::CompletionCall {
                                     call_index: call.call_index,
@@ -575,6 +589,54 @@ fn format_tool_args_summary(args_json: &serde_json::Value) -> String {
             String::new()
         }
         _ => format!("{}", args_json),
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::{TokenUsage, done_usages};
+
+    #[test]
+    fn done_usages_keep_cumulative_billing_but_latest_context() {
+        let first_call = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cached_input_tokens: 200,
+            reasoning_tokens: 50,
+            ..Default::default()
+        };
+        let second_call = TokenUsage {
+            input_tokens: 1_500,
+            output_tokens: 50,
+            cached_input_tokens: 300,
+            reasoning_tokens: 25,
+            ..Default::default()
+        };
+        let mut total = TokenUsage::default();
+        total += first_call;
+        total += second_call;
+
+        let (billing, context) = done_usages(total, Some(second_call), TokenUsage::default());
+
+        assert_eq!(billing.input_tokens, 2_500);
+        assert_eq!(billing.output_tokens, 150);
+        assert_eq!(billing.cached_input_tokens, 500);
+        assert_eq!(billing.reasoning_tokens, 75);
+        assert_eq!(context, second_call);
+    }
+
+    #[test]
+    fn done_usages_falls_back_to_final_response_usage_without_call_events() {
+        let final_usage = TokenUsage {
+            input_tokens: 42,
+            output_tokens: 7,
+            ..Default::default()
+        };
+
+        let (billing, context) = done_usages(TokenUsage::default(), None, final_usage);
+
+        assert_eq!(billing, final_usage);
+        assert_eq!(context, final_usage);
     }
 }
 
