@@ -2381,7 +2381,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 (defun zerostack--handle-event (plist)
   "Handle event PLIST."
   (pcase (plist-get plist :type)
-    ((or 'session-render 'user-render 'assistant-render 'reasoning-render 'tool-render)
+    ((or 'session-render 'user-render 'assistant-render 'reasoning-render 'tool-render 'error-render 'retry-render)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
     ('loop-started
@@ -2422,6 +2422,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (zerostack--refresh-permission-status))
     ('completion-call
      (zerostack--update-provider-model plist))
+    ('retry
+     nil)
     ('done
      (zerostack--update-provider-model plist)
      (zerostack--clear-pending-permissions)
@@ -2441,10 +2443,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (zerostack--clear-pending-permissions)
      (setq zerostack--loop-active nil
            zerostack--loop-label nil)
-     (zerostack--set-thinking nil)
-     (zerostack--append-local-line
-      (format "error: %s" (plist-get plist :message))
-      'zs-error))
+     (zerostack--set-thinking nil))
     (_
      (zerostack--append-local-line
       (format "event: %S" (plist-get plist :type))

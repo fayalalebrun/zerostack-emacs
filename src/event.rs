@@ -108,6 +108,11 @@ pub enum AgentEvent {
         name: CompactString,
         args: serde_json::Value,
     },
+    Retry {
+        attempt: u32,
+        delay_ms: u64,
+        message: CompactString,
+    },
     Error(CompactString),
     /// Provider call finished mid-stream. Carries the real provider-reported
     /// token usage for that call (when available). Used to update the

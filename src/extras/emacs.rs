@@ -2010,6 +2010,14 @@ mod imp {
         let response = match run_prompt_inner(server.clone(), text, turn).await {
             Ok(response) => response,
             Err(e) => {
+                let message = format!("error: {}", sanitize_output(&e.to_string()));
+                server
+                    .append_lines(
+                        "error-render",
+                        turn,
+                        vec![WireLine::new(message, "zs-error")],
+                    )
+                    .await;
                 server
                     .broadcast_event("error", format!(" :message {}", sexp_quote(&e.to_string())))
                     .await;
@@ -2413,6 +2421,33 @@ mod imp {
                         )
                         .await;
                 }
+                AgentEvent::Retry {
+                    attempt,
+                    delay_ms,
+                    message,
+                } => {
+                    let text = format!(
+                        "retrying provider request #{} in {:.1}s: {}",
+                        attempt,
+                        delay_ms as f64 / 1000.0,
+                        sanitize_output(&message)
+                    );
+                    server
+                        .append_lines("retry-render", turn, vec![WireLine::new(text, "zs-muted")])
+                        .await;
+                    server
+                        .broadcast_event(
+                            "retry",
+                            format!(
+                                " :turn {} :attempt {} :delay-ms {} :message {}",
+                                turn,
+                                attempt,
+                                delay_ms,
+                                sexp_quote(&message)
+                            ),
+                        )
+                        .await;
+                }
                 AgentEvent::CompletionCall { call_index, usage } => {
                     let context_window = server.session.lock().await.context_window;
                     server
@@ -2514,6 +2549,16 @@ mod imp {
                     return Ok(Some(response.to_string()));
                 }
                 AgentEvent::Error(e) => {
+                    server
+                        .append_lines(
+                            "error-render",
+                            turn,
+                            vec![WireLine::new(
+                                format!("error: {}", sanitize_output(&e)),
+                                "zs-error",
+                            )],
+                        )
+                        .await;
                     server
                         .broadcast_event(
                             "error",

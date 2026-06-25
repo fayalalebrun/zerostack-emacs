@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use compact_str::CompactString;
 use futures::StreamExt;
@@ -14,6 +15,7 @@ use rig::completion::message::{
 use rig::completion::{CompletionModel, Message};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 
 use crate::event::{AgentEvent, BtwEvent, TokenUsage};
 use crate::session::{
@@ -78,6 +80,75 @@ fn streamed_provider_reasoning<R>(
         StreamedAssistantContent::Reasoning(reasoning) => ProviderReasoning::from_rig(reasoning),
         _ => None,
     }
+}
+
+const PROVIDER_RETRY_DELAYS_MS: [u64; 3] = [1_000, 2_000, 4_000];
+
+fn retry_delay_ms(attempt: usize, message: &str) -> Option<u64> {
+    if !is_retryable_provider_error(message) {
+        return None;
+    }
+    PROVIDER_RETRY_DELAYS_MS.get(attempt).copied()
+}
+
+fn is_retryable_provider_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if is_non_retryable_provider_error(&lower) {
+        return false;
+    }
+    [
+        " 408 ",
+        " 409 ",
+        " 429 ",
+        " 500 ",
+        " 502 ",
+        " 503 ",
+        " 504 ",
+        "timeout",
+        "timed out",
+        "rate limit",
+        "too many requests",
+        "overloaded",
+        "overload",
+        "temporarily unavailable",
+        "provider_unavailable",
+        "service unavailable",
+        "gateway timeout",
+        "bad gateway",
+        "connection lost",
+        "connection reset",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_non_retryable_provider_error(lower: &str) -> bool {
+    [
+        "context_length_exceeded",
+        "context length",
+        "context window",
+        "prompt is too long",
+        "input is too long",
+        "maximum context",
+        "max context",
+        "too large for model",
+        "no tool output found",
+        "invalid_request_error",
+        "invalid api key",
+        "unauthorized",
+        "insufficient_quota",
+        "quota",
+        "billing",
+        "usage limit",
+        "freeusagelimiterror",
+        "gousagelimiterror",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+async fn sleep_for_retry(delay_ms: u64) {
+    sleep(Duration::from_millis(delay_ms)).await;
 }
 
 /// Spawn an isolated, single-turn, tool-less side-question run. The full result
@@ -388,6 +459,8 @@ where
         let mut usage_total = TokenUsage::default();
         let mut latest_usage: Option<TokenUsage> = None;
         let mut response_reasoning: Vec<ProviderReasoning> = Vec::new();
+        let mut retry_attempts = 0usize;
+        let mut stream_had_output = false;
 
         let mut stream = agent.stream_chat(prompt, history).await;
 
@@ -395,6 +468,7 @@ where
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
+                        stream_had_output = true;
                         if let Some(reasoning) = streamed_provider_reasoning(&content) {
                             tool_interactions.push(assistant_message_with_reasoning(
                                 "",
@@ -435,6 +509,7 @@ where
                         tool_result,
                         ..
                     })) => {
+                        stream_had_output = true;
                         let mut output = String::new();
                         for c in tool_result.content.iter() {
                             if let ToolResultContent::Text(t) = c {
@@ -518,8 +593,26 @@ where
 >>>>>>> 0ac01d0 (Fix Codex token usage accounting)
                     }
                     Err(e) => {
+                        let message = e.to_string();
+                        if !stream_had_output
+                            && let Some(delay_ms) = retry_delay_ms(retry_attempts, &message)
+                        {
+                            retry_attempts += 1;
+                            let _ = event_tx
+                                .send(AgentEvent::Retry {
+                                    attempt: retry_attempts as u32,
+                                    delay_ms,
+                                    message: CompactString::new(message),
+                                })
+                                .await;
+                            sleep_for_retry(delay_ms).await;
+                            stream = agent
+                                .stream_chat(retry_prompt.clone(), retry_history.clone())
+                                .await;
+                            continue;
+                        }
                         let _ = event_tx
-                            .send(AgentEvent::Error(CompactString::new(e.to_string())))
+                            .send(AgentEvent::Error(CompactString::new(message)))
                             .await;
                         return;
                     }
@@ -527,6 +620,8 @@ where
                 }
             }
 
+            retry_attempts = 0;
+            stream_had_output = false;
             stream =
                 continue_prompt_injector(&agent, &retry_prompt, &retry_history, &tool_interactions)
                     .await;
@@ -781,7 +876,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{convert_history, streamed_provider_reasoning, streamed_reasoning_text};
+    use super::{
+        convert_history, retry_delay_ms, streamed_provider_reasoning, streamed_reasoning_text,
+    };
     use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent, Session};
     use rig::completion::Message;
     use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent, UserContent};
@@ -894,6 +991,34 @@ mod tests {
 
         let history = convert_history(&session);
         assert!(history.is_empty());
+    }
+
+    #[test]
+    fn retry_classification_retries_transient_provider_failures() {
+        assert_eq!(
+            retry_delay_ms(0, "Invalid status code 503 Service Unavailable"),
+            Some(1_000)
+        );
+        assert_eq!(
+            retry_delay_ms(1, "rate limit: too many requests"),
+            Some(2_000)
+        );
+        assert_eq!(retry_delay_ms(2, "provider_unavailable"), Some(4_000));
+        assert_eq!(retry_delay_ms(3, "provider_unavailable"), None);
+    }
+
+    #[test]
+    fn retry_classification_does_not_retry_terminal_errors() {
+        assert_eq!(retry_delay_ms(0, "context_length_exceeded"), None);
+        assert_eq!(
+            retry_delay_ms(0, "No tool output found for function call"),
+            None
+        );
+        assert_eq!(retry_delay_ms(0, "insufficient_quota"), None);
+        assert_eq!(
+            retry_delay_ms(0, "Invalid status code 400 Bad Request"),
+            None
+        );
     }
 
     #[test]

@@ -333,6 +333,23 @@ pub async fn handle_agent_event(
                 session.total_estimated_tokens = real;
             }
         }
+        AgentEvent::Retry {
+            attempt,
+            delay_ms,
+            message,
+        } => {
+            let safe = sanitize_output(&message);
+            renderer.write_line(
+                &format!(
+                    "retrying provider request #{} in {:.1}s: {}",
+                    attempt,
+                    delay_ms as f64 / 1000.0,
+                    safe
+                ),
+                Color::DarkGrey,
+            )?;
+
+        }
         AgentEvent::Error(e) => {
             *was_reasoning = false;
             let safe = sanitize_output(&e);

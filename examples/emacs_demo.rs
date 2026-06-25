@@ -941,20 +941,34 @@ timeout_secs = 60
 
     impl ProviderServer {
         fn start(attachment_dir: PathBuf) -> anyhow::Result<Self> {
-            Self::start_with_attachment_dir(demo_delay(), attachment_dir, false)
+            Self::start_with_attachment_dir(
+                demo_delay(),
+                attachment_dir,
+                false,
+                demo_transient_failures(),
+            )
         }
 
         #[cfg(test)]
         fn start_with_delay(delay: Duration) -> anyhow::Result<Self> {
+            Self::start_with_transient_failures(delay, 0)
+        }
+
+        #[cfg(test)]
+        fn start_with_transient_failures(
+            delay: Duration,
+            transient_failures: u64,
+        ) -> anyhow::Result<Self> {
             let path =
                 std::env::temp_dir().join(format!("zsd-provider-att-{}", Uuid::new_v4().simple()));
-            Self::start_with_attachment_dir(delay, path, true)
+            Self::start_with_attachment_dir(delay, path, true, transient_failures)
         }
 
         fn start_with_attachment_dir(
             delay: Duration,
             attachment_dir: PathBuf,
             cleanup_attachment_dir: bool,
+            transient_failures: u64,
         ) -> anyhow::Result<Self> {
             fs::create_dir_all(&attachment_dir)?;
             let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -963,6 +977,7 @@ timeout_secs = 60
             let stop = Arc::new(AtomicBool::new(false));
             let state = Arc::new(ProviderState {
                 counter: AtomicU64::new(0),
+                transient_failures: AtomicU64::new(transient_failures),
                 attachment_dir,
             });
             let cleanup_path = cleanup_attachment_dir.then(|| state.attachment_dir.clone());
@@ -1011,6 +1026,7 @@ timeout_secs = 60
 
     struct ProviderState {
         counter: AtomicU64,
+        transient_failures: AtomicU64,
         attachment_dir: PathBuf,
     }
 
@@ -1031,6 +1047,20 @@ timeout_secs = 60
                 write_json_response(&mut stream, 200, models_response())?;
             }
             ("POST", "/chat/completions") | ("POST", "/v1/chat/completions") => {
+                if state
+                    .transient_failures
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    write_json_response(
+                        &mut stream,
+                        503,
+                        json!({ "error": { "message": "demo provider overloaded; retry should recover" } }),
+                    )?;
+                    return Ok(());
+                }
                 let body: Value =
                     serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
                 let sequence = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1108,7 +1138,12 @@ timeout_secs = 60
         status: u16,
         value: Value,
     ) -> anyhow::Result<()> {
-        let reason = if status == 200 { "OK" } else { "Not Found" };
+        let reason = match status {
+            200 => "OK",
+            404 => "Not Found",
+            503 => "Service Unavailable",
+            _ => "Error",
+        };
         let body = serde_json::to_vec(&value)?;
         write!(
             stream,
@@ -1137,6 +1172,13 @@ timeout_secs = 60
             }
         }
         Ok(())
+    }
+
+    fn demo_transient_failures() -> u64 {
+        std::env::var("ZEROSTACK_DEMO_TRANSIENT_FAILURES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(2)
     }
 
     fn demo_delay() -> Duration {
@@ -2235,6 +2277,26 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             let chat = raw_http(provider.addr, &request);
             assert!(chat.contains("text/event-stream"));
             assert!(chat.contains("tool_calls"));
+        }
+
+        #[test]
+        fn http_provider_can_demo_one_transient_overload() {
+            let provider =
+                ProviderServer::start_with_transient_failures(Duration::ZERO, 1).unwrap();
+            let body = json!({ "messages": [{ "role": "user", "content": "demo" }] }).to_string();
+            let request = format!(
+                "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+
+            let first = raw_http(provider.addr, &request);
+            assert!(first.contains("503 Service Unavailable"));
+            assert!(first.contains("demo provider overloaded"));
+
+            let second = raw_http(provider.addr, &request);
+            assert!(second.contains("text/event-stream"));
+            assert!(second.contains("Zerostack Emacs demo"));
         }
 
         fn raw_http(addr: SocketAddr, request: &str) -> String {
