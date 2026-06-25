@@ -134,8 +134,14 @@ fn save_session_preserves_tool_messages() {
     assert_eq!(found[0].messages.len(), 5);
     assert_eq!(found[0].messages[1].role, MessageRole::ToolCall);
     assert!(found[0].messages[1].content.contains("read"));
+    let call = found[0].messages[1].tool_call.as_ref().unwrap();
+    assert_eq!(call.name, "read");
+    assert_eq!(call.arguments, serde_json::json!({ "path": "src/main.rs" }));
     assert_eq!(found[0].messages[2].role, MessageRole::ToolResult);
     assert_eq!(found[0].messages[2].content, "read:\nfile contents");
+    let result = found[0].messages[2].tool_result.as_ref().unwrap();
+    assert_eq!(result.name, "read");
+    assert_eq!(result.id, call.id);
     assert_eq!(found[0].messages[3].role, MessageRole::SubagentToolCall);
     drop(env);
 }

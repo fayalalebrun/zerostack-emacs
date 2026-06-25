@@ -33,6 +33,27 @@ pub struct SessionMessage {
     pub provider_reasoning: Vec<ProviderReasoning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_usage: Option<SessionTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<SessionToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<SessionToolResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionToolCall {
+    pub id: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<CompactString>,
+    pub name: CompactString,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionToolResult {
+    pub id: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<CompactString>,
+    pub name: CompactString,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,71 +441,87 @@ impl Session {
             estimated_tokens: tokens,
             provider_reasoning,
             provider_usage,
+            tool_call: None,
+            tool_result: None,
         });
         self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
         self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
     }
 
-    pub fn title(&self) -> String {
-        if !self.name.is_empty() {
-            return self.name.to_string();
-        }
-        self.messages
+    #[allow(dead_code)]
+    pub fn add_tool_call(&mut self, name: &str, args: &serde_json::Value) {
+        let id = format!("session-tool-{}", self.messages.len());
+        self.add_tool_call_structured(name, args, &id, None);
+    }
+
+    pub fn add_tool_call_structured(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+        id: &str,
+        call_id: Option<&str>,
+    ) {
+        let content = crate::ui::utils::format_tool_call_summary(name, args);
+        let tokens = Self::estimate_tokens(&content);
+        self.messages.push(SessionMessage {
+            role: MessageRole::ToolCall,
+            content: CompactString::new(content),
+            estimated_tokens: tokens,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: Some(SessionToolCall {
+                id: CompactString::new(id),
+                call_id: call_id.map(CompactString::new),
+                name: CompactString::new(name),
+                arguments: args.clone(),
+            }),
+            tool_result: None,
+        });
+        self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
+        self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
+    }
+
+    #[allow(dead_code)]
+    pub fn add_tool_result(&mut self, name: &str, output: &str) -> String {
+        let (id, call_id) = self
+            .messages
             .iter()
             .rev()
-            .find(|msg| msg.role == MessageRole::User)
-            .map(|msg| msg.content.chars().take(80).collect())
-            .unwrap_or_else(|| "untitled".to_string())
+            .find_map(|msg| msg.tool_call.as_ref())
+            .map(|call| {
+                (
+                    call.id.to_string(),
+                    call.call_id.as_ref().map(ToString::to_string),
+                )
+            })
+            .unwrap_or_else(|| (format!("session-tool-result-{}", self.messages.len()), None));
+        self.add_tool_result_structured(name, output, &id, call_id.as_deref())
     }
 
-    pub fn fork_title(&self, message_index: usize) -> String {
-        let target = self
-            .messages
-            .get(message_index)
-            .filter(|msg| msg.role == MessageRole::User)
-            .map(|msg| msg.content.chars().take(48).collect::<String>())
-            .unwrap_or_else(|| self.title());
-        format!("Fork before: {target}")
-    }
-
-    pub fn fork_before_message(&self, message_index: usize) -> Self {
-        let mut fork = self.clone();
-        let now = CompactString::new(chrono::Utc::now().to_rfc3339());
-        fork.id = CompactString::new(Uuid::new_v4().to_string());
-        fork.name = CompactString::new(self.fork_title(message_index));
-        fork.created_at = now.clone();
-        fork.updated_at = now;
-        fork.messages
-            .truncate(message_index.min(fork.messages.len()));
-        fork.total_estimated_tokens = fork.messages.iter().map(|m| m.estimated_tokens).sum();
-        fork.total_input_tokens = 0;
-        fork.total_output_tokens = 0;
-        fork.total_cost = 0.0;
-        fork.input_token_cost = 0.0;
-        fork.output_token_cost = 0.0;
-        fork.reset_calibration();
-        if fork.messages.is_empty()
-            || fork
-                .compactions
-                .last()
-                .is_some_and(|c| c.first_kept_index > fork.messages.len())
-        {
-            fork.compactions.clear();
-        }
-        fork
->>>>>>> 66827ff (Add conversation forking)
-    }
-=======
-    pub fn add_tool_call(&mut self, name: &str, args: &serde_json::Value) {
-        self.add_message(
-            MessageRole::ToolCall,
-            &crate::ui::utils::format_tool_call_summary(name, args),
-        );
-    }
-
-    pub fn add_tool_result(&mut self, name: &str, output: &str) -> String {
+    pub fn add_tool_result_structured(
+        &mut self,
+        name: &str,
+        output: &str,
+        id: &str,
+        call_id: Option<&str>,
+    ) -> String {
         let content = self.tool_result_content(name, output);
-        self.add_message(MessageRole::ToolResult, &content);
+        let tokens = Self::estimate_tokens(&content);
+        self.messages.push(SessionMessage {
+            role: MessageRole::ToolResult,
+            content: CompactString::new(&content),
+            estimated_tokens: tokens,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: Some(SessionToolResult {
+                id: CompactString::new(id),
+                call_id: call_id.map(CompactString::new),
+                name: CompactString::new(name),
+            }),
+        });
+        self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
+        self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
         content
     }
 
@@ -557,56 +594,6 @@ impl Session {
             fork.compactions.clear();
         }
         fork
-    }
-=======
-    pub fn title(&self) -> String {
-        if !self.name.is_empty() {
-            return self.name.to_string();
-        }
-        self.messages
-            .iter()
-            .rev()
-            .find(|msg| msg.role == MessageRole::User)
-            .map(|msg| msg.content.chars().take(80).collect())
-            .unwrap_or_else(|| "untitled".to_string())
-    }
-
-    pub fn fork_title(&self, message_index: usize) -> String {
-        let target = self
-            .messages
-            .get(message_index)
-            .filter(|msg| msg.role == MessageRole::User)
-            .map(|msg| msg.content.chars().take(48).collect::<String>())
-            .unwrap_or_else(|| self.title());
-        format!("Fork before: {target}")
-    }
-
-    pub fn fork_before_message(&self, message_index: usize) -> Self {
-        let mut fork = self.clone();
-        let now = CompactString::new(chrono::Utc::now().to_rfc3339());
-        fork.id = CompactString::new(Uuid::new_v4().to_string());
-        fork.name = CompactString::new(self.fork_title(message_index));
-        fork.created_at = now.clone();
-        fork.updated_at = now;
-        fork.messages
-            .truncate(message_index.min(fork.messages.len()));
-        fork.total_estimated_tokens = fork.messages.iter().map(|m| m.estimated_tokens).sum();
-        fork.total_input_tokens = 0;
-        fork.total_output_tokens = 0;
-        fork.total_cost = 0.0;
-        fork.input_token_cost = 0.0;
-        fork.output_token_cost = 0.0;
-        fork.reset_calibration();
-        if fork.messages.is_empty()
-            || fork
-                .compactions
-                .last()
-                .is_some_and(|c| c.first_kept_index > fork.messages.len())
-        {
-            fork.compactions.clear();
-        }
-        fork
->>>>>>> 66827ff (Add conversation forking)
     }
 
     #[cfg(feature = "multimodal")]
@@ -764,6 +751,8 @@ impl Session {
             estimated_tokens: summary_tokens,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         };
 
         // Remove summarized messages and insert summary

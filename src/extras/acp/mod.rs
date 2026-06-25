@@ -324,7 +324,7 @@ async fn run_prompt(
                     tracing::warn!("ACP failed to send reasoning notification: {}", e);
                 }
             }
-            AgentEvent::ToolCall { name, args } => {
+            AgentEvent::ToolCall { name, args, .. } => {
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
                 tool_call_id = Some(id.clone());
                 let args_str = args.to_string();

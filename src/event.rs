@@ -80,10 +80,14 @@ pub enum AgentEvent {
     Token(CompactString),
     Reasoning(CompactString),
     ToolCall {
+        id: CompactString,
+        call_id: Option<CompactString>,
         name: CompactString,
         args: serde_json::Value,
     },
     ToolResult {
+        id: CompactString,
+        call_id: Option<CompactString>,
         name: CompactString,
         output: CompactString,
     },

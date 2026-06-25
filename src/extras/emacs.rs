@@ -2014,14 +2014,6 @@ mod imp {
         let _ = run_prompt_once(server, text, turn).await;
     }
 
-    fn tool_result_artifact_content(
-        session: &mut Session,
-        name: &str,
-        output: &str,
-    ) -> CompactString {
-        sanitize_output(&session.add_tool_result(name, output))
-    }
-
     async fn run_prompt_once(
         server: Arc<Server>,
         text: String,
@@ -2284,7 +2276,12 @@ mod imp {
                         .send_render_event("assistant-render", turn, start, lines)
                         .await;
                 }
-                AgentEvent::ToolCall { name, args } => {
+                AgentEvent::ToolCall {
+                    id,
+                    call_id,
+                    name,
+                    args,
+                } => {
                     if response_start_line.is_some() {
                         server
                             .append_lines(
@@ -2306,7 +2303,7 @@ mod imp {
                     let summary = format_tool_call_summary(&name, &args);
                     {
                         let mut session = server.session.lock().await;
-                        session.add_tool_call(&name, &args);
+                        session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
@@ -2366,10 +2363,21 @@ mod imp {
                         )
                         .await;
                 }
-                AgentEvent::ToolResult { name, output } => {
+                AgentEvent::ToolResult {
+                    id,
+                    call_id,
+                    name,
+                    output,
+                } => {
                     let safe = {
                         let mut session = server.session.lock().await;
-                        let content = tool_result_artifact_content(&mut session, &name, &output);
+                        let content = session.add_tool_result_structured(
+                            &name,
+                            &output,
+                            &id,
+                            call_id.as_deref(),
+                        );
+                        let content = sanitize_output(&content);
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
@@ -4334,7 +4342,7 @@ mod imp {
         fn tool_output_artifact_content_matches_session_transcript() {
             let mut session = Session::new("openai", "gpt", 1000);
 
-            let content = tool_result_artifact_content(&mut session, "bash", "hi\n");
+            let content = sanitize_output(&session.add_tool_result("bash", "hi\n"));
 
             assert_eq!(content, "bash:\nhi\n");
             assert_eq!(session.messages[0].content.as_str(), content);

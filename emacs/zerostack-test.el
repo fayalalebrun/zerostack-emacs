@@ -1206,6 +1206,29 @@
                    (marker-position zerostack--controls-start-marker))
                   "hello\nworld"))))
 
+(ert-deftest zerostack-test-only-user-input-records-undo ()
+  (zerostack-test--with-buffer
+   (setq buffer-undo-list nil)
+   (zerostack--replace-lines 0 '((:text "server" :face zs-normal)))
+   (zerostack--set-status "thinking")
+   (zerostack--set-notice "notice")
+   (puthash 1 '(:request 1 :tool "bash" :input "echo hi") zerostack--pending-permissions)
+   (zerostack--refresh-permission-buttons)
+   (clrhash zerostack--pending-permissions)
+   (zerostack--refresh-permission-buttons)
+   (zerostack--insert-input "generated")
+   (zerostack--clear-input)
+   (should (null buffer-undo-list))
+   (goto-char (marker-position zerostack--controls-start-marker))
+   (insert "typed")
+   (should buffer-undo-list)
+   (let ((inhibit-read-only t))
+     (primitive-undo 1 buffer-undo-list))
+   (should (string-empty-p
+            (buffer-substring-no-properties
+             (marker-position zerostack--input-marker)
+             (marker-position zerostack--controls-start-marker))))))
+
 (ert-deftest zerostack-test-buffered-protocol-input ()
   (zerostack-test--with-buffer
    (zerostack--consume-chunk "(ready :protocol 1 :session \"abc\"")

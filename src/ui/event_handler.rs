@@ -179,7 +179,12 @@ pub async fn handle_agent_event(
             renderer.render_viewport()?;
             *agent_line_started = true;
         }
-        AgentEvent::ToolCall { name, args } => {
+        AgentEvent::ToolCall {
+            id,
+            call_id,
+            name,
+            args,
+        } => {
             *was_reasoning = false;
             if *agent_line_started {
                 renderer.write_line("", Color::White)?;
@@ -187,7 +192,7 @@ pub async fn handle_agent_event(
             }
             response_buf.clear();
             *response_start_line = None;
-            session.add_tool_call(&name, &args);
+            session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
             save_session_if_enabled(session, cli, renderer)?;
             let line = format!(
                 "◈ {}",
@@ -204,8 +209,13 @@ pub async fn handle_agent_event(
             );
             renderer.write_line(&sanitize_output(&line), C_TOOL)?;
         }
-        AgentEvent::ToolResult { name, output } => {
-            session.add_tool_result(&name, &output);
+        AgentEvent::ToolResult {
+            id,
+            call_id,
+            name,
+            output,
+        } => {
+            session.add_tool_result_structured(&name, &output, &id, call_id.as_deref());
             save_session_if_enabled(session, cli, renderer)?;
             if name == "todo_write" {
                 let list = TODO_LIST.lock().unwrap_or_else(|e| e.into_inner());
@@ -452,9 +462,9 @@ async fn handle_agent_done(
         && session.needs_compaction(reserve)
         && !cli.no_session
     {
+        renderer.write_line("auto-compacting...", Color::DarkGrey)?;
         let compress_result = handle_compress(
             None,
-            true,
             agent,
             client,
             renderer,

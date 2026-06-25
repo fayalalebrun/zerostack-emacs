@@ -1,17 +1,24 @@
+use std::collections::HashMap;
+
 use compact_str::CompactString;
 use futures::StreamExt;
+use rig::OneOrMany;
 use rig::agent::{Agent, MultiTurnStreamItem, StreamingResult};
+use rig::completion::message::{
+    AssistantContent, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
+};
 #[cfg(feature = "multimodal")]
 use rig::completion::message::{
     AudioMediaType, Document, DocumentMediaType, DocumentSourceKind, ImageMediaType,
 };
 use rig::completion::{CompletionModel, Message};
-use rig::message::ToolResultContent;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use tokio::sync::mpsc;
 
 use crate::event::{AgentEvent, BtwEvent, TokenUsage};
-use crate::session::{MessageRole, ProviderReasoning, Session, assistant_message_with_reasoning};
+use crate::session::{
+    MessageRole, ProviderReasoning, Session, SessionMessage, assistant_message_with_reasoning,
+};
 
 pub struct AgentRunner {
     pub event_rx: mpsc::Receiver<AgentEvent>,
@@ -179,10 +186,14 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
             // consistent.
             MessageRole::System => messages.push(Message::assistant(msg.content.to_string())),
             MessageRole::ToolCall => {
-                messages.push(Message::assistant(format!("[ToolCall]: {}", msg.content)))
+                if let Some(message) = tool_call_message(msg) {
+                    messages.push(message);
+                }
             }
             MessageRole::ToolResult => {
-                messages.push(Message::assistant(format!("[ToolResult]: {}", msg.content)))
+                if let Some(message) = tool_result_message(msg) {
+                    messages.push(message);
+                }
             }
             MessageRole::SubagentToolCall => messages.push(Message::assistant(format!(
                 "[SubagentToolCall]: {}",
@@ -192,6 +203,42 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
     }
 
     messages
+}
+
+fn tool_call_message(msg: &SessionMessage) -> Option<Message> {
+    let call = msg.tool_call.as_ref()?;
+    Some(Message::Assistant {
+        id: None,
+        content: OneOrMany::one(AssistantContent::ToolCall(ToolCall {
+            id: call.id.to_string(),
+            call_id: call.call_id.as_ref().map(ToString::to_string),
+            function: ToolFunction::new(call.name.to_string(), call.arguments.clone()),
+            signature: None,
+            additional_params: None,
+        })),
+    })
+}
+
+fn tool_result_message(msg: &SessionMessage) -> Option<Message> {
+    let result = msg.tool_result.as_ref()?;
+    Some(Message::User {
+        content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+            id: result.id.to_string(),
+            call_id: result.call_id.as_ref().map(ToString::to_string),
+            content: OneOrMany::one(ToolResultContent::Text(Text::new(tool_result_output(msg)))),
+        })),
+    })
+}
+
+fn tool_result_output(msg: &SessionMessage) -> String {
+    let Some(result) = msg.tool_result.as_ref() else {
+        return msg.content.to_string();
+    };
+    let prefix = format!("{}:\n", result.name);
+    msg.content
+        .strip_prefix(&prefix)
+        .unwrap_or(msg.content.as_str())
+        .to_string()
 }
 
 #[cfg(feature = "multimodal")]
@@ -318,6 +365,7 @@ where
         let retry_history: Vec<Message> = history.clone();
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
+        let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut usage_total = TokenUsage::default();
         let mut latest_usage: Option<TokenUsage> = None;
         let mut response_reasoning: Vec<ProviderReasoning> = Vec::new();
@@ -349,9 +397,13 @@ where
                             StreamedAssistantContent::ToolCall { tool_call, .. } => {
                                 response_reasoning.clear();
                                 last_tool_name = Some(tool_call.function.name.clone());
+                                tool_names
+                                    .insert(tool_call.id.clone(), tool_call.function.name.clone());
                                 tool_interactions.push(tool_call.clone().into());
                                 let _ = event_tx
                                     .send(AgentEvent::ToolCall {
+                                        id: CompactString::from(tool_call.id),
+                                        call_id: tool_call.call_id.map(CompactString::from),
                                         name: CompactString::from(tool_call.function.name),
                                         args: tool_call.function.arguments,
                                     })
@@ -373,9 +425,15 @@ where
                                 output.push_str(&t.text);
                             }
                         }
+                        let name = tool_names
+                            .remove(&tool_result.id)
+                            .or_else(|| last_tool_name.take())
+                            .unwrap_or_default();
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
-                                name: CompactString::new(last_tool_name.take().unwrap_or_default()),
+                                id: CompactString::new(tool_result.id.clone()),
+                                call_id: tool_result.call_id.clone().map(CompactString::from),
+                                name: CompactString::new(name),
                                 output: CompactString::from(output),
                             })
                             .await;
@@ -702,7 +760,7 @@ mod tests {
     use super::{convert_history, streamed_provider_reasoning, streamed_reasoning_text};
     use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent, Session};
     use rig::completion::Message;
-    use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent};
+    use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent, UserContent};
     use rig::streaming::StreamedAssistantContent;
 
     #[test]
@@ -746,6 +804,47 @@ mod tests {
                 ProviderReasoningContent::Encrypted("enc_blob".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn convert_history_replays_tool_events_as_native_messages() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_message(MessageRole::User, "inspect it");
+        session.add_tool_call_structured(
+            "read",
+            &serde_json::json!({ "path": "src/main.rs" }),
+            "call_1",
+            Some("fc_1"),
+        );
+        session.add_tool_result_structured("read", "file contents", "call_1", Some("fc_1"));
+
+        let history = convert_history(&session);
+        let Message::Assistant { content, .. } = &history[1] else {
+            panic!("expected assistant tool call message");
+        };
+        let call_items = content.iter().collect::<Vec<_>>();
+        assert!(matches!(call_items[0], AssistantContent::ToolCall(call)
+            if call.id == "call_1"
+                && call.call_id.as_deref() == Some("fc_1")
+                && call.function.name == "read"
+                && call.function.arguments == serde_json::json!({ "path": "src/main.rs" })));
+
+        let Message::User { content } = &history[2] else {
+            panic!("expected user tool result message");
+        };
+        let result_items = content.iter().collect::<Vec<_>>();
+        assert!(matches!(result_items[0], UserContent::ToolResult(result)
+            if result.id == "call_1" && result.call_id.as_deref() == Some("fc_1")));
+    }
+
+    #[test]
+    fn convert_history_drops_legacy_text_only_tool_events() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_message(MessageRole::ToolCall, "bash echo hi");
+        session.add_message(MessageRole::ToolResult, "bash:\nhi");
+
+        let history = convert_history(&session);
+        assert!(history.is_empty());
     }
 
     #[test]

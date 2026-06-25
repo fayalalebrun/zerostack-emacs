@@ -169,6 +169,8 @@ fn serialize_single_user_message() {
         estimated_tokens: 1,
         provider_reasoning: Vec::new(),
         provider_usage: None,
+        tool_call: None,
+        tool_result: None,
     }];
     let result = serialize_conversation(&msgs);
     assert!(result.contains("[User]: hello"));
@@ -183,6 +185,8 @@ fn serialize_multiple_roles() {
             estimated_tokens: 1,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
         SessionMessage {
             role: MessageRole::Assistant,
@@ -190,6 +194,8 @@ fn serialize_multiple_roles() {
             estimated_tokens: 1,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
         SessionMessage {
             role: MessageRole::System,
@@ -197,6 +203,8 @@ fn serialize_multiple_roles() {
             estimated_tokens: 1,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
         SessionMessage {
             role: MessageRole::ToolCall,
@@ -204,6 +212,8 @@ fn serialize_multiple_roles() {
             estimated_tokens: 1,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
         SessionMessage {
             role: MessageRole::ToolResult,
@@ -211,6 +221,8 @@ fn serialize_multiple_roles() {
             estimated_tokens: 1,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
     ];
     let result = serialize_conversation(&msgs);

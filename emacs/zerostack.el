@@ -289,6 +289,12 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar zerostack--config-command-function nil
   "Optional test hook used instead of invoking `zerostack-command config'.")
 
+(defmacro zerostack--without-undo (&rest body)
+  "Run BODY without recording buffer undo entries."
+  (declare (indent 0) (debug t))
+  `(let ((buffer-undo-list t))
+     ,@body))
+
 ;;;###autoload
 (define-derived-mode zerostack-mode fundamental-mode "zerostack"
   "Major mode for native zerostack sessions."
@@ -2518,30 +2524,31 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 (defun zerostack--refresh-permission-buttons ()
   "Refresh clickable pending-permission buttons below the input prompt."
   (zerostack--ensure-prompt)
-  (let ((saved-point (copy-marker (point) nil))
-        (input-end (marker-position zerostack--controls-start-marker))
-        (inhibit-read-only t))
-    (unwind-protect
-        (progn
-          (set-marker-insertion-type zerostack--controls-start-marker nil)
-          (delete-region input-end (point-max))
-          (goto-char input-end)
-          (when (zerostack--pending-permissions-p)
-            (insert (propertize "\npermission: "
-                                'face 'zerostack-muted-face
-                                'read-only t
-                                'rear-nonsticky t))
-            (let ((first t))
-              (dolist (permission (zerostack--pending-permission-list))
-                (unless first
-                  (insert (propertize "  " 'read-only t 'rear-nonsticky t)))
-                (setq first nil)
-                (zerostack--insert-permission-buttons permission))))
-          (set-marker zerostack--controls-start-marker input-end)
-          (set-marker-insertion-type zerostack--controls-start-marker t)
-          (goto-char (min (marker-position zerostack--controls-start-marker)
-                          (marker-position saved-point))))
-      (set-marker saved-point nil))))
+  (zerostack--without-undo
+    (let ((saved-point (copy-marker (point) nil))
+          (input-end (marker-position zerostack--controls-start-marker))
+          (inhibit-read-only t))
+      (unwind-protect
+          (progn
+            (set-marker-insertion-type zerostack--controls-start-marker nil)
+            (delete-region input-end (point-max))
+            (goto-char input-end)
+            (when (zerostack--pending-permissions-p)
+              (insert (propertize "\npermission: "
+                                  'face 'zerostack-muted-face
+                                  'read-only t
+                                  'rear-nonsticky t))
+              (let ((first t))
+                (dolist (permission (zerostack--pending-permission-list))
+                  (unless first
+                    (insert (propertize "  " 'read-only t 'rear-nonsticky t)))
+                  (setq first nil)
+                  (zerostack--insert-permission-buttons permission))))
+            (set-marker zerostack--controls-start-marker input-end)
+            (set-marker-insertion-type zerostack--controls-start-marker t)
+            (goto-char (min (marker-position zerostack--controls-start-marker)
+                            (marker-position saved-point))))
+        (set-marker saved-point nil)))))
 
 (defun zerostack--insert-permission-buttons (permission)
   "Insert buttons for one pending PERMISSION request."
@@ -2593,30 +2600,31 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 (defun zerostack--replace-lines (replace-from lines)
   "Replace rendered logical lines from REPLACE-FROM with LINES."
   (zerostack--ensure-prompt)
-  (let ((saved-point (copy-marker (point) nil)))
-    (unwind-protect
-        (let* ((keep (min (max 0 replace-from) (length zerostack--line-markers)))
-               (prefix (cl-subseq zerostack--line-markers 0 keep))
-               (new-markers nil)
-               (start (if (< keep (length zerostack--line-markers))
-                          (marker-position (nth keep zerostack--line-markers))
-                        (marker-position zerostack--notice-start-marker)))
-               (end (marker-position zerostack--notice-start-marker))
-               (old-tail (nthcdr keep zerostack--line-markers))
-               (inhibit-read-only t))
-          (mapc (lambda (marker) (set-marker marker nil)) old-tail)
-          (setq zerostack--line-markers prefix)
-          (remove-overlays start end 'zerostack-latex t)
-          (delete-region start end)
-          (goto-char start)
-          (dolist (line lines)
-            (let ((marker (copy-marker (point) nil)))
-              (push marker new-markers)
-              (zerostack--insert-wire-line line)))
-          (set-marker zerostack--notice-start-marker (point))
-          (setq zerostack--line-markers (append prefix (nreverse new-markers)))
-          (goto-char saved-point))
-      (set-marker saved-point nil))))
+  (zerostack--without-undo
+    (let ((saved-point (copy-marker (point) nil)))
+      (unwind-protect
+          (let* ((keep (min (max 0 replace-from) (length zerostack--line-markers)))
+                 (prefix (cl-subseq zerostack--line-markers 0 keep))
+                 (new-markers nil)
+                 (start (if (< keep (length zerostack--line-markers))
+                            (marker-position (nth keep zerostack--line-markers))
+                          (marker-position zerostack--notice-start-marker)))
+                 (end (marker-position zerostack--notice-start-marker))
+                 (old-tail (nthcdr keep zerostack--line-markers))
+                 (inhibit-read-only t))
+            (mapc (lambda (marker) (set-marker marker nil)) old-tail)
+            (setq zerostack--line-markers prefix)
+            (remove-overlays start end 'zerostack-latex t)
+            (delete-region start end)
+            (goto-char start)
+            (dolist (line lines)
+              (let ((marker (copy-marker (point) nil)))
+                (push marker new-markers)
+                (zerostack--insert-wire-line line)))
+            (set-marker zerostack--notice-start-marker (point))
+            (setq zerostack--line-markers (append prefix (nreverse new-markers)))
+            (goto-char saved-point))
+        (set-marker saved-point nil)))))
 
 (defun zerostack--insert-wire-line (line)
   "Insert one pre-rendered LINE plist at point."
@@ -2847,16 +2855,17 @@ inserted into the transcript."
                (marker-position zerostack--prompt-start-marker)
                (marker-position zerostack--input-marker)
                (marker-position zerostack--controls-start-marker))
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (setq zerostack--notice-start-marker (copy-marker (point-max) nil))
-      (setq zerostack--prompt-start-marker (copy-marker (point-max) nil))
-      (set-marker-insertion-type zerostack--notice-start-marker nil)
-      (goto-char zerostack--prompt-start-marker)
-      (zerostack--insert-prompt-text)
-      (set-marker-insertion-type zerostack--prompt-start-marker t)
-      (setq zerostack--input-marker (copy-marker (point) nil))
-      (setq zerostack--controls-start-marker (copy-marker (point) t)))))
+    (zerostack--without-undo
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (setq zerostack--notice-start-marker (copy-marker (point-max) nil))
+        (setq zerostack--prompt-start-marker (copy-marker (point-max) nil))
+        (set-marker-insertion-type zerostack--notice-start-marker nil)
+        (goto-char zerostack--prompt-start-marker)
+        (zerostack--insert-prompt-text)
+        (set-marker-insertion-type zerostack--prompt-start-marker t)
+        (setq zerostack--input-marker (copy-marker (point) nil))
+        (setq zerostack--controls-start-marker (copy-marker (point) t))))))
 
 (defun zerostack--insert-prompt-text ()
   "Insert the current prompt text at point."
@@ -2972,29 +2981,30 @@ inserted into the transcript."
 
 (defun zerostack--refresh-prompt ()
   "Refresh prompt text while preserving current input."
-  (let* ((start (marker-position zerostack--prompt-start-marker))
-         (input-start (marker-position zerostack--input-marker))
-         (input-end (marker-position zerostack--controls-start-marker))
-         (saved-point (copy-marker (point) nil))
-         (input-offset (and (>= (point) input-start)
-                            (<= (point) input-end)
-                            (- (point) input-start)))
-         (inhibit-read-only t))
-    (unwind-protect
-        (progn
-          (set-marker-insertion-type zerostack--prompt-start-marker nil)
-          (delete-region start input-start)
-          (set-marker zerostack--prompt-start-marker start)
-          (goto-char start)
-          (zerostack--insert-prompt-text)
-          (set-marker zerostack--input-marker (point))
-          (set-marker-insertion-type zerostack--prompt-start-marker t)
-          (if input-offset
-              (goto-char (min (marker-position zerostack--controls-start-marker)
-                              (+ (marker-position zerostack--input-marker)
-                                 input-offset)))
-            (goto-char saved-point)))
-      (set-marker saved-point nil))))
+  (zerostack--without-undo
+    (let* ((start (marker-position zerostack--prompt-start-marker))
+           (input-start (marker-position zerostack--input-marker))
+           (input-end (marker-position zerostack--controls-start-marker))
+           (saved-point (copy-marker (point) nil))
+           (input-offset (and (>= (point) input-start)
+                              (<= (point) input-end)
+                              (- (point) input-start)))
+           (inhibit-read-only t))
+      (unwind-protect
+          (progn
+            (set-marker-insertion-type zerostack--prompt-start-marker nil)
+            (delete-region start input-start)
+            (set-marker zerostack--prompt-start-marker start)
+            (goto-char start)
+            (zerostack--insert-prompt-text)
+            (set-marker zerostack--input-marker (point))
+            (set-marker-insertion-type zerostack--prompt-start-marker t)
+            (if input-offset
+                (goto-char (min (marker-position zerostack--controls-start-marker)
+                                (+ (marker-position zerostack--input-marker)
+                                   input-offset)))
+              (goto-char saved-point)))
+        (set-marker saved-point nil)))))
 
 (defun zerostack--goto-line-column (line column)
   "Move point to LINE and COLUMN, clamped to the current buffer."
@@ -3004,20 +3014,22 @@ inserted into the transcript."
 
 (defun zerostack--clear-input ()
   "Delete current user input."
-  (let ((inhibit-read-only t))
-    (delete-region (marker-position zerostack--input-marker)
-                   (marker-position zerostack--controls-start-marker))
-    (goto-char (marker-position zerostack--controls-start-marker))))
+  (zerostack--without-undo
+    (let ((inhibit-read-only t))
+      (delete-region (marker-position zerostack--input-marker)
+                     (marker-position zerostack--controls-start-marker))
+      (goto-char (marker-position zerostack--controls-start-marker)))))
 
 (defun zerostack--insert-input (text)
   "Insert TEXT at the prompt input area."
   (zerostack--ensure-prompt)
-  (let ((inhibit-read-only t))
-    (goto-char (marker-position zerostack--controls-start-marker))
-    (when (> (point) (marker-position zerostack--input-marker))
-      (unless (looking-back "[[:space:]]" (max (point-min) (1- (point))))
-        (insert " ")))
-    (insert text)))
+  (zerostack--without-undo
+    (let ((inhibit-read-only t))
+      (goto-char (marker-position zerostack--controls-start-marker))
+      (when (> (point) (marker-position zerostack--input-marker))
+        (unless (looking-back "[[:space:]]" (max (point-min) (1- (point))))
+          (insert " ")))
+      (insert text))))
 
 (defun zerostack--discover-skills ()
   "Return discovered skills as plists for dynamic command selection."

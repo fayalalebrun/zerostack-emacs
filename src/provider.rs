@@ -371,8 +371,8 @@ impl HttpClientExt for CodexHttpClient {
         &self,
         req: http_client::Request<T>,
     ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
-	+ Send
-	+ 'static
+    + Send
+    + 'static
     where
         T: Into<bytes::Bytes> + Send,
         U: From<bytes::Bytes> + Send + 'static,
@@ -391,8 +391,8 @@ impl HttpClientExt for CodexHttpClient {
         &self,
         req: http_client::Request<MultipartForm>,
     ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
-	+ Send
-	+ 'static
+    + Send
+    + 'static
     where
         U: From<bytes::Bytes> + Send + 'static,
     {
@@ -629,8 +629,8 @@ pub fn is_agent_model(m: &ModelEntry) -> bool {
             "tts",
             "speech",
         ]
-            .iter()
-            .any(|k| t.contains(k))
+        .iter()
+        .any(|k| t.contains(k))
         {
             return false;
         }
@@ -728,15 +728,15 @@ pub async fn list_models_manual(
     }
     let resp: Resp = req.send().await?.error_for_status()?.json().await?;
     Ok(resp
-       .data
-       .into_iter()
-       .map(|i| ModelEntry {
-           display: i.id.clone(),
-           id: i.id,
-           context_length: None,
-           kind: None,
-       })
-       .collect())
+        .data
+        .into_iter()
+        .map(|i| ModelEntry {
+            display: i.id.clone(),
+            id: i.id,
+            context_length: None,
+            kind: None,
+        })
+        .collect())
 }
 
 async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result<String> {
@@ -1233,7 +1233,7 @@ async fn build_openai_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         OpenAiModel::Completions(m) => OpenAiAgent::Completions(
             builder::build_agent_inner(
@@ -1250,7 +1250,7 @@ async fn build_openai_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         OpenAiModel::Codex(m) => OpenAiAgent::Codex(
             builder::build_agent_inner(
@@ -1267,7 +1267,7 @@ async fn build_openai_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
     }
 }
@@ -1303,7 +1303,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         AnyModel::OpenAI(m) => AnyAgent::OpenAI(
             build_openai_agent(
@@ -1321,7 +1321,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(
             builder::build_agent_inner(
@@ -1338,7 +1338,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         AnyModel::Gemini(m) => AnyAgent::Gemini(
             builder::build_agent_inner(
@@ -1355,7 +1355,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         AnyModel::Ollama(m) => AnyAgent::Ollama(
             builder::build_agent_inner(
@@ -1372,7 +1372,7 @@ pub async fn build_agent(
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
-		.await,
+            .await,
         ),
         #[cfg(test)]
         AnyModel::Test(c) => AnyAgent::Test(TestAgent {
@@ -1395,6 +1395,8 @@ impl TestAgent {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let _ = event_tx
                     .send(AgentEvent::ToolCall {
+                        id: CompactString::new("test-tool-call"),
+                        call_id: None,
                         name: CompactString::new("bash"),
                         args: serde_json::json!({ "command": "bash -c 'sleep 500'" }),
                     })

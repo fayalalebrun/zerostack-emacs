@@ -2094,7 +2094,7 @@ pub async fn run_interactive(
                 // `/btw` can report what the agent is doing right now. The
                 // session itself only stores the final assistant text per turn.
                 match &event {
-                    AgentEvent::ToolCall { name, args } => {
+                    AgentEvent::ToolCall { name, args, .. } => {
                         if turn_trace.len() < TURN_TRACE_MAX {
                             turn_trace.push(compact_str::CompactString::from(format!(
                                 "→ {}",
