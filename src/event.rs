@@ -6,6 +6,7 @@ use crate::session::ProviderReasoning;
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub total_tokens: u64,
     pub cached_input_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub reasoning_tokens: u64,
@@ -16,6 +17,7 @@ impl From<rig::completion::Usage> for TokenUsage {
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
             cached_input_tokens: usage.cached_input_tokens,
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             reasoning_tokens: usage.reasoning_tokens,
@@ -31,12 +33,23 @@ impl TokenUsage {
     pub fn billable_output_tokens(self) -> u64 {
         self.output_tokens
     }
+
+    pub fn context_tokens(self) -> u64 {
+        if self.total_tokens > 0 {
+            return self.total_tokens;
+        }
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cached_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+    }
 }
 
 impl std::ops::AddAssign for TokenUsage {
     fn add_assign(&mut self, other: Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
         self.cached_input_tokens = self
             .cached_input_tokens
             .saturating_add(other.cached_input_tokens);

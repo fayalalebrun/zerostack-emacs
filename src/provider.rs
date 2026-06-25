@@ -876,6 +876,7 @@ impl AnyAgent {
                 response: prompt.to_string(),
                 reasoning: Vec::new(),
                 usage: crate::event::TokenUsage::default(),
+                context_usage: crate::event::TokenUsage::default(),
             }),
         }
     }

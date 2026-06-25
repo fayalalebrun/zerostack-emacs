@@ -716,6 +716,8 @@ async fn main() -> anyhow::Result<()> {
                     estimated_tokens: Session::estimate_tokens(&msg),
                     provider_reasoning: Vec::new(),
                     provider_usage: None,
+                    tool_call: None,
+                    tool_result: None,
                 });
                 crate::extras::advisor::set_session_messages(msgs);
             }
@@ -735,7 +737,7 @@ async fn main() -> anyhow::Result<()> {
                     MessageRole::Assistant,
                     &print_result.response,
                     print_result.reasoning,
-                    Some(print_result.usage.into()),
+                    Some(print_result.context_usage.into()),
                 );
                 session.total_input_tokens = session
                     .total_input_tokens

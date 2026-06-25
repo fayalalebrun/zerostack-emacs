@@ -96,6 +96,45 @@ fn effective_context_uses_latest_assistant_provider_usage() {
 }
 
 #[test]
+fn effective_context_uses_provider_total_tokens_when_available() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        "assistant reply",
+        Vec::new(),
+        Some(SessionTokenUsage {
+            input_tokens: 5000,
+            output_tokens: 200,
+            total_tokens: 5200,
+            cached_input_tokens: 300,
+            cache_creation_input_tokens: 400,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(s.effective_context_tokens(), 5200);
+}
+
+#[test]
+fn effective_context_includes_provider_cache_usage_without_total_tokens() {
+    let mut s = Session::new("anthropic", "claude", 128000);
+    s.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        "assistant reply",
+        Vec::new(),
+        Some(SessionTokenUsage {
+            input_tokens: 5000,
+            output_tokens: 200,
+            cached_input_tokens: 300,
+            cache_creation_input_tokens: 400,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(s.effective_context_tokens(), 5900);
+}
+
+#[test]
 fn calibration_ignores_zero_usage() {
     let mut s = Session::new("openai", "gpt-4", 128000);
     s.add_message(MessageRole::User, "msg");

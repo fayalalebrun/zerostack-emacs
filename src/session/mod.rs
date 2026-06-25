@@ -61,6 +61,8 @@ pub struct SessionTokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
     pub cached_input_tokens: u64,
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
@@ -70,7 +72,13 @@ pub struct SessionTokenUsage {
 
 impl SessionTokenUsage {
     pub fn context_tokens(self) -> u64 {
-        self.input_tokens.saturating_add(self.output_tokens)
+        if self.total_tokens > 0 {
+            return self.total_tokens;
+        }
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cached_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
     }
 }
 
@@ -79,6 +87,7 @@ impl From<crate::event::TokenUsage> for SessionTokenUsage {
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
             cached_input_tokens: usage.cached_input_tokens,
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             reasoning_tokens: usage.reasoning_tokens,

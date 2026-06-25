@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use compact_str::CompactString;
 use futures::StreamExt;
@@ -32,6 +32,7 @@ pub struct PrintRunResult {
     pub response: String,
     pub reasoning: Vec<ProviderReasoning>,
     pub usage: TokenUsage,
+    pub context_usage: TokenUsage,
 }
 
 /// Handle to an in-flight `/btw` side-question task. The `abort_handle` lets the
@@ -172,6 +173,9 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
         )));
     }
 
+    let replayed_tool_result_ids = replayed_tool_result_ids(&session.messages[first_kept..]);
+    let mut replayed_tool_call_ids = HashSet::new();
+
     for msg in &session.messages[first_kept..] {
         match msg.role {
             MessageRole::User => messages.push(Message::user(msg.content.to_string())),
@@ -186,12 +190,19 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
             // consistent.
             MessageRole::System => messages.push(Message::assistant(msg.content.to_string())),
             MessageRole::ToolCall => {
-                if let Some(message) = tool_call_message(msg) {
+                if let Some(call) = msg.tool_call.as_ref()
+                    && replayed_tool_result_ids.contains(call.id.as_str())
+                    && let Some(message) = tool_call_message(msg)
+                {
+                    replayed_tool_call_ids.insert(call.id.to_string());
                     messages.push(message);
                 }
             }
             MessageRole::ToolResult => {
-                if let Some(message) = tool_result_message(msg) {
+                if let Some(result) = msg.tool_result.as_ref()
+                    && replayed_tool_call_ids.contains(result.id.as_str())
+                    && let Some(message) = tool_result_message(msg)
+                {
                     messages.push(message);
                 }
             }
@@ -203,6 +214,14 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
     }
 
     messages
+}
+
+fn replayed_tool_result_ids(messages: &[SessionMessage]) -> HashSet<&str> {
+    messages
+        .iter()
+        .filter_map(|msg| msg.tool_result.as_ref())
+        .map(|result| result.id.as_str())
+        .collect()
 }
 
 fn tool_call_message(msg: &SessionMessage) -> Option<Message> {
@@ -539,6 +558,7 @@ where
     let mut full_response = String::new();
     let mut response_reasoning = Vec::new();
     let mut usage_total = TokenUsage::default();
+    let mut latest_usage: Option<TokenUsage> = None;
     let mut last_tool_name: Option<String> = None;
 
     while let Some(item) = stream.next().await {
@@ -596,7 +616,9 @@ where
             }
             Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                 if let Some(usage) = call.usage {
-                    usage_total += TokenUsage::from(usage);
+                    let usage = TokenUsage::from(usage);
+                    usage_total += usage;
+                    latest_usage = Some(usage);
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
@@ -609,10 +631,12 @@ where
     }
 
     println!();
+    let context_usage = latest_usage.unwrap_or(usage_total);
     Ok(PrintRunResult {
         response: full_response,
         reasoning: response_reasoning,
         usage: usage_total,
+        context_usage,
     })
 }
 
@@ -842,6 +866,31 @@ mod tests {
         let mut session = Session::new("openai", "gpt-5.1", 128000);
         session.add_message(MessageRole::ToolCall, "bash echo hi");
         session.add_message(MessageRole::ToolResult, "bash:\nhi");
+
+        let history = convert_history(&session);
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn convert_history_drops_unfinished_tool_call() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_message(MessageRole::User, "inspect it");
+        session.add_tool_call_structured(
+            "read",
+            &serde_json::json!({ "path": "src/main.rs" }),
+            "call_1",
+            Some("fc_1"),
+        );
+
+        let history = convert_history(&session);
+        assert_eq!(history.len(), 1);
+        assert!(matches!(history[0], Message::User { .. }));
+    }
+
+    #[test]
+    fn convert_history_drops_orphan_tool_result() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_tool_result_structured("read", "file contents", "call_1", Some("fc_1"));
 
         let history = convert_history(&session);
         assert!(history.is_empty());

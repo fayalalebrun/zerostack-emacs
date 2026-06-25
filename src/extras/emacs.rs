@@ -1793,21 +1793,9 @@ mod imp {
         server: &Arc<Server>,
         instructions: Option<&str>,
     ) -> anyhow::Result<CompactionOutcome> {
-        let qm = crate::config::quick_models_map(&server.cfg);
         let plan = {
             let session = server.session.lock().await;
-            let reserve = server.cfg.resolve_reserve_tokens(&session.model, &qm);
             let keep_recent = server.cfg.resolve_keep_recent_tokens();
-            let max_tokens = session.context_window.saturating_sub(reserve);
-
-            if session.effective_context_tokens() <= max_tokens {
-                return Ok(CompactionOutcome {
-                    compacted: false,
-                    messages: 0,
-                    saved_tokens: 0,
-                    message: "context within limits, no compression needed".to_string(),
-                });
-            }
 
             let cut_idx = Session::select_compaction_cut(&session.messages, keep_recent);
             if cut_idx == 0 {
@@ -2426,20 +2414,13 @@ mod imp {
                         .await;
                 }
                 AgentEvent::CompletionCall { call_index, usage } => {
-                    let (tokens, context_window) = {
-                        let mut session = server.session.lock().await;
-                        let real = usage.input_tokens.saturating_add(usage.output_tokens);
-                        if real > session.total_estimated_tokens {
-                            session.total_estimated_tokens = real;
-                        }
-                        (session.effective_context_tokens(), session.context_window)
-                    };
+                    let context_window = server.session.lock().await.context_window;
                     server
                         .broadcast_event(
                             "completion-call",
                             format!(
                                 " :turn {} :call-index {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
-                                turn, call_index, usage.input_tokens, usage.output_tokens, tokens, context_window,
+                                turn, call_index, usage.input_tokens, usage.output_tokens, usage.context_tokens(), context_window,
                             ),
                         )
                         .await;
@@ -2491,7 +2472,13 @@ mod imp {
                             session.input_token_cost,
                             session.output_token_cost,
                         );
-                        session.set_calibration(usage.input_tokens, usage.output_tokens);
+                        session.set_calibration(
+                            context_usage
+                                .input_tokens
+                                .saturating_add(context_usage.cached_input_tokens)
+                                .saturating_add(context_usage.cache_creation_input_tokens),
+                            context_usage.output_tokens,
+                        );
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
@@ -4272,6 +4259,27 @@ mod imp {
                 compact_outcome_fields(&outcome),
                 " :compacted t :messages 3 :saved-tokens 1200 :message \"compressed \\\"old\\\" context\"",
             );
+        }
+
+        #[tokio::test]
+        async fn compact_command_forces_compression_below_context_limit() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, _listener) = test_server(prompts);
+            {
+                let mut session = server.session.lock().await;
+                session.context_window = 1_000_000;
+                session.add_message(MessageRole::User, "oldest prompt");
+                session.add_message(MessageRole::Assistant, &"old ".repeat(300_000));
+                session.add_message(MessageRole::User, "recent prompt");
+            }
+
+            let outcome = compact_session(&server, None).await.unwrap();
+
+            assert!(outcome.compacted);
+            assert!(outcome.messages > 0);
+            let session = server.session.lock().await;
+            assert_eq!(session.messages[0].role, MessageRole::System);
+            let _ = std::fs::remove_dir_all(&registration.dir);
         }
 
         #[test]

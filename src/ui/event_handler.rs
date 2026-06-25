@@ -436,8 +436,13 @@ async fn handle_agent_done(
     );
     // Kept for old saved-session compatibility; current context pressure is
     // derived from the latest assistant message's provider_usage.
-
-    session.set_calibration(usage.input_tokens, usage.output_tokens);
+    session.set_calibration(
+        context_usage
+            .input_tokens
+            .saturating_add(context_usage.cached_input_tokens)
+            .saturating_add(context_usage.cache_creation_input_tokens),
+        context_usage.output_tokens,
+    );
     *agent_line_started = false;
     response_buf.clear();
     *response_start_line = None;
