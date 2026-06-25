@@ -2707,7 +2707,7 @@ mod imp {
                     "tool-render",
                     turn,
                     vec![WireLine::with_artifact(
-                        format!("  live output: {}", sanitize_output(&req.command)),
+                        live_output_line_text(&req.command),
                         "zs-link",
                         artifact,
                     )],
@@ -4195,6 +4195,10 @@ mod imp {
         }
     }
 
+    fn live_output_line_text(_command: &str) -> String {
+        "  live output".to_string()
+    }
+
     fn sexp_quote(input: &str) -> String {
         let mut out = String::with_capacity(input.len() + 2);
         out.push('"');
@@ -4593,6 +4597,9 @@ mod imp {
             assert_eq!(preview_text("hello\n\tworld"), "hello world");
             assert_eq!(safe_filename("Bash Tool/Output!"), "bash-tool-output");
             assert_eq!(format_bytes(1536), "1.5 KB");
+            let live_label = live_output_line_text("cargo test --workspace -- --nocapture");
+            assert_eq!(live_label, "  live output");
+            assert!(!live_label.contains("cargo test"));
         }
 
         #[test]
