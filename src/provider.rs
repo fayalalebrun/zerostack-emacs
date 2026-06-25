@@ -30,6 +30,7 @@ use crate::sandbox::Sandbox;
 use crate::session::SessionMessage;
 
 const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 pub struct ProviderConfig {
     pub kind: ProviderKind,
@@ -54,7 +55,7 @@ pub fn resolve_provider_config(
     }
     let kind = ProviderKind::from_name(name).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: '{}'. Supported: openrouter, openai, openai-codex, anthropic, gemini, ollama",
+            "Unknown provider: '{}'. Supported: openrouter, openai, openai-codex, deepseek, anthropic, gemini, ollama",
             name
         )
     })?;
@@ -105,6 +106,7 @@ pub(crate) fn default_model_for_provider(
         "anthropic" => "claude-sonnet-4-6",
         "openai" => "gpt-5.1",
         "openai-codex" | "codex" => "gpt-5.5",
+        "deepseek" => "deepseek-v4-pro",
         "gemini" | "google" => "gemini-2.5-pro",
         "openrouter" => "openrouter/auto", // OpenRouter's always-valid auto-router
         "ollama" => "llama3.1",
@@ -131,6 +133,7 @@ fn resolve_base_url(config: &ProviderConfig) -> Option<String> {
 pub enum OpenAiClient {
     Responses(openai::Client),
     Completions(openai::CompletionsClient),
+    DeepSeek(openai::CompletionsClient),
     Codex(openai::Client<CodexHttpClient>),
 }
 
@@ -139,6 +142,7 @@ impl OpenAiClient {
         match self {
             OpenAiClient::Responses(c) => OpenAiModel::Responses(c.completion_model(name)),
             OpenAiClient::Completions(c) => OpenAiModel::Completions(c.completion_model(name)),
+            OpenAiClient::DeepSeek(c) => OpenAiModel::Completions(c.completion_model(name)),
             OpenAiClient::Codex(c) => OpenAiModel::Codex(c.completion_model(name)),
         }
     }
@@ -549,6 +553,7 @@ impl AnyClient {
         match self {
             AnyClient::OpenRouter(_) => "openrouter",
             AnyClient::OpenAI(OpenAiClient::Codex(_)) => "openai-codex",
+            AnyClient::OpenAI(OpenAiClient::DeepSeek(_)) => "deepseek",
             AnyClient::OpenAI(_) => "openai",
             AnyClient::Anthropic(_) => "anthropic",
             AnyClient::Gemini(_) => "gemini",
@@ -676,6 +681,9 @@ impl AnyClient {
             AnyClient::OpenAI(OpenAiClient::Completions(_)) => {
                 anyhow::bail!("rig model listing unavailable for this client")
             }
+            AnyClient::OpenAI(OpenAiClient::DeepSeek(_)) => {
+                return Ok(catalog_model_entries("deepseek"));
+            }
             AnyClient::OpenAI(OpenAiClient::Codex(_)) => return Ok(codex_model_entries()),
             #[cfg(test)]
             AnyClient::Test(_) => return Ok(Vec::new()),
@@ -685,7 +693,11 @@ impl AnyClient {
 }
 
 fn codex_model_entries() -> Vec<ModelEntry> {
-    crate::models_catalog::catalog_entries("openai-codex")
+    catalog_model_entries("openai-codex")
+}
+
+fn catalog_model_entries(provider: &str) -> Vec<ModelEntry> {
+    crate::models_catalog::catalog_entries(provider)
         .unwrap_or(&[])
         .to_vec()
 }
@@ -1129,6 +1141,17 @@ pub fn create_client(
                 custom,
                 http_client,
             )?))
+        }
+        ProviderKind::DeepSeek => {
+            let custom = custom_providers.get(provider_name);
+            let http_client =
+                build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+            let client = openai::CompletionsClient::builder()
+                .api_key(&key)
+                .base_url(base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL))
+                .http_client(http_client)
+                .build()?;
+            Ok(AnyClient::OpenAI(OpenAiClient::DeepSeek(client)))
         }
         ProviderKind::Anthropic => build_anthropic_client(&key, base_url.as_deref()),
         ProviderKind::Gemini => build_gemini_client(&key, base_url.as_deref()),

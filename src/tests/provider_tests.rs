@@ -273,6 +273,36 @@ fn resolve_builtin_openrouter() {
 }
 
 #[test]
+fn resolve_builtin_deepseek() {
+    let cfg = resolve_provider_config("deepseek", &HashMap::new()).unwrap();
+    assert_eq!(cfg.kind, ProviderKind::DeepSeek);
+    assert!(cfg.base_url.is_none());
+}
+
+#[test]
+fn deepseek_client_builds_as_openai_compatible() {
+    let client = create_client("deepseek", Some("sk-test"), &HashMap::new(), None, None).unwrap();
+    assert_eq!(client.provider_name(), "deepseek");
+    assert!(matches!(
+        client,
+        AnyClient::OpenAI(OpenAiClient::DeepSeek(_))
+    ));
+}
+
+#[tokio::test]
+async fn deepseek_lists_static_zerostack_defaults() {
+    let client = create_client("deepseek", Some("sk-test"), &HashMap::new(), None, None).unwrap();
+    let models = client.list_models().await.unwrap();
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
+    let flash = models.iter().find(|m| m.id == "deepseek-v4-flash").unwrap();
+    assert_eq!(flash.display, "DeepSeek V4 Flash");
+    assert_eq!(flash.context_length, Some(1_000_000));
+    let pro = models.iter().find(|m| m.id == "deepseek-v4-pro").unwrap();
+    assert_eq!(pro.context_length, Some(1_000_000));
+}
+
+#[test]
 fn resolve_builtin_openai_codex() {
     let cfg = resolve_provider_config("openai-codex", &HashMap::new()).unwrap();
     assert_eq!(cfg.kind, ProviderKind::OpenAICodex);

@@ -34,6 +34,7 @@ pub enum ProviderKind {
     OpenRouter,
     OpenAI,
     OpenAICodex,
+    DeepSeek,
     Anthropic,
     Gemini,
     Ollama,
@@ -45,6 +46,7 @@ impl ProviderKind {
             "openrouter" => Some(Self::OpenRouter),
             "openai" | "custom" => Some(Self::OpenAI), // "custom" is an alias for OpenAI client
             "openai-codex" | "codex" => Some(Self::OpenAICodex),
+            "deepseek" => Some(Self::DeepSeek),
             "anthropic" => Some(Self::Anthropic),
             "gemini" | "google" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
@@ -180,6 +182,7 @@ impl AuthResolver {
         match self.provider_kind {
             ProviderKind::OpenAI => "OPENAI_API_KEY",
             ProviderKind::OpenAICodex => "OPENAI_CODEX_API_KEY",
+            ProviderKind::DeepSeek => "DEEPSEEK_API_KEY",
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::Gemini => "GEMINI_API_KEY",
             ProviderKind::Ollama => "OLLAMA_API_KEY",
@@ -192,6 +195,7 @@ impl AuthResolver {
             ProviderKind::OpenRouter => "openrouter",
             ProviderKind::OpenAI => "openai",
             ProviderKind::OpenAICodex => OPENAI_CODEX_PROVIDER,
+            ProviderKind::DeepSeek => "deepseek",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
             ProviderKind::Ollama => "ollama",
@@ -242,6 +246,7 @@ fn credential_provider_key(provider: &str) -> anyhow::Result<String> {
         Some(ProviderKind::OpenRouter) => "openrouter".to_string(),
         Some(ProviderKind::OpenAI) => "openai".to_string(),
         Some(ProviderKind::OpenAICodex) => OPENAI_CODEX_PROVIDER.to_string(),
+        Some(ProviderKind::DeepSeek) => "deepseek".to_string(),
         Some(ProviderKind::Anthropic) => "anthropic".to_string(),
         Some(ProviderKind::Gemini) => "gemini".to_string(),
         Some(ProviderKind::Ollama) => "ollama".to_string(),
@@ -1087,6 +1092,7 @@ mod codex_auth_tests {
     #[test]
     fn credential_provider_key_normalizes_known_providers_and_keeps_custom_names() {
         assert_eq!(credential_provider_key("google").unwrap(), "gemini");
+        assert_eq!(credential_provider_key("deepseek").unwrap(), "deepseek");
         assert_eq!(
             credential_provider_key("codex").unwrap(),
             OPENAI_CODEX_PROVIDER

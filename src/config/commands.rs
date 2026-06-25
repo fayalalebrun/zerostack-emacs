@@ -10,6 +10,7 @@ const BUILTIN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
     "openai-codex",
+    "deepseek",
     "gemini",
     "openrouter",
     "ollama",
@@ -140,6 +141,7 @@ pub fn canonical_provider_name(provider: &str) -> String {
         Some(ProviderKind::OpenRouter) => "openrouter".to_string(),
         Some(ProviderKind::OpenAI) => "openai".to_string(),
         Some(ProviderKind::OpenAICodex) => "openai-codex".to_string(),
+        Some(ProviderKind::DeepSeek) => "deepseek".to_string(),
         Some(ProviderKind::Anthropic) => "anthropic".to_string(),
         Some(ProviderKind::Gemini) => "gemini".to_string(),
         Some(ProviderKind::Ollama) => "ollama".to_string(),
@@ -193,6 +195,19 @@ mod tests {
         assert_eq!(model, "gpt-5.5");
         assert_eq!(cfg.provider.as_deref(), Some("openai-codex"));
         assert_eq!(cfg.model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn set_provider_accepts_direct_deepseek_without_changing_quick_default() {
+        let mut cfg = Config::default();
+
+        let (provider, model) = set_default_provider(&mut cfg, "deepseek").unwrap();
+
+        assert_eq!(provider, "deepseek");
+        assert_eq!(model, "deepseek-v4-pro");
+        assert_eq!(cfg.provider.as_deref(), Some("deepseek"));
+        assert_eq!(cfg.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(default_provider_name(&Config::default()), "openrouter");
     }
 
     #[test]
