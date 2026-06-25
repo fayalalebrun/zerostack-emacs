@@ -99,6 +99,42 @@ pub fn set_default_model(cfg: &mut Config, model: &str) -> anyhow::Result<(Strin
     Ok((provider, model.to_string()))
 }
 
+#[cfg(feature = "subagents")]
+pub fn set_subagent_provider(cfg: &mut Config, provider: &str) -> anyhow::Result<(String, String)> {
+    validate_provider(cfg, provider)?;
+    let provider = canonical_provider_name(provider);
+    let model = crate::provider::default_model_for_provider(&provider, cfg)
+        .map(|(model, _)| model)
+        .or_else(|| cfg.subagent_model.as_ref().map(ToString::to_string))
+        .or_else(|| cfg.model.as_ref().map(ToString::to_string))
+        .with_context(|| {
+            format!(
+                "provider '{}' has no default model; configure a subagent model first",
+                provider,
+            )
+        })?;
+
+    cfg.subagent_provider = Some(CompactString::new(&provider));
+    cfg.subagent_model = Some(CompactString::new(&model));
+    Ok((provider, model))
+}
+
+#[cfg(feature = "subagents")]
+pub fn set_subagent_model(cfg: &mut Config, model: &str) -> anyhow::Result<(String, String)> {
+    if model.trim().is_empty() {
+        anyhow::bail!("subagent model cannot be empty");
+    }
+    let provider = cfg
+        .subagent_provider
+        .as_deref()
+        .map(canonical_provider_name)
+        .unwrap_or_else(|| default_provider_name(cfg));
+    validate_provider(cfg, &provider)?;
+    cfg.subagent_provider = Some(CompactString::new(&provider));
+    cfg.subagent_model = Some(CompactString::new(model));
+    Ok((provider, model.to_string()))
+}
+
 pub fn canonical_provider_name(provider: &str) -> String {
     match crate::provider::parse_provider(provider) {
         Some(ProviderKind::OpenRouter) => "openrouter".to_string(),
@@ -192,6 +228,33 @@ mod tests {
         assert_eq!(model, "gemini-2.5-pro");
         assert_eq!(cfg.provider.as_deref(), Some("gemini"));
         assert_eq!(cfg.model.as_deref(), Some("gemini-2.5-pro"));
+    }
+
+    #[cfg(feature = "subagents")]
+    #[test]
+    fn set_subagent_provider_and_model_persist_subagent_defaults() {
+        let mut cfg = Config {
+            model: Some(CompactString::new("main-model")),
+            ..Config::default()
+        };
+
+        let (provider, model) = set_subagent_provider(&mut cfg, "openrouter").unwrap();
+
+        assert_eq!(provider, "openrouter");
+        assert!(!model.is_empty());
+        assert_eq!(cfg.subagent_provider.as_deref(), Some("openrouter"));
+        assert_eq!(cfg.subagent_model.as_deref(), Some(model.as_str()));
+
+        let (provider, model) =
+            set_subagent_model(&mut cfg, "deepseek/deepseek-chat-v3.1").unwrap();
+
+        assert_eq!(provider, "openrouter");
+        assert_eq!(model, "deepseek/deepseek-chat-v3.1");
+        assert_eq!(cfg.subagent_provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            cfg.subagent_model.as_deref(),
+            Some("deepseek/deepseek-chat-v3.1")
+        );
     }
 
     fn custom_provider_config(model: Option<&str>) -> CustomProviderConfig {
