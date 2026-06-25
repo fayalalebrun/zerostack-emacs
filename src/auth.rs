@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env::VarError;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -53,13 +53,14 @@ impl ProviderKind {
     }
 }
 
-/// Resolver for API keys with priority: CLI arg > env var > config file > custom provider name
+/// Resolver for API keys with priority: CLI arg > env var > auth file > config file.
 #[derive(Debug, Clone)]
 pub struct AuthResolver {
     pub provider_kind: ProviderKind,
     pub api_key_env_override: Option<String>,
     pub cli_key: Option<String>,
     pub config_api_keys: Option<HashMap<String, String>>,
+    pub auth_api_keys: Option<HashMap<String, String>>,
     /// Custom provider name (e.g., "local-vllm") for fallback key lookup
     pub custom_provider_name: Option<String>,
 }
@@ -71,6 +72,7 @@ impl AuthResolver {
             api_key_env_override: None,
             cli_key: None,
             config_api_keys: None,
+            auth_api_keys: None,
             custom_provider_name: None,
         }
     }
@@ -87,6 +89,11 @@ impl AuthResolver {
 
     pub fn with_config_keys(mut self, keys: Option<&HashMap<String, String>>) -> Self {
         self.config_api_keys = keys.cloned();
+        self
+    }
+
+    pub fn with_auth_keys(mut self, keys: Option<&HashMap<String, String>>) -> Self {
+        self.auth_api_keys = keys.cloned();
         self
     }
 
@@ -125,18 +132,14 @@ impl AuthResolver {
             return Ok(key);
         }
 
-        // Priority 3: Config file (try provider slug first, then custom provider name)
-        if let Some(ref keys) = self.config_api_keys {
-            let slug = self.provider_slug();
-            if let Some(key) = keys.get(slug).filter(|k| !k.is_empty()) {
-                return Ok(key.clone());
-            }
-            // Fallback to custom provider name for custom providers
-            if let Some(ref custom_name) = self.custom_provider_name
-                && let Some(key) = keys.get(custom_name).filter(|k| !k.is_empty())
-            {
-                return Ok(key.clone());
-            }
+        // Priority 3: Auth file (try provider slug first, then custom provider name)
+        if let Some(key) = self.key_from_map(self.auth_api_keys.as_ref()) {
+            return Ok(key);
+        }
+
+        // Priority 4: Config file (try provider slug first, then custom provider name)
+        if let Some(key) = self.key_from_map(self.config_api_keys.as_ref()) {
+            return Ok(key);
         }
 
         // Ollama doesn't require an API key
@@ -145,13 +148,32 @@ impl AuthResolver {
         }
 
         anyhow::bail!(
-            "No API key found. Set the {} environment variable, add it to config.api_keys under '{}' or '{}', or pass --api-key.",
+            "No API key found. Set the {} environment variable, run 'zerostack auth set-key {} <key>', add it to config.api_keys under '{}' or '{}', or pass --api-key.",
             env_var,
+            self.custom_provider_name
+                .as_deref()
+                .unwrap_or_else(|| self.provider_slug()),
             self.provider_slug(),
             self.custom_provider_name
                 .as_deref()
                 .unwrap_or("provider_name")
         )
+    }
+
+    fn key_from_map(&self, keys: Option<&HashMap<String, String>>) -> Option<String> {
+        if let Some(keys) = keys {
+            let slug = self.provider_slug();
+            if let Some(key) = keys.get(slug).filter(|k| !k.is_empty()) {
+                return Some(key.clone());
+            }
+            // Fallback to custom provider name for custom providers
+            if let Some(ref custom_name) = self.custom_provider_name
+                && let Some(key) = keys.get(custom_name).filter(|k| !k.is_empty())
+            {
+                return Some(key.clone());
+            }
+        }
+        None
     }
 
     fn env_var_name(&self) -> &'static str {
@@ -211,6 +233,23 @@ pub fn normalize_auth_provider(provider: &str) -> anyhow::Result<&'static str> {
     }
 }
 
+fn credential_provider_key(provider: &str) -> anyhow::Result<String> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        anyhow::bail!("provider cannot be empty");
+    }
+    let key = match ProviderKind::from_name(provider) {
+        Some(ProviderKind::OpenRouter) => "openrouter".to_string(),
+        Some(ProviderKind::OpenAI) => "openai".to_string(),
+        Some(ProviderKind::OpenAICodex) => OPENAI_CODEX_PROVIDER.to_string(),
+        Some(ProviderKind::Anthropic) => "anthropic".to_string(),
+        Some(ProviderKind::Gemini) => "gemini".to_string(),
+        Some(ProviderKind::Ollama) => "ollama".to_string(),
+        None => provider.to_string(),
+    };
+    Ok(key)
+}
+
 pub fn auth_path() -> PathBuf {
     crate::session::storage::config_path().join("auth.json")
 }
@@ -241,17 +280,62 @@ pub fn logout_provider(provider: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn set_api_key(provider: &str, key: &str) -> anyhow::Result<()> {
+    let provider = credential_provider_key(provider)?;
+    if key.trim().is_empty() {
+        anyhow::bail!("API key cannot be empty");
+    }
+    set_stored_credential(
+        &provider,
+        StoredCredential::ApiKey {
+            key: key.to_string(),
+        },
+    )?;
+    println!(
+        "stored API key for {provider}; credentials saved to {}",
+        auth_path().display()
+    );
+    Ok(())
+}
+
+pub fn unset_api_key(provider: &str) -> anyhow::Result<()> {
+    let provider = credential_provider_key(provider)?;
+    let path = auth_path();
+    let _lock = AuthFileLock::acquire(&path)?;
+    let mut data = load_auth_file(&path)?;
+    match data.0.get(&provider) {
+        Some(StoredCredential::ApiKey { .. }) => {
+            data.0.remove(&provider);
+            save_auth_file(&path, &data)?;
+            println!("removed API key for {provider}");
+            Ok(())
+        }
+        Some(StoredCredential::OAuth(_)) => {
+            anyhow::bail!(
+                "{provider} is configured with subscription auth; use 'zerostack auth logout {provider}'"
+            )
+        }
+        None => {
+            println!("no API key stored for {provider}");
+            Ok(())
+        }
+    }
+}
+
 pub fn print_auth_status(provider: Option<&str>) -> anyhow::Result<()> {
     let data = load_auth_file(&auth_path())?;
-    let providers: Vec<&str> = if let Some(provider) = provider {
-        vec![normalize_auth_provider(provider)?]
+    let providers: Vec<String> = if let Some(provider) = provider {
+        vec![credential_provider_key(provider)?]
     } else {
-        vec![OPENAI_CODEX_PROVIDER]
+        let mut providers = BTreeSet::new();
+        providers.insert(OPENAI_CODEX_PROVIDER.to_string());
+        providers.extend(data.0.keys().cloned());
+        providers.into_iter().collect()
     };
 
     println!("auth file: {}", auth_path().display());
     for provider in providers {
-        match data.0.get(provider) {
+        match data.0.get(&provider) {
             Some(StoredCredential::OAuth(cred)) => {
                 let status = if cred.expires <= now_millis() {
                     "expired"
@@ -271,6 +355,22 @@ pub fn print_auth_status(provider: Option<&str>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn stored_api_keys() -> anyhow::Result<HashMap<String, String>> {
+    api_keys_from_auth_file(&auth_path())
+}
+
+fn api_keys_from_auth_file(path: &Path) -> anyhow::Result<HashMap<String, String>> {
+    let data = load_auth_file(path)?;
+    Ok(data
+        .0
+        .into_iter()
+        .filter_map(|(provider, credential)| match credential {
+            StoredCredential::ApiKey { key } if !key.is_empty() => Some((provider, key)),
+            _ => None,
+        })
+        .collect())
 }
 
 pub async fn codex_request_auth() -> anyhow::Result<CodexRequestAuth> {
@@ -940,6 +1040,38 @@ mod codex_auth_tests {
     }
 
     #[test]
+    fn auth_file_filters_api_keys_for_resolver() {
+        let dir = std::env::temp_dir().join(format!(
+            "zerostack-auth-test-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        let mut data = AuthFile::default();
+        data.0.insert(
+            "openai".to_string(),
+            StoredCredential::ApiKey {
+                key: "sk-test".to_string(),
+            },
+        );
+        data.0.insert(
+            OPENAI_CODEX_PROVIDER.to_string(),
+            StoredCredential::OAuth(CodexOAuthCredential {
+                access: "access".to_string(),
+                refresh: "refresh".to_string(),
+                expires: 42,
+                account_id: "acct".to_string(),
+            }),
+        );
+        save_auth_file(&path, &data).unwrap();
+        let loaded = api_keys_from_auth_file(&path).unwrap();
+        assert_eq!(loaded.get("openai").map(String::as_str), Some("sk-test"));
+        assert!(!loaded.contains_key(OPENAI_CODEX_PROVIDER));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn provider_aliases_normalize_to_openai_codex() {
         assert_eq!(
             normalize_auth_provider("codex").unwrap(),
@@ -950,5 +1082,16 @@ mod codex_auth_tests {
             OPENAI_CODEX_PROVIDER
         );
         assert!(normalize_auth_provider("openai").is_err());
+    }
+
+    #[test]
+    fn credential_provider_key_normalizes_known_providers_and_keeps_custom_names() {
+        assert_eq!(credential_provider_key("google").unwrap(), "gemini");
+        assert_eq!(
+            credential_provider_key("codex").unwrap(),
+            OPENAI_CODEX_PROVIDER
+        );
+        assert_eq!(credential_provider_key("local-vllm").unwrap(), "local-vllm");
+        assert!(credential_provider_key(" ").is_err());
     }
 }

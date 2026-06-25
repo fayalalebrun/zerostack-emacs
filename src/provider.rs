@@ -702,9 +702,11 @@ pub async fn list_models_manual(
         .base_url
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no base_url"))?;
+    let auth_api_keys = crate::auth::stored_api_keys().ok();
     let key = AuthResolver::new(config.kind)
         .with_cli_key(cli_key)
         .with_env_override(config.api_key_env.as_deref())
+        .with_auth_keys(auth_api_keys.as_ref())
         .with_config_keys(config_api_keys)
         .with_custom_provider_name(Some(provider_name))
         .resolve()
@@ -1106,9 +1108,11 @@ pub fn create_client(
         )?));
     }
 
+    let auth_api_keys = crate::auth::stored_api_keys().ok();
     let resolver = AuthResolver::new(config.kind)
         .with_cli_key(api_key)
         .with_env_override(config.api_key_env.as_deref())
+        .with_auth_keys(auth_api_keys.as_ref())
         .with_config_keys(config_api_keys)
         .with_custom_provider_name(Some(provider_name));
     let key = resolver.resolve()?;

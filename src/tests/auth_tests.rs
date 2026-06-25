@@ -43,6 +43,36 @@ fn auth_resolver_returns_config_key_when_no_env() {
 }
 
 #[test]
+fn auth_resolver_returns_auth_key_before_config_key() {
+    let mut auth_keys = HashMap::new();
+    auth_keys.insert("openai".to_string(), "auth-key".to_string());
+    let mut config_keys = HashMap::new();
+    config_keys.insert("openai".to_string(), "config-key".to_string());
+
+    let env = mock_env(vec![]);
+    let resolver = AuthResolver::new(ProviderKind::OpenAI)
+        .with_cli_key(None)
+        .with_auth_keys(Some(&auth_keys))
+        .with_config_keys(Some(&config_keys));
+    let result = resolver.resolve_with_env(env).unwrap();
+    assert_eq!(result, "auth-key");
+}
+
+#[test]
+fn auth_resolver_env_takes_priority_over_auth_key() {
+    let env = mock_env(vec![("OPENAI_API_KEY", "env-key")]);
+    let mut auth_keys = HashMap::new();
+    auth_keys.insert("openai".to_string(), "auth-key".to_string());
+
+    let resolver = AuthResolver::new(ProviderKind::OpenAI)
+        .with_cli_key(None)
+        .with_auth_keys(Some(&auth_keys))
+        .with_config_keys(None);
+    let result = resolver.resolve_with_env(env).unwrap();
+    assert_eq!(result, "env-key");
+}
+
+#[test]
 fn auth_resolver_cli_key_takes_priority_over_env() {
     let env = mock_env(vec![("OPENAI_API_KEY", "env-key")]);
     let resolver = AuthResolver::new(ProviderKind::OpenAI)
@@ -87,6 +117,21 @@ fn auth_resolver_falls_back_to_custom_provider_name() {
         .with_custom_provider_name(Some("local-vllm"));
     let result = resolver.resolve_with_env(env).unwrap();
     assert_eq!(result, "custom-provider-key");
+}
+
+#[test]
+fn auth_resolver_falls_back_to_custom_provider_name_from_auth_keys() {
+    let env = mock_env(vec![]);
+    let mut keys = HashMap::new();
+    keys.insert("local-vllm".to_string(), "custom-auth-key".to_string());
+
+    let resolver = AuthResolver::new(ProviderKind::OpenAI)
+        .with_cli_key(None)
+        .with_auth_keys(Some(&keys))
+        .with_config_keys(None)
+        .with_custom_provider_name(Some("local-vllm"));
+    let result = resolver.resolve_with_env(env).unwrap();
+    assert_eq!(result, "custom-auth-key");
 }
 
 #[test]

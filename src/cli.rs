@@ -340,6 +340,22 @@ pub enum AuthCommand {
         #[arg(help = "Optional provider to show: codex or openai-codex")]
         provider: Option<String>,
     },
+    #[command(about = "Store an API key for a provider")]
+    SetKey {
+        #[arg(
+            help = "Provider name, for example openai, anthropic, openrouter, or a custom provider"
+        )]
+        provider: String,
+        #[arg(help = "API key to store")]
+        key: String,
+    },
+    #[command(about = "Remove a stored API key for a provider")]
+    UnsetKey {
+        #[arg(
+            help = "Provider name, for example openai, anthropic, openrouter, or a custom provider"
+        )]
+        provider: String,
+    },
 }
 
 impl Cli {

@@ -128,6 +128,12 @@ async fn main() -> anyhow::Result<()> {
             cli::AuthCommand::Status { provider } => {
                 auth::print_auth_status(provider.as_deref())?;
             }
+            cli::AuthCommand::SetKey { provider, key } => {
+                auth::set_api_key(provider, key)?;
+            }
+            cli::AuthCommand::UnsetKey { provider } => {
+                auth::unset_api_key(provider)?;
+            }
         }
         return Ok(());
     }
