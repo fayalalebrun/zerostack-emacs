@@ -669,6 +669,8 @@ mod imp {
             "fork" => handle_fork(&server, &cmd, out).await,
             "provider" => handle_provider(&server, &cmd, out).await,
             "model" => handle_model(&server, &cmd, out).await,
+            "subagent-provider" => handle_subagent_provider(&server, &cmd, out).await,
+            "subagent-model" => handle_subagent_model(&server, &cmd, out).await,
             "mcp" => handle_mcp(&server, &cmd, out).await,
             "thinking" | "reasoning" => handle_thinking(&server, &cmd, out).await,
             "loop-start" => handle_loop_start(server.clone(), &cmd, out).await,
@@ -1071,6 +1073,118 @@ mod imp {
         Ok(())
     }
 
+    #[cfg(feature = "subagents")]
+    async fn handle_subagent_provider(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        use crate::extras::subagents;
+
+        ensure_idle_for_switch(server, "subagent provider").await?;
+        let raw_provider = string_arg(cmd, "provider")
+            .or_else(|| atom_arg(cmd, "provider"))
+            .context("subagent-provider requires :provider")?;
+        config::commands::validate_provider(&server.cfg, &raw_provider)?;
+        let provider = config::commands::canonical_provider_name(&raw_provider);
+        let model = crate::provider::default_model_for_provider(&provider, &server.cfg)
+            .map(|(model, _)| model)
+            .or_else(|| subagents::current_provider_model().map(|(_, model)| model))
+            .context("subagent provider has no default model; set subagent model first")?;
+
+        let client = crate::provider::create_client(
+            &provider,
+            server.cli.api_key.as_deref(),
+            &server.cfg.custom_providers_map(),
+            server.cfg.api_keys.as_ref(),
+            None,
+        )?;
+
+        ensure_idle_for_switch(server, "subagent provider").await?;
+        subagents::set_client_and_model(client, provider.clone(), model.clone());
+
+        let message = format!("switched subagent provider: {provider} (model: {model})");
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :subagent-provider {} :subagent-model {} :message {}",
+                sexp_quote(&provider),
+                sexp_quote(&model),
+                sexp_quote(&message),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "subagents"))]
+    async fn handle_subagent_provider(
+        _server: &Arc<Server>,
+        _cmd: &Command,
+        _out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("subagents support not enabled")
+    }
+
+    #[cfg(feature = "subagents")]
+    async fn handle_subagent_model(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        use crate::extras::subagents;
+
+        ensure_idle_for_switch(server, "subagent model").await?;
+        let model = string_arg(cmd, "model")
+            .or_else(|| atom_arg(cmd, "model"))
+            .context("subagent-model requires :model")?;
+        if model.trim().is_empty() {
+            anyhow::bail!("subagent model cannot be empty");
+        }
+
+        let (provider, _) = if let Some(current) = subagents::current_provider_model() {
+            current
+        } else {
+            let session = server.session.lock().await;
+            (session.provider.to_string(), session.model.to_string())
+        };
+
+        let client = crate::provider::create_client(
+            &provider,
+            server.cli.api_key.as_deref(),
+            &server.cfg.custom_providers_map(),
+            server.cfg.api_keys.as_ref(),
+            None,
+        )?;
+
+        ensure_idle_for_switch(server, "subagent model").await?;
+        subagents::set_client_and_model(client, provider.clone(), model.clone());
+
+        let message = format!("switched subagent model: {model}");
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :subagent-provider {} :subagent-model {} :message {}",
+                sexp_quote(&provider),
+                sexp_quote(&model),
+                sexp_quote(&message),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "subagents"))]
+    async fn handle_subagent_model(
+        _server: &Arc<Server>,
+        _cmd: &Command,
+        _out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("subagents support not enabled")
+    }
+
     async fn ensure_idle_for_switch(server: &Arc<Server>, kind: &str) -> anyhow::Result<()> {
         let mutable = server.mutable.lock().await;
         if mutable.running {
@@ -1150,7 +1264,7 @@ mod imp {
             .to_string();
 
         if sub_provider == client.provider_name() {
-            subagents::set_client_and_model(client.clone(), sub_model);
+            subagents::set_client_and_model(client.clone(), sub_provider, sub_model);
             return;
         }
 
@@ -1161,7 +1275,7 @@ mod imp {
             server.cfg.api_keys.as_ref(),
             None,
         ) {
-            Ok(client) => subagents::set_client_and_model(client, sub_model),
+            Ok(client) => subagents::set_client_and_model(client, sub_provider, sub_model),
             Err(e) => tracing::warn!(
                 "Could not propagate Emacs provider/model switch to subagent provider '{}' ({}); keeping previous subagent config",
                 sub_provider,
@@ -4278,9 +4392,28 @@ mod imp {
             assert_eq!(request_arg(&model).as_deref(), Some("6"));
             assert_eq!(string_arg(&model, "model").as_deref(), Some("gpt-5.5"));
 
-            let thinking = parse_command("(thinking :request 7 :level off)").unwrap();
+            let subagent_provider =
+                parse_command("(subagent-provider :request 7 :provider \"openrouter\")").unwrap();
+            assert_eq!(subagent_provider.name, "subagent-provider");
+            assert_eq!(request_arg(&subagent_provider).as_deref(), Some("7"));
+            assert_eq!(
+                string_arg(&subagent_provider, "provider").as_deref(),
+                Some("openrouter")
+            );
+
+            let subagent_model =
+                parse_command("(subagent-model :request 8 :model \"deepseek/deepseek-chat-v3.1\")")
+                    .unwrap();
+            assert_eq!(subagent_model.name, "subagent-model");
+            assert_eq!(request_arg(&subagent_model).as_deref(), Some("8"));
+            assert_eq!(
+                string_arg(&subagent_model, "model").as_deref(),
+                Some("deepseek/deepseek-chat-v3.1")
+            );
+
+            let thinking = parse_command("(thinking :request 9 :level off)").unwrap();
             assert_eq!(thinking.name, "thinking");
-            assert_eq!(request_arg(&thinking).as_deref(), Some("7"));
+            assert_eq!(request_arg(&thinking).as_deref(), Some("9"));
             assert_eq!(atom_arg(&thinking, "level").as_deref(), Some("off"));
         }
 

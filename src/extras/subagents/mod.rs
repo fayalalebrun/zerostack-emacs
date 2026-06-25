@@ -11,6 +11,7 @@ pub(crate) mod task_tool;
 
 pub(crate) struct SubagentConfig {
     pub client: AnyClient,
+    pub provider_name: String,
     pub model_name: String,
     pub max_turns: usize,
     pub config: crate::config::Config,
@@ -45,6 +46,7 @@ where
 
 pub fn init(
     client: AnyClient,
+    provider_name: String,
     model_name: String,
     max_turns: usize,
     config: crate::config::Config,
@@ -53,6 +55,7 @@ pub fn init(
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(SubagentConfig {
         client,
+        provider_name,
         model_name,
         max_turns,
         config,
@@ -61,10 +64,11 @@ pub fn init(
     });
 }
 
-pub fn set_client_and_model(client: AnyClient, model_name: String) {
+pub fn set_client_and_model(client: AnyClient, provider_name: String, model_name: String) {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(cfg) = guard.as_mut() {
         cfg.client = client;
+        cfg.provider_name = provider_name;
         cfg.model_name = model_name;
     }
 }
@@ -74,4 +78,11 @@ pub fn set_model_name(model_name: String) {
     if let Some(cfg) = guard.as_mut() {
         cfg.model_name = model_name;
     }
+}
+
+pub fn current_provider_model() -> Option<(String, String)> {
+    let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .map(|cfg| (cfg.provider_name.clone(), cfg.model_name.clone()))
 }

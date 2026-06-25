@@ -214,8 +214,6 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (set-keymap-parent map special-mode-map)
   (define-key map (kbd "g") #'zerostack-board-refresh)
   (define-key map (kbd "c") #'zerostack-board-create-at-point)
-  (define-key map (kbd "p") #'zerostack-board-set-default-provider)
-  (define-key map (kbd "m") #'zerostack-board-set-default-model)
   (define-key map (kbd "d") #'zerostack-board-set-description-at-point)
   (define-key map (kbd "s") #'zerostack-board-stop-at-point)
   (define-key map (kbd "x") #'zerostack-board-trash-at-point)
@@ -246,6 +244,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--worktree-dir nil)
 (defvar-local zerostack--provider nil)
 (defvar-local zerostack--model nil)
+(defvar-local zerostack--subagent-provider nil)
+(defvar-local zerostack--subagent-model nil)
 (defvar-local zerostack--tokens nil)
 (defvar-local zerostack--context-window nil)
 (defvar-local zerostack--protocol nil)
@@ -298,6 +298,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--worktree-dir default-directory)
   (setq-local zerostack--provider nil)
   (setq-local zerostack--model nil)
+  (setq-local zerostack--subagent-provider nil)
+  (setq-local zerostack--subagent-model nil)
   (setq-local zerostack--tokens nil)
   (setq-local zerostack--context-window nil)
   (setq-local zerostack--metadata-status-request nil)
@@ -649,6 +651,56 @@ The root is resolved with Projectile when available, then `project.el', then
     (zerostack-board-refresh)
     (message "zerostack default %s" (replace-regexp-in-string "\n" ", " output))))
 
+(defun zerostack-board-set-default-subagent-provider ()
+  "Switch the persisted default zerostack subagent provider."
+  (interactive)
+  (let* ((provider (zerostack--read-provider "Default subagent provider: "))
+         (output (zerostack--config-command "set-subagent-provider" provider)))
+    (zerostack-board-refresh)
+    (message "zerostack subagent default %s" (replace-regexp-in-string "\n" ", " output))))
+
+(defun zerostack-board-set-default-subagent-model ()
+  "Switch the persisted default zerostack subagent model."
+  (interactive)
+  (let* ((model (zerostack--read-model nil nil))
+         (output (zerostack--config-command "set-subagent-model" model)))
+    (zerostack-board-refresh)
+    (message "zerostack subagent default %s" (replace-regexp-in-string "\n" ", " output))))
+
+(defun zerostack-board--config-label (value fallback)
+  "Return display label for a board config VALUE."
+  (let ((text (and value (format "%s" value))))
+    (if (and text (not (string-empty-p text))) text fallback)))
+
+(defun zerostack-board--insert-config-button (label action)
+  "Insert a board config button LABEL that calls ACTION."
+  (insert-text-button label
+                      'action (lambda (_) (call-interactively action))
+                      'follow-link t
+                      'face 'zerostack-link-face
+                      'help-echo "RET selects this zerostack default"))
+
+(defun zerostack-board--insert-config-controls (snapshot)
+  "Insert clickable provider/model controls for main and subagent defaults."
+  (let ((fields (cdr snapshot)))
+    (insert "Main: ")
+    (zerostack-board--insert-config-button
+     (zerostack-board--config-label (plist-get fields :provider) "provider")
+     #'zerostack-board-set-default-provider)
+    (insert " / ")
+    (zerostack-board--insert-config-button
+     (zerostack-board--config-label (plist-get fields :model) "model")
+     #'zerostack-board-set-default-model)
+    (insert "\nSubagents: ")
+    (zerostack-board--insert-config-button
+     (zerostack-board--config-label (plist-get fields :subagent-provider) "provider")
+     #'zerostack-board-set-default-subagent-provider)
+    (insert " / ")
+    (zerostack-board--insert-config-button
+     (zerostack-board--config-label (plist-get fields :subagent-model) "model")
+     #'zerostack-board-set-default-subagent-model))
+  (insert "\n"))
+
 (defun zerostack-board--render (snapshot)
   "Render board SNAPSHOT as a tree."
   (unless (eq (car-safe snapshot) 'zerostack-board)
@@ -660,7 +712,9 @@ The root is resolved with Projectile when available, then `project.el', then
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
-    (insert (propertize "g refresh, RET open, c create, d describe, p provider, m model, s stop, x trash\n\n" 'face 'zerostack-muted-face))
+    (insert (propertize "g refresh, RET open, c create, d describe, s stop, x trash\n" 'face 'zerostack-muted-face))
+    (zerostack-board--insert-config-controls snapshot)
+    (insert "\n")
     (if (or projects all-workspaces)
         (progn
           (dolist (project projects)
@@ -1549,6 +1603,23 @@ Return non-nil when DIRECTORY was newly added."
                            :request (zerostack--next-request)
                            :model model))
 
+(defun zerostack-subagent-provider-menu (provider)
+  "Switch the current zerostack session's subagent provider to PROVIDER."
+  (interactive (list (zerostack--read-provider "Session subagent provider: " zerostack--subagent-provider)))
+  (zerostack--send-command 'subagent-provider
+                           :request (zerostack--next-request)
+                           :provider provider))
+
+(defun zerostack-subagent-model-menu (model)
+  "Switch the current zerostack session's subagent model to MODEL."
+  (interactive
+   (let* ((provider (or zerostack--subagent-provider zerostack--provider))
+          (model (zerostack--read-model provider zerostack--subagent-model)))
+     (list model)))
+  (zerostack--send-command 'subagent-model
+                           :request (zerostack--next-request)
+                           :model model))
+
 (defun zerostack-mcp ()
   "List configured MCP servers and tools."
   (interactive)
@@ -2005,7 +2076,7 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _M_ MCP  _v_ view  _o_ artifact
+_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _M_ MCP  _v_ view  _o_ artifact
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2016,6 +2087,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
     ("r" zerostack-reasoning-effort-menu)
     ("p" zerostack-provider-menu)
     ("m" zerostack-model-menu)
+    ("P" zerostack-subagent-provider-menu)
+    ("S" zerostack-subagent-model-menu)
     ("M" zerostack-mcp)
     ("v" zerostack-set-view)
     ("o" zerostack-open-last-artifact)))
@@ -2032,7 +2105,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
   (let* ((commands (append '("skill" "attach" "compact" "fork" "loop" "thinking")
                            (when (zerostack--reasoning-effort-supported-p)
                              '("reasoning"))
-                           '("provider" "model" "mcp" "view" "artifact")))
+                           '("provider" "model" "subagent-provider" "subagent-model" "mcp" "view" "artifact")))
          (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
@@ -2044,6 +2117,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
       ("reasoning" (call-interactively #'zerostack-reasoning-effort-menu))
       ("provider" (call-interactively #'zerostack-provider-menu))
       ("model" (call-interactively #'zerostack-model-menu))
+      ("subagent-provider" (call-interactively #'zerostack-subagent-provider-menu))
+      ("subagent-model" (call-interactively #'zerostack-subagent-model-menu))
       ("mcp" (call-interactively #'zerostack-mcp))
       ("view" (call-interactively #'zerostack-set-view))
       ("artifact" (zerostack-open-last-artifact)))))
@@ -2239,6 +2314,10 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
     (setq zerostack--provider (format "%s" provider)))
   (when-let ((model (plist-get plist :model)))
     (setq zerostack--model (format "%s" model)))
+  (when-let ((provider (plist-get plist :subagent-provider)))
+    (setq zerostack--subagent-provider (format "%s" provider)))
+  (when-let ((model (plist-get plist :subagent-model)))
+    (setq zerostack--subagent-model (format "%s" model)))
   (when-let ((tokens (plist-get plist :tokens)))
     (setq zerostack--tokens tokens))
   (when-let ((window (plist-get plist :context-window)))
@@ -2815,6 +2894,8 @@ inserted into the transcript."
                (and zerostack--thinking-level
                     (format "thinking:%s" zerostack--thinking-level))
                zerostack--model
+               (and zerostack--subagent-model
+                    (format "subagent:%s" zerostack--subagent-model))
                (zerostack--format-token-usage zerostack--tokens zerostack--context-window)))
    " | "))
 

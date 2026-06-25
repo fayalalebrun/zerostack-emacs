@@ -170,7 +170,7 @@ async fn sync_subagent_with_main(ctx: &mut SlashCtx<'_>) {
     );
 
     if provider == ctx.client.provider_name() {
-        subagents::set_client_and_model(ctx.client.clone(), model);
+        subagents::set_client_and_model(ctx.client.clone(), provider, model);
         return;
     }
 
@@ -181,7 +181,7 @@ async fn sync_subagent_with_main(ctx: &mut SlashCtx<'_>) {
         ctx.cfg.api_keys.as_ref(),
         None,
     ) {
-        Ok(client) => subagents::set_client_and_model(client, model),
+        Ok(client) => subagents::set_client_and_model(client, provider, model),
         Err(e) => tracing::warn!(
             "Could not propagate main model to subagent provider '{}' ({}); keeping previous subagent config",
             provider,
@@ -457,7 +457,7 @@ async fn handle_model_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow
 
     if parts.len() < 2 {
         let (provider_name, model_name) =
-            subagents::with_config(|cfg| (cfg.client.provider_name(), cfg.model_name.clone()));
+            subagents::with_config(|cfg| (cfg.provider_name.clone(), cfg.model_name.clone()));
         write_ok(
             ctx.renderer,
             format!("current subagent model: {} / {}", provider_name, model_name),
@@ -529,7 +529,11 @@ async fn handle_models_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyho
             )?;
             let model = new_client.completion_model(q.model.to_string());
             model_for_subagent(ctx, model).await?;
-            subagents::set_client_and_model(new_client, q.model.to_string());
+            subagents::set_client_and_model(
+                new_client,
+                q.provider.to_string(),
+                q.model.to_string(),
+            );
         } else {
             let model = ctx.client.completion_model(q.model.to_string());
             model_for_subagent(ctx, model).await?;

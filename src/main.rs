@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
         let qm = config::quick_models_map(&cfg);
 
         // Resolve subagent model: subagent_model config > subagent_provider + model > main model
-        let (sub_provider, mut sub_model) = if let Some(sa_model) = &cfg.subagent_model {
+        let (mut sub_provider, mut sub_model) = if let Some(sa_model) = &cfg.subagent_model {
             if let Some(q) = qm.get(sa_model.as_str()) {
                 (q.provider.clone(), q.model.clone())
             } else {
@@ -297,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
                         provider
                     );
                     sub_model = model.clone();
+                    sub_provider = provider.clone();
                     client.clone()
                 }
             }
@@ -304,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
 
         crate::extras::subagents::init(
             sub_client,
+            sub_provider.to_string(),
             sub_model.to_string(),
             task_max_turns,
             cfg.clone(),
@@ -838,6 +840,20 @@ fn handle_config_command(
             config::save_config(cfg)?;
             println!("provider {provider}");
             println!("model {model}");
+        }
+        #[cfg(feature = "subagents")]
+        cli::ConfigCommand::SetSubagentProvider { provider } => {
+            let (provider, model) = config::commands::set_subagent_provider(cfg, provider)?;
+            config::save_config(cfg)?;
+            println!("subagent_provider {provider}");
+            println!("subagent_model {model}");
+        }
+        #[cfg(feature = "subagents")]
+        cli::ConfigCommand::SetSubagentModel { model } => {
+            let (provider, model) = config::commands::set_subagent_model(cfg, model)?;
+            config::save_config(cfg)?;
+            println!("subagent_provider {provider}");
+            println!("subagent_model {model}");
         }
     }
     Ok(())

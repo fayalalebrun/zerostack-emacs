@@ -95,6 +95,10 @@
 (defconst zerostack-test--board-snapshot
   '(zerostack-board
     :version 1
+    :provider "openai-codex"
+    :model "gpt-5.5"
+    :subagent-provider "openrouter"
+    :subagent-model "deepseek/deepseek-chat-v3.1"
     :projects
     ((:name "live-repo"
 	    :path "/repo/live"
@@ -161,13 +165,13 @@
 			  :provider "provider"
 			  :created-at "2026-06-18T00:00:00Z"
 			  :updated-at "2026-06-18T00:00:00Z"
-		      :message-count 1
-		      :tokens 1
-		      :context-window 100
-		      :cost 0.0
-		      :alive nil
-		      :pid nil
-		      :socket nil))))))
+			  :message-count 1
+			  :tokens 1
+			  :context-window 100
+			  :cost 0.0
+			  :alive nil
+			  :pid nil
+			  :socket nil))))))
     :loose-workspaces
     ((:path "/nongit/work"
 	    :alive nil
@@ -326,8 +330,8 @@
                       :version 1
                       :projects
                       ((:path "/repo" :repo "/repo" :name "repo" :alive t
-                        :worktrees ((:path "/repo/wt" :branch "main" :description "main work"
-                                     :alive t :sessions (,session)))))
+                              :worktrees ((:path "/repo/wt" :branch "main" :description "main work"
+						 :alive t :sessions (,session)))))
                       :loose-workspaces nil)))
      (zerostack-test--expand-project "/repo")
      (zerostack-board--render snapshot)
@@ -348,18 +352,18 @@
                       :version 1
                       :projects
                       ((:path "/repo" :repo "/repo" :name "repo" :alive t
-                        :worktrees ((:path "/repo/live" :branch "live" :description "live work"
-                                     :alive t :sessions (,live-session ,old-session))
-                                    (:path "/repo/old" :branch "old" :description "old work"
-                                     :alive nil :sessions nil)
-                                    (:path "/repo/old2" :branch "old2" :description "old work 2"
-                                     :alive nil :sessions nil)
-                                    (:path "/repo/old3" :branch "old3" :description "old work 3"
-                                     :alive nil :sessions nil)
-                                    (:path "/repo/old4" :branch "old4" :description "old work 4"
-                                     :alive nil :sessions nil)
-                                    (:path "/repo/old5" :branch "old5" :description "old work 5"
-                                     :alive nil :sessions nil))))
+                              :worktrees ((:path "/repo/live" :branch "live" :description "live work"
+						 :alive t :sessions (,live-session ,old-session))
+					  (:path "/repo/old" :branch "old" :description "old work"
+						 :alive nil :sessions nil)
+					  (:path "/repo/old2" :branch "old2" :description "old work 2"
+						 :alive nil :sessions nil)
+					  (:path "/repo/old3" :branch "old3" :description "old work 3"
+						 :alive nil :sessions nil)
+					  (:path "/repo/old4" :branch "old4" :description "old work 4"
+						 :alive nil :sessions nil)
+					  (:path "/repo/old5" :branch "old5" :description "old work 5"
+						 :alive nil :sessions nil))))
                       :loose-workspaces nil)))
      (setq-local zerostack-board--snapshot snapshot)
      (zerostack-board--render snapshot)
@@ -396,22 +400,22 @@
                       :loose-workspaces
                       ((:path "/nongit/many" :alive t :sessions ,sessions)))))
      (setq-local zerostack-board--snapshot snapshot)
-      (zerostack-board--render snapshot)
-      (let ((text (buffer-string)))
-        (should (string-match-p "workspace  many/  /nongit/many  \\+ show 5 more" text))
-        (should-not (string-match-p "Recent one" text))
-        (should-not (string-match-p "^    + show 5 more" text))
-        (should-not (string-match-p "Hidden five" text)))
-      (goto-char (point-min))
-      (search-forward "show 5 more")
-      (let ((item (get-text-property (point) 'zerostack-board-item)))
-        (should (eq (plist-get item :type) 'load-more)))
-      (zerostack-board-open-at-point)
-      (let ((text (buffer-string)))
-        (should (string-match-p "Recent one" text))
-        (should-not (string-match-p "Hidden five" text))
-        (should (string-match-p (regexp-quote "    + show 5 more") text))
-        (should-not (string-match-p "workspace  many/  /nongit/many  \\+ show 5 more" text))))))
+     (zerostack-board--render snapshot)
+     (let ((text (buffer-string)))
+       (should (string-match-p "workspace  many/  /nongit/many  \\+ show 5 more" text))
+       (should-not (string-match-p "Recent one" text))
+       (should-not (string-match-p "^    + show 5 more" text))
+       (should-not (string-match-p "Hidden five" text)))
+     (goto-char (point-min))
+     (search-forward "show 5 more")
+     (let ((item (get-text-property (point) 'zerostack-board-item)))
+       (should (eq (plist-get item :type) 'load-more)))
+     (zerostack-board-open-at-point)
+     (let ((text (buffer-string)))
+       (should (string-match-p "Recent one" text))
+       (should-not (string-match-p "Hidden five" text))
+       (should (string-match-p (regexp-quote "    + show 5 more") text))
+       (should-not (string-match-p "workspace  many/  /nongit/many  \\+ show 5 more" text))))))
 
 (ert-deftest zerostack-test-board-renders-pinned-directory ()
   (let* ((dir (make-temp-file "zerostack-pinned" t))
@@ -629,28 +633,28 @@
 
 (ert-deftest zerostack-test-startup-error-surfaces-stderr ()
   (let ((script (make-temp-file "zerostack-fail" nil nil
-                                 "#!/bin/sh\nprintf '%s\n' 'Error: missing key' >&2\nexit 1\n"))
+                                "#!/bin/sh\nprintf '%s\n' 'Error: missing key' >&2\nexit 1\n"))
         (zerostack-notice-timeout 5.0)
         process
         stderr-buffer)
     (set-file-modes script #o700)
     (unwind-protect
         (zerostack-test--with-buffer
-          (let ((zerostack-command script))
-            (zerostack--start-server nil)
-            (setq process zerostack--server-process)
-            (setq stderr-buffer (process-get process 'zerostack-stderr-buffer))
-            (zerostack-test--wait-until
-              (lambda ()
-                (and (not (process-live-p process))
-                     (not zerostack--startup-timer)
-                     zerostack--notice
-                     (string-match-p "Error: missing key" zerostack--notice))))
-            (should (string-match-p "server .*Error: missing key" zerostack--notice))
-            (should (equal zerostack--last-notice zerostack--notice))
-            (should-not zerostack--status)
-            (should-not zerostack--startup-timer)
-            (should-not zerostack--server-process)))
+         (let ((zerostack-command script))
+           (zerostack--start-server nil)
+           (setq process zerostack--server-process)
+           (setq stderr-buffer (process-get process 'zerostack-stderr-buffer))
+           (zerostack-test--wait-until
+            (lambda ()
+              (and (not (process-live-p process))
+                   (not zerostack--startup-timer)
+                   zerostack--notice
+                   (string-match-p "Error: missing key" zerostack--notice))))
+           (should (string-match-p "server .*Error: missing key" zerostack--notice))
+           (should (equal zerostack--last-notice zerostack--notice))
+           (should-not zerostack--status)
+           (should-not zerostack--startup-timer)
+           (should-not zerostack--server-process)))
       (when (and process (process-live-p process))
         (delete-process process))
       (when (buffer-live-p stderr-buffer)
@@ -797,7 +801,7 @@
 
 (ert-deftest zerostack-test-board-default-provider-model-actions ()
   (zerostack-test--with-board-buffer
-   (let ((choices '("openai-codex" "gpt-5.5"))
+   (let ((choices '("openai-codex" "gpt-5.5" "openrouter" "deepseek/deepseek-chat-v3.1"))
          calls
          (refreshes 0))
      (cl-letf (((symbol-function 'completing-read)
@@ -812,15 +816,35 @@
                   ('("models") "gpt-5.5\ngpt-5.1\n")
                   ('("set-provider" "openai-codex") "provider openai-codex\nmodel gpt-5.5\n")
                   ('("set-model" "gpt-5.5") "provider openai-codex\nmodel gpt-5.5\n")
+                  ('("set-subagent-provider" "openrouter") "subagent_provider openrouter\nsubagent_model deepseek/deepseek-chat-v3.1\n")
+                  ('("set-subagent-model" "deepseek/deepseek-chat-v3.1") "subagent_provider openrouter\nsubagent_model deepseek/deepseek-chat-v3.1\n")
                   (_ (error "unexpected config args: %S" args))))))
          (zerostack-board-set-default-provider)
-         (zerostack-board-set-default-model)))
+         (zerostack-board-set-default-model)
+         (zerostack-board-set-default-subagent-provider)
+         (zerostack-board-set-default-subagent-model)))
      (should (equal (nreverse calls)
                     '(("providers")
                       ("set-provider" "openai-codex")
                       ("models")
-                      ("set-model" "gpt-5.5"))))
-     (should (= refreshes 2)))))
+                      ("set-model" "gpt-5.5")
+                      ("providers")
+                      ("set-subagent-provider" "openrouter")
+                      ("models")
+                      ("set-subagent-model" "deepseek/deepseek-chat-v3.1"))))
+     (should (= refreshes 4)))))
+
+(ert-deftest zerostack-test-board-renders-provider-model-buttons ()
+  (zerostack-test--with-board-buffer
+   (zerostack-board--render zerostack-test--board-snapshot)
+   (goto-char (point-min))
+   (should (search-forward "Main: " nil t))
+   (should (search-forward "openai-codex" nil t))
+   (should (search-forward " / " nil t))
+   (should (search-forward "gpt-5.5" nil t))
+   (should (search-forward "Subagents: " nil t))
+   (should (search-forward "openrouter" nil t))
+   (should (search-forward "deepseek/deepseek-chat-v3.1" nil t))))
 
 (ert-deftest zerostack-test-sends-all-protocol-commands ()
   (zerostack-test--with-buffer
@@ -834,6 +858,8 @@
      (zerostack-set-view 120)
      (zerostack-provider-menu "openai-codex")
      (zerostack-model-menu "gpt-5.5")
+     (zerostack-subagent-provider-menu "openrouter")
+     (zerostack-subagent-model-menu "deepseek/deepseek-chat-v3.1")
      (zerostack-mcp)
      (zerostack-thinking-menu "off")
      (zerostack-send-prompt "hello\nworld")
@@ -853,7 +879,7 @@
 
      (let ((forms (zerostack-test--sent-forms sent)))
        (should (equal (mapcar #'car forms)
-                      '(hello attach render set-view provider model mcp thinking prompt compact compact loop-start
+                      '(hello attach render set-view provider model subagent-provider subagent-model mcp thinking prompt compact compact loop-start
                               loop-status loop-stop file-add file-list file-drop-all abort
                               permission-answer list-sessions status)))
        (should (equal (nth 0 forms) '(hello :request 1 :protocol 1 :cols 100)))
@@ -862,26 +888,28 @@
        (should (equal (nth 3 forms) '(set-view :request 4 :cols 120)))
        (should (equal (nth 4 forms) '(provider :request 5 :provider "openai-codex")))
        (should (equal (nth 5 forms) '(model :request 6 :model "gpt-5.5")))
-       (should (equal (nth 6 forms) '(mcp :request 7)))
-       (should (equal (nth 7 forms) '(thinking :request 8 :level "off")))
-       (should (equal (nth 8 forms) '(prompt :request 9 :text "hello\nworld")))
-       (should (equal (nth 9 forms) '(compact :request 10)))
-       (should (equal (nth 10 forms)
-                      '(compact :request 11 :instructions "keep recent tool output")))
-       (should (equal (nth 11 forms)
-                      '(loop-start :request 12 :prompt "fix bugs" :max 2
+       (should (equal (nth 6 forms) '(subagent-provider :request 7 :provider "openrouter")))
+       (should (equal (nth 7 forms) '(subagent-model :request 8 :model "deepseek/deepseek-chat-v3.1")))
+       (should (equal (nth 8 forms) '(mcp :request 9)))
+       (should (equal (nth 9 forms) '(thinking :request 10 :level "off")))
+       (should (equal (nth 10 forms) '(prompt :request 11 :text "hello\nworld")))
+       (should (equal (nth 11 forms) '(compact :request 12)))
+       (should (equal (nth 12 forms)
+                      '(compact :request 13 :instructions "keep recent tool output")))
+       (should (equal (nth 13 forms)
+                      '(loop-start :request 14 :prompt "fix bugs" :max 2
                                    :run "cargo test")))
-       (should (equal (nth 12 forms) '(loop-status :request 13)))
-       (should (equal (nth 13 forms) '(loop-stop :request 14)))
-       (should (equal (nth 14 forms) '(file-add :request 15 :path "/tmp/photo.png")))
-       (should (equal (nth 15 forms) '(file-list :request 16)))
-       (should (equal (nth 16 forms) '(file-drop-all :request 17)))
-       (should (equal (nth 17 forms) '(abort :request 18)))
-       (should (equal (nth 18 forms)
+       (should (equal (nth 14 forms) '(loop-status :request 15)))
+       (should (equal (nth 15 forms) '(loop-stop :request 16)))
+       (should (equal (nth 16 forms) '(file-add :request 17 :path "/tmp/photo.png")))
+       (should (equal (nth 17 forms) '(file-list :request 18)))
+       (should (equal (nth 18 forms) '(file-drop-all :request 19)))
+       (should (equal (nth 19 forms) '(abort :request 20)))
+       (should (equal (nth 20 forms)
                       '(permission-answer :request 42 :decision allow-always
                                           :pattern "bash cargo test")))
-       (should (equal (nth 19 forms) '(list-sessions :request 19 :limit 7)))
-       (should (equal (nth 20 forms) '(status :request 20)))))))
+       (should (equal (nth 21 forms) '(list-sessions :request 21 :limit 7)))
+       (should (equal (nth 22 forms) '(status :request 22)))))))
 
 (ert-deftest zerostack-test-send-form-escapes-newlines ()
   (zerostack-test--with-buffer
@@ -909,7 +937,7 @@
 (ert-deftest zerostack-test-command-menu-fallback-dispatches-to-protocol ()
   (zerostack-test--with-buffer
    (let (dispatched)
-     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "mcp" "view")))
+     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "subagent-provider" "subagent-model" "mcp" "view")))
        (cl-letf (((symbol-function 'completing-read)
                   (lambda (&rest _) (pop choices)))
                  ((symbol-function 'zerostack-attachment-menu)
@@ -924,13 +952,17 @@
                   (lambda (&optional _) (interactive) (push 'provider dispatched)))
                  ((symbol-function 'zerostack-model-menu)
                   (lambda (&optional _) (interactive) (push 'model dispatched)))
+                 ((symbol-function 'zerostack-subagent-provider-menu)
+                  (lambda (&optional _) (interactive) (push 'subagent-provider dispatched)))
+                 ((symbol-function 'zerostack-subagent-model-menu)
+                  (lambda (&optional _) (interactive) (push 'subagent-model dispatched)))
                  ((symbol-function 'zerostack-mcp)
                   (lambda () (interactive) (push 'mcp dispatched)))
                  ((symbol-function 'zerostack-set-view)
                   (lambda () (interactive) (push 'view dispatched))))
-         (dotimes (_ 8)
+         (dotimes (_ 10)
            (zerostack--command-menu-fallback))))
-     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model mcp view))))))
+     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model subagent-provider subagent-model mcp view))))))
 
 (ert-deftest zerostack-test-command-menu-permission-selection ()
   (zerostack-test--with-buffer
@@ -1153,9 +1185,9 @@
      (goto-char (point-max))
      (insert "/compact now")
      (zerostack-send-input)
-      (let ((forms (zerostack-test--sent-forms sent)))
-        (should (equal (cadr forms)
-                       '(prompt :request 2 :text "/compact now")))))))
+     (let ((forms (zerostack-test--sent-forms sent)))
+       (should (equal (cadr forms)
+                      '(prompt :request 2 :text "/compact now")))))))
 
 (ert-deftest zerostack-test-input-line-shows-thinking-level ()
   (zerostack-test--with-buffer
@@ -1333,11 +1365,11 @@
    (zerostack--replace-lines
     0
     '((:text "Title bold code table"
-       :face zs-normal
-       :spans ((:text "Title" :face zs-heading)
-               (:text " bold" :face zs-bold)
-               (:text " code" :face zs-code)
-               (:text " table" :face zs-table)))))
+	     :face zs-normal
+	     :spans ((:text "Title" :face zs-heading)
+		     (:text " bold" :face zs-bold)
+		     (:text " code" :face zs-code)
+		     (:text " table" :face zs-table)))))
    (let ((title (text-property-any (point-min) (point-max) 'face 'zerostack-heading-face))
          (bold (text-property-any (point-min) (point-max) 'face 'zerostack-bold-face))
          (code (text-property-any (point-min) (point-max) 'face 'zerostack-code-face))
@@ -1428,9 +1460,9 @@
    (goto-char (point-min))
    (search-forward "transcript")
    (let ((expected (point)))
-      (zerostack--set-status "permission #8 bash")
-      (should (= (point) expected))
-      (should (looking-back "transcript" (line-beginning-position))))))
+     (zerostack--set-status "permission #8 bash")
+     (should (= (point) expected))
+     (should (looking-back "transcript" (line-beginning-position))))))
 
 (ert-deftest zerostack-test-transient-notice-expires-without-clearing-status ()
   (zerostack-test--with-buffer

@@ -307,6 +307,18 @@ pub enum ConfigCommand {
         #[arg(help = "Model id")]
         model: String,
     },
+    #[cfg(feature = "subagents")]
+    #[command(about = "Persist the default subagent provider and reset model to its default")]
+    SetSubagentProvider {
+        #[arg(help = "Provider name")]
+        provider: String,
+    },
+    #[cfg(feature = "subagents")]
+    #[command(about = "Persist the default subagent model for the current subagent provider")]
+    SetSubagentModel {
+        #[arg(help = "Model id")]
+        model: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

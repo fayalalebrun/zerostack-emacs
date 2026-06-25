@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::Context as _;
 use serde::Deserialize;
 
+use crate::config::{self, Config};
 use crate::session::{Session, storage};
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,10 @@ struct BoardProject {
 
 #[derive(Debug, Clone)]
 struct BoardSnapshot {
+    provider: String,
+    model: String,
+    subagent_provider: String,
+    subagent_model: String,
     projects: Vec<BoardProject>,
     loose_workspaces: Vec<BoardLooseWorkspace>,
 }
@@ -95,6 +100,8 @@ pub fn print_board() -> anyhow::Result<()> {
 }
 
 fn collect_board() -> anyhow::Result<BoardSnapshot> {
+    let (cfg, _) = config::load();
+    let (provider, model, subagent_provider, subagent_model) = board_defaults(&cfg);
     let sessions = storage::find_all_sessions()?;
     let live = live_sessions_by_id()?;
     let mut projects: HashMap<PathBuf, ProjectBuilder> = HashMap::new();
@@ -153,9 +160,47 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
         .collect::<Vec<_>>();
     sort_loose_workspaces(&mut loose_workspaces);
     Ok(BoardSnapshot {
+        provider,
+        model,
+        subagent_provider,
+        subagent_model,
         projects,
         loose_workspaces,
     })
+}
+
+fn board_defaults(cfg: &Config) -> (String, String, String, String) {
+    let provider = config::commands::default_provider_name(cfg);
+    let model = cfg
+        .model
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| {
+            crate::provider::default_model_for_provider(&provider, cfg).map(|(model, _)| model)
+        })
+        .unwrap_or_else(|| "model".to_string());
+    #[cfg(feature = "subagents")]
+    let subagent_provider = cfg
+        .subagent_provider
+        .as_ref()
+        .map(|provider| config::commands::canonical_provider_name(provider))
+        .unwrap_or_else(|| provider.clone());
+    #[cfg(not(feature = "subagents"))]
+    let subagent_provider = provider.clone();
+    #[cfg(feature = "subagents")]
+    let subagent_model = cfg
+        .subagent_model
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| {
+            crate::provider::default_model_for_provider(&subagent_provider, cfg)
+                .map(|(model, _)| model)
+        })
+        .unwrap_or_else(|| model.clone());
+    #[cfg(not(feature = "subagents"))]
+    let subagent_model = model.clone();
+
+    (provider, model, subagent_provider, subagent_model)
 }
 
 fn workspace_path(dir: &Path) -> PathBuf {
@@ -521,7 +566,11 @@ fn socket_alive(path: &Path) -> bool {
 
 fn board_to_sexp(snapshot: &BoardSnapshot) -> String {
     format!(
-        "(zerostack-board :version 1 :projects ({}) :loose-workspaces ({}))",
+        "(zerostack-board :version 1 :provider {} :model {} :subagent-provider {} :subagent-model {} :projects ({}) :loose-workspaces ({}))",
+        sexp_quote(&snapshot.provider),
+        sexp_quote(&snapshot.model),
+        sexp_quote(&snapshot.subagent_provider),
+        sexp_quote(&snapshot.subagent_model),
         snapshot
             .projects
             .iter()
@@ -771,6 +820,10 @@ mod tests {
         }];
 
         let snapshot = BoardSnapshot {
+            provider: "openai-codex".to_string(),
+            model: "gpt-5.5".to_string(),
+            subagent_provider: "openrouter".to_string(),
+            subagent_model: "deepseek/deepseek-chat-v3.1".to_string(),
             projects,
             loose_workspaces: vec![BoardLooseWorkspace {
                 path: PathBuf::from("/nongit"),
@@ -781,7 +834,10 @@ mod tests {
         };
 
         let sexp = board_to_sexp(&snapshot);
-        assert!(sexp.starts_with("(zerostack-board :version 1 :projects"));
+        assert!(sexp.starts_with("(zerostack-board :version 1 :provider \"openai-codex\""));
+        assert!(sexp.contains(":model \"gpt-5.5\""));
+        assert!(sexp.contains(":subagent-provider \"openrouter\""));
+        assert!(sexp.contains(":subagent-model \"deepseek/deepseek-chat-v3.1\""));
         assert!(sexp.contains(":loose-workspaces"));
         assert!(sexp.contains(":path \"/nongit\""));
         assert!(sexp.contains(":description \"branch \\\"description\\\"\""));
