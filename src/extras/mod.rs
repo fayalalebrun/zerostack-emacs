@@ -26,6 +26,8 @@ pub mod chain;
 
 pub mod emacs;
 
+pub mod emacs_attention;
+
 pub mod emacs_board;
 
 #[cfg(feature = "multimodal")]

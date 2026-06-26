@@ -40,6 +40,12 @@ pub struct Cli {
     )]
     pub emacs_board: bool,
 
+    #[arg(
+        long = "emacs-dismiss-attention",
+        help = "Dismiss a session from the Emacs board Needs attention section"
+    )]
+    pub emacs_dismiss_attention: Option<String>,
+
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
 

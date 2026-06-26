@@ -679,6 +679,7 @@ mod imp {
             "abort" => handle_abort(&server, &cmd, out).await,
             "permission-answer" => handle_permission_answer(&server, &cmd, out).await,
             "list-sessions" => handle_list_sessions(&cmd, out).await,
+            "dismiss-attention" => handle_dismiss_attention(&server, &cmd, out).await,
             "status" => handle_status(&server, &cmd, out).await,
             _ => Err(anyhow::anyhow!("unknown command '{}'", cmd.name)),
         };
@@ -718,6 +719,10 @@ mod imp {
         cmd: &Command,
         out: &mpsc::Sender<String>,
     ) -> anyhow::Result<()> {
+        let session_id = server.current_session_id().await;
+        if let Err(e) = crate::extras::emacs_attention::dismiss(&session_id) {
+            tracing::warn!("failed to dismiss Emacs attention marker: {e}");
+        }
         if let Some(cols) = usize_arg(cmd, "cols") {
             server.mutable.lock().await.cols = cols.max(20);
         }
@@ -1558,6 +1563,7 @@ mod imp {
             mutable.turn = mutable.turn.saturating_add(1);
             mutable.turn
         };
+        dismiss_attention_marker(&server).await;
         tokio::spawn(run_prompt(server, text, turn));
         send_ok(out, request_arg(cmd), format!(" :turn {}", turn)).await;
         Ok(())
@@ -1604,6 +1610,7 @@ mod imp {
             (mutable.turn, iteration_prompt, fields)
         };
 
+        dismiss_attention_marker(&server).await;
         server
             .broadcast_event("loop-started", format!(" :turn {}{}", turn, fields))
             .await;
@@ -1737,6 +1744,7 @@ mod imp {
             mutable.turn = mutable.turn.saturating_add(1);
             mutable.turn
         };
+        dismiss_attention_marker(server).await;
         if let Some(ss) = server.status_signals.as_ref() {
             ss.send_start();
         }
@@ -1975,6 +1983,25 @@ mod imp {
         Ok(())
     }
 
+    async fn handle_dismiss_attention(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let session_id = match string_arg(cmd, "session").or_else(|| string_arg(cmd, "id")) {
+            Some(session_id) => session_id,
+            None => server.current_session_id().await,
+        };
+        crate::extras::emacs_attention::dismiss(&session_id)?;
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(" :session {}", sexp_quote(&session_id)),
+        )
+        .await;
+        Ok(())
+    }
+
     async fn handle_status(
         server: &Arc<Server>,
         cmd: &Command,
@@ -2038,8 +2065,14 @@ mod imp {
                 false
             }
         };
-        if cleared_current_turn && let Some(ss) = server.status_signals.as_ref() {
-            ss.send_stop();
+        if cleared_current_turn {
+            if let Some(ss) = server.status_signals.as_ref() {
+                ss.send_stop();
+            }
+            let session_id = server.current_session_id().await;
+            if let Err(e) = crate::extras::emacs_attention::mark(&session_id) {
+                tracing::warn!("failed to mark Emacs attention: {e}");
+            }
         }
         (cleared_current_turn, response)
     }
@@ -2658,7 +2691,8 @@ mod imp {
             tracing::warn!("failed to save Emacs loop transcript: {e}");
         }
 
-        {
+        let mut dismiss_attention = false;
+        let next = {
             let mut mutable = server.mutable.lock().await;
             if mutable.turn != completed_turn || mutable.running {
                 NextLoop::None
@@ -2675,6 +2709,7 @@ mod imp {
                     let fields = loop_fields(ls);
                     mutable.running = true;
                     mutable.turn = mutable.turn.saturating_add(1);
+                    dismiss_attention = true;
                     NextLoop::Start {
                         turn: mutable.turn,
                         prompt,
@@ -2684,6 +2719,17 @@ mod imp {
             } else {
                 NextLoop::None
             }
+        };
+        if dismiss_attention {
+            dismiss_attention_marker(&server).await;
+        }
+        next
+    }
+
+    async fn dismiss_attention_marker(server: &Arc<Server>) {
+        let session_id = server.current_session_id().await;
+        if let Err(e) = crate::extras::emacs_attention::dismiss(&session_id) {
+            tracing::warn!("failed to dismiss Emacs attention marker: {e}");
         }
     }
 

@@ -244,6 +244,7 @@ The socket protocol is one escaped S-expression per line. Core client commands:
 | `(abort)` | Abort the active turn. |
 | `(permission-answer :request 9 :decision allow-once)` | Answer a permission prompt. Decisions are `allow-once`, `allow-always`, or `deny`; `allow-always` may include `:pattern "..."`. |
 | `(list-sessions :limit 50)` | Return live native Emacs sessions. |
+| `(dismiss-attention :session "...")` | Remove a session from the board Needs attention section. Defaults to the current session when `:session` is omitted. |
 
 When a loop is active, one-off `(prompt ...)` commands are rejected until the loop
 is stopped. Loop events are broadcast as ordinary protocol events:
@@ -363,6 +364,21 @@ The snapshot shape is:
 ```lisp
 (zerostack-board
  :version 1
+ :needs-attention
+ ((:id "..."
+   :short-id "12345678"
+   :title "ready session"
+   :cwd "/repo/zerostack"
+   :model "..."
+   :provider "..."
+   :created-at "..."
+   :updated-at "..."
+   :message-count 12
+   :tokens 3400
+   :cost 0.012300
+   :alive t
+   :pid 12345
+   :socket "/run/user/1000/zerostack/sessions/<id>/sock"))
  :projects
  ((:name "zerostack"
    :path "/repo/zerostack"
@@ -410,6 +426,11 @@ The snapshot shape is:
      :socket nil))))
 ```
 
+`:needs-attention` contains saved sessions that completed a native Emacs turn
+since they were last opened. Opening the session removes it from the section;
+the inline `dismiss` button runs `zerostack --emacs-dismiss-attention <id>` to
+remove it without opening.
+
 Projects are canonical Git repos, keyed by Git common dir. Project children are
 the worktrees Git reports for that repo and which still exist in the filesystem,
 including worktrees that currently have no sessions. Worktree rows in Emacs show
@@ -455,7 +476,7 @@ Key bindings in `zerostack-board-mode`:
 | Key | Action |
 | --- | ------ |
 | `g` | Refresh the board snapshot. |
-| `RET` | Open the item at point. Projects/worktrees open with `dired`; live sessions connect to their socket; inactive sessions start `zerostack --emacs --session <id>`. |
+| `RET` | Open the item at point. Projects/worktrees open with `dired`; live sessions connect to their socket; inactive sessions start `zerostack --emacs --session <id>`. Needs-attention rows also have a clickable `dismiss` button. |
 | `c` | Create from the item at point. On a project, prompts for a branch/path/description and runs `git worktree add` from Emacs. On a worktree, starts a new `zerostack --emacs` session with that worktree as `default-directory`. |
 | `p` | Persist a new default provider in zerostack config. The model is reset to that provider's configured/default model. |
 | `m` | Persist a new default model in zerostack config for the current default provider. |

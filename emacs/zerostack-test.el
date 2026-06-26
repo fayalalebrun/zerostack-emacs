@@ -221,6 +221,42 @@
    (search-forward "project live-repo")
    (should (eq (get-text-property (point) 'face) 'zerostack-board-alive-face))))
 
+(ert-deftest zerostack-test-board-renders-needs-attention-and-dismisses ()
+  (zerostack-test--with-board-buffer
+   (let* ((attention (zerostack-test--session-plist "attention-session" "Ready session" "2026-06-21T00:00:00Z" t))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :needs-attention (,attention)
+                      :projects nil
+                      :loose-workspaces nil))
+          dismissed refreshed)
+     (cl-letf (((symbol-function 'call-process)
+                (lambda (program _infile _buffer _display &rest args)
+                  (push (cons program args) dismissed)
+                  0))
+               ((symbol-function 'yes-or-no-p)
+                (lambda (&rest _) (error "should not confirm attention dismiss")))
+               ((symbol-function 'zerostack-board-refresh)
+                (lambda () (setq refreshed t))))
+       (zerostack-board--render snapshot)
+       (let ((text (buffer-string)))
+         (should (string-match-p "needs attention" text))
+         (should (string-match-p "Ready session" text))
+         (should (string-match-p "/repo/many" text))
+         (should (string-match-p "dismiss" text)))
+       (goto-char (point-min))
+       (search-forward "dismiss")
+       (push-button (button-at (1- (point))))
+       (goto-char (point-min))
+       (search-forward "Ready session")
+       (zerostack-board-stop-at-point)
+       (goto-char (point-min))
+       (search-forward "Ready session")
+       (zerostack-board-trash-at-point)
+       (should (equal dismissed
+                      (make-list 3 (cons zerostack-command '("--emacs-dismiss-attention" "attention-session")))))
+       (should refreshed)))))
+
 (ert-deftest zerostack-test-board-colors-open-thinking-session-yellow ()
   (let ((chat (generate-new-buffer " *zerostack-open-session*")))
     (unwind-protect

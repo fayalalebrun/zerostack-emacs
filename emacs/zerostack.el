@@ -711,7 +711,8 @@ The root is resolved with Projectile when available, then `project.el', then
   "Render board SNAPSHOT as a tree."
   (unless (eq (car-safe snapshot) 'zerostack-board)
     (error "not a zerostack board snapshot: %S" snapshot))
-  (let* ((projects (plist-get (cdr snapshot) :projects))
+  (let* ((needs-attention (plist-get (cdr snapshot) :needs-attention))
+         (projects (plist-get (cdr snapshot) :projects))
          (loose-workspaces (plist-get (cdr snapshot) :loose-workspaces))
          (pinned-workspaces (zerostack-board--pinned-workspaces snapshot))
          (all-workspaces (append loose-workspaces pinned-workspaces))
@@ -721,7 +722,12 @@ The root is resolved with Projectile when available, then `project.el', then
     (insert (propertize "g refresh, RET open, c create, d describe, s stop, x trash\n" 'face 'zerostack-muted-face))
     (zerostack-board--insert-config-controls snapshot)
     (insert "\n")
-    (if (or projects all-workspaces)
+    (when needs-attention
+      (insert (propertize "needs attention\n" 'face 'zerostack-heading-face))
+      (dolist (session needs-attention)
+        (zerostack-board--insert-attention-session session))
+      (insert "\n"))
+    (if (or needs-attention projects all-workspaces)
         (progn
           (dolist (project projects)
             (zerostack-board--insert-project project))
@@ -902,6 +908,45 @@ The root is resolved with Projectile when available, then `project.el', then
       (insert "  ")
       (apply #'zerostack-board--insert-load-more-inline load-more))
     (insert "\n")))
+
+(defun zerostack-board--insert-attention-session (session)
+  "Insert one SESSION that needs attention."
+  (let* ((cwd (or (plist-get session :cwd) ""))
+         (title (zerostack-board--one-line (plist-get session :title)))
+         (display-title (if (string-empty-p title) "(untitled)" title))
+         (item (plist-put (zerostack-board--session-item session cwd) :attention t))
+         (start (point)))
+    (insert (format "    %s  %s  " display-title cwd))
+    (add-text-properties
+     start (point)
+     `(mouse-face highlight
+                  help-echo "RET opens this zerostack session"
+                  keymap ,zerostack-board-mode-map
+                  follow-link t
+                  zerostack-board-item ,item))
+    (zerostack-board--insert-dismiss-button session)
+    (insert "\n")))
+
+(defun zerostack-board--insert-dismiss-button (session)
+  "Insert a dismiss button for SESSION."
+  (insert-text-button "dismiss"
+                      'action (lambda (_)
+                                (zerostack-board--dismiss-attention session))
+                      'follow-link t
+                      'help-echo "Remove this session from Needs attention"))
+
+(defun zerostack-board--dismiss-attention (session)
+  "Dismiss SESSION from the Needs attention section."
+  (let ((id (plist-get session :id)))
+    (unless id
+      (user-error "Session has no id"))
+    (with-temp-buffer
+      (let ((status (call-process zerostack-command nil t nil "--emacs-dismiss-attention" id)))
+        (unless (zerop status)
+          (user-error "zerostack --emacs-dismiss-attention exited with %s: %s"
+                      status
+                      (string-trim (buffer-string))))))
+    (zerostack-board-refresh)))
 
 (defun zerostack-board--insert-session-list (key sessions worktree-path &optional suppress-load-more subdued-session-id)
   "Insert paginated SESSIONS for KEY under WORKTREE-PATH."
@@ -1271,7 +1316,9 @@ Return non-nil when DIRECTORY was newly added."
   (let ((item (zerostack-board--item-at-point event)))
     (pcase (plist-get item :type)
       ('session
-       (zerostack-board--stop-session item))
+       (if (plist-get item :attention)
+           (zerostack-board--dismiss-attention item)
+         (zerostack-board--stop-session item)))
       ((or 'worktree 'workspace)
        (if-let ((session (plist-get item :session-item)))
            (zerostack-board--stop-session session)
@@ -1289,9 +1336,11 @@ Return non-nil when DIRECTORY was newly added."
          (when (yes-or-no-p (format "Move worktree %s to trash? " path))
            (zerostack-board--trash-worktree item))))
       ('session
-       (let ((title (or (plist-get item :title) (plist-get item :id))))
-         (when (yes-or-no-p (format "Move session %s to trash? " title))
-           (zerostack-board--trash-session item))))
+       (if (plist-get item :attention)
+           (zerostack-board--dismiss-attention item)
+         (let ((title (or (plist-get item :title) (plist-get item :id))))
+           (when (yes-or-no-p (format "Move session %s to trash? " title))
+             (zerostack-board--trash-session item)))))
       (_
        (message "Press x on a worktree or session to move it to trash")))))
 
@@ -2443,7 +2492,9 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (zerostack--clear-pending-permissions)
      (setq zerostack--loop-active nil
            zerostack--loop-label nil)
-     (zerostack--set-thinking nil))
+     (zerostack--set-thinking nil)
+     (when-let ((message (plist-get plist :message)))
+       (zerostack--set-notice message)))
     (_
      (zerostack--append-local-line
       (format "event: %S" (plist-get plist :type))

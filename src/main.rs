@@ -148,6 +148,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(session_id) = &cli.emacs_dismiss_attention {
+        extras::emacs_attention::dismiss(session_id)?;
+        return Ok(());
+    }
+
     if cli.resume && cli.session.is_none() {
         print_sessions();
         return Ok(());

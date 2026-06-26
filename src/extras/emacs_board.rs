@@ -24,6 +24,7 @@ struct BoardSnapshot {
     model: String,
     subagent_provider: String,
     subagent_model: String,
+    needs_attention: Vec<BoardSession>,
     projects: Vec<BoardProject>,
     loose_workspaces: Vec<BoardLooseWorkspace>,
 }
@@ -104,6 +105,8 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
     let (provider, model, subagent_provider, subagent_model) = board_defaults(&cfg);
     let sessions = storage::find_all_sessions()?;
     let live = live_sessions_by_id()?;
+    let attention = crate::extras::emacs_attention::list()?;
+    let mut needs_attention = Vec::new();
     let mut projects: HashMap<PathBuf, ProjectBuilder> = HashMap::new();
     let mut loose: HashMap<PathBuf, Vec<BoardSession>> = HashMap::new();
 
@@ -111,6 +114,9 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
         let dir = Path::new(session.working_dir.as_str());
         let live_meta = live.get(session.id.as_str());
         let board_session = board_session(&session, live_meta);
+        if attention.contains(session.id.as_str()) {
+            needs_attention.push(board_session.clone());
+        }
         let Some(git) = git_session_info(dir) else {
             loose
                 .entry(workspace_path(dir))
@@ -159,11 +165,13 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
         })
         .collect::<Vec<_>>();
     sort_loose_workspaces(&mut loose_workspaces);
+    sort_sessions(&mut needs_attention);
     Ok(BoardSnapshot {
         provider,
         model,
         subagent_provider,
         subagent_model,
+        needs_attention,
         projects,
         loose_workspaces,
     })
@@ -566,11 +574,17 @@ fn socket_alive(path: &Path) -> bool {
 
 fn board_to_sexp(snapshot: &BoardSnapshot) -> String {
     format!(
-        "(zerostack-board :version 1 :provider {} :model {} :subagent-provider {} :subagent-model {} :projects ({}) :loose-workspaces ({}))",
+        "(zerostack-board :version 1 :provider {} :model {} :subagent-provider {} :subagent-model {} :needs-attention ({}) :projects ({}) :loose-workspaces ({}))",
         sexp_quote(&snapshot.provider),
         sexp_quote(&snapshot.model),
         sexp_quote(&snapshot.subagent_provider),
         sexp_quote(&snapshot.subagent_model),
+        snapshot
+            .needs_attention
+            .iter()
+            .map(session_to_sexp)
+            .collect::<Vec<_>>()
+            .join(" "),
         snapshot
             .projects
             .iter()
@@ -824,6 +838,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             subagent_provider: "openrouter".to_string(),
             subagent_model: "deepseek/deepseek-chat-v3.1".to_string(),
+            needs_attention: vec![session("attention-session", "2026-06-21T00:00:00Z", true)],
             projects,
             loose_workspaces: vec![BoardLooseWorkspace {
                 path: PathBuf::from("/nongit"),
@@ -838,6 +853,8 @@ mod tests {
         assert!(sexp.contains(":model \"gpt-5.5\""));
         assert!(sexp.contains(":subagent-provider \"openrouter\""));
         assert!(sexp.contains(":subagent-model \"deepseek/deepseek-chat-v3.1\""));
+        assert!(sexp.contains(":needs-attention"));
+        assert!(sexp.contains(":id \"attention-session\""));
         assert!(sexp.contains(":loose-workspaces"));
         assert!(sexp.contains(":path \"/nongit\""));
         assert!(sexp.contains(":description \"branch \\\"description\\\"\""));
