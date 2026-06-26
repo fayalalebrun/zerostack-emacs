@@ -213,6 +213,9 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defun zerostack-board--bind-keys (map)
   (set-keymap-parent map special-mode-map)
   (define-key map (kbd "g") #'zerostack-board-refresh)
+  (define-key map (kbd "j") #'zerostack-board-jump)
+  (define-key map (kbd "o") #'zerostack-board-open)
+  (define-key map (kbd "A") #'zerostack-board-open-attention)
   (define-key map (kbd "c") #'zerostack-board-create-at-point)
   (define-key map (kbd "d") #'zerostack-board-set-description-at-point)
   (define-key map (kbd "s") #'zerostack-board-stop-at-point)
@@ -723,7 +726,7 @@ The root is resolved with Projectile when available, then `project.el', then
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
-    (insert (propertize "g refresh, RET open, c create, d describe, s stop, x trash\n" 'face 'zerostack-muted-face))
+    (insert (propertize "g refresh, j jump, o open, A attention, RET open, c create, d describe, s stop, x trash\n" 'face 'zerostack-muted-face))
     (zerostack-board--insert-config-controls snapshot)
     (insert "\n")
     (when needs-attention
@@ -1207,6 +1210,69 @@ Return non-nil when DIRECTORY was newly added."
   (when (eventp event)
     (posn-set-point (event-end event)))
   (get-text-property (point) 'zerostack-board-item))
+
+(defun zerostack-board--candidate-label (item line)
+  "Return completion label for board ITEM rendered on LINE."
+  (let ((type (plist-get item :type)))
+    (format "%s: %s"
+            (pcase type
+              ('project "project")
+              ('worktree "worktree")
+              ('workspace "workspace")
+              ('session (if (plist-get item :attention) "attention" "session"))
+              ('load-more "more")
+              (_ (format "%s" type)))
+            (string-trim line))))
+
+(defun zerostack-board--candidates (&optional predicate)
+  "Return visible board completion candidates matching PREDICATE."
+  (let (candidates)
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let* ((start (point))
+               (end (line-end-position))
+               (item (or (get-text-property start 'zerostack-board-item)
+                         (and (< start end)
+                              (get-text-property (1+ start) 'zerostack-board-item)))))
+          (when (and item (or (not predicate) (funcall predicate item)))
+            (let* ((line (buffer-substring-no-properties start end))
+                   (label (zerostack-board--candidate-label item line)))
+              (push (cons label (copy-marker start)) candidates)))
+          (forward-line 1))))
+    (nreverse candidates)))
+
+(defun zerostack-board--read-candidate (prompt &optional predicate)
+  "Read a visible board candidate with PROMPT matching PREDICATE."
+  (let ((candidates (zerostack-board--candidates predicate)))
+    (unless candidates
+      (user-error "No matching zerostack board items"))
+    (cdr (assoc (completing-read prompt candidates nil t) candidates))))
+
+(defun zerostack-board-jump ()
+  "Jump to a visible zerostack board item using completion."
+  (interactive)
+  (goto-char (zerostack-board--read-candidate "Jump to: ")))
+
+(defun zerostack-board-open ()
+  "Open a visible zerostack board item selected with completion."
+  (interactive)
+  (goto-char (zerostack-board--read-candidate "Open: "))
+  (zerostack-board-open-at-point))
+
+(defun zerostack-board-open-attention ()
+  "Dismiss and open a visible Needs attention session selected with completion."
+  (interactive)
+  (let* ((marker (zerostack-board--read-candidate
+                  "Open attention: "
+                  (lambda (item)
+                    (and (eq (plist-get item :type) 'session)
+                         (plist-get item :attention)))))
+         (item (save-excursion
+                 (goto-char marker)
+                 (zerostack-board--item-at-point))))
+    (zerostack-board--dismiss-attention item)
+    (zerostack-board--open-session item)))
 
 (defun zerostack-board-open-at-point (&optional event)
   "Open the board item at point or mouse EVENT."

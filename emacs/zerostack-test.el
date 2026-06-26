@@ -253,9 +253,51 @@
        (goto-char (point-min))
        (search-forward "Ready session")
        (zerostack-board-trash-at-point)
+        (should (equal dismissed
+                       (make-list 3 (cons zerostack-command '("--emacs-dismiss-attention" "attention-session")))))
+        (should refreshed)))))
+
+(ert-deftest zerostack-test-board-jump-uses-completion ()
+  (zerostack-test--with-board-buffer
+   (zerostack-test--expand-project "/repo/live")
+   (zerostack-board--render zerostack-test--board-snapshot)
+   (let (choices)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (setq choices (mapcar #'car collection))
+                  (cl-find-if (lambda (choice) (string-match-p "Loose session" choice)) choices))))
+       (zerostack-board-jump))
+     (should (cl-some (lambda (choice) (string-match-p "project: .*live-repo" choice)) choices))
+     (should (cl-some (lambda (choice) (string-match-p "session: .*Loose session" choice)) choices))
+     (should (looking-at "    .*Loose session")))))
+
+(ert-deftest zerostack-test-board-open-attention-dismisses-and-opens ()
+  (zerostack-test--with-board-buffer
+   (let* ((attention (zerostack-test--session-plist "attention-session" "Ready session" "2026-06-21T00:00:00Z" t))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :needs-attention (,attention)
+                      :projects nil
+                      :loose-workspaces nil))
+          dismissed
+          opened)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (caar collection)))
+               ((symbol-function 'call-process)
+                (lambda (program _infile _buffer _display &rest args)
+                  (push (cons program args) dismissed)
+                  0))
+               ((symbol-function 'zerostack-board-refresh)
+                (lambda () nil))
+               ((symbol-function 'zerostack-board--open-session)
+                (lambda (item) (setq opened item))))
+       (zerostack-board--render snapshot)
+       (zerostack-board-open-attention)
        (should (equal dismissed
-                      (make-list 3 (cons zerostack-command '("--emacs-dismiss-attention" "attention-session")))))
-       (should refreshed)))))
+                      (list (cons zerostack-command '("--emacs-dismiss-attention" "attention-session")))))
+       (should (equal (plist-get opened :id) "attention-session"))
+       (should (plist-get opened :attention))))))
 
 (ert-deftest zerostack-test-board-colors-open-thinking-session-yellow ()
   (let ((chat (generate-new-buffer " *zerostack-open-session*")))
