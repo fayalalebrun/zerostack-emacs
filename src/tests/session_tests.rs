@@ -180,7 +180,6 @@ fn compaction_invalidates_pre_compaction_provider_usage() {
     );
     assert_eq!(s.total_estimated_tokens, s.effective_context_tokens());
 }
-}
 
 // Helper: a session with `n` ASCII messages of `len` chars each, so every
 // message has a predictable estimated_tokens == len/4.

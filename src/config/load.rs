@@ -63,7 +63,7 @@ fn default_quick_models() -> HashMap<String, QuickModelConfig> {
             output_token_cost: 0.1966,
             reserve_tokens: None,
             temperature: None,
-extra_body: None,
+            extra_body: None,
             reasoning_effort: None,
         },
     );
@@ -76,7 +76,7 @@ extra_body: None,
             output_token_cost: 0.87,
             reserve_tokens: None,
             temperature: None,
-extra_body: None,
+            extra_body: None,
             reasoning_effort: None,
         },
     );
@@ -115,7 +115,7 @@ pub fn save_quick_model(
             output_token_cost,
             reserve_tokens: None,
             temperature: None,
-extra_body: None,
+            extra_body: None,
             reasoning_effort: None,
         },
     );

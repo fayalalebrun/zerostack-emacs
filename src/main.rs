@@ -542,7 +542,6 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "subagents")]
             caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
 
-
             if !caps.is_empty() {
                 prompt_text.push_str("\n\n## Available Capabilities\n\n");
                 prompt_text.push_str(&caps.join("\n"));
@@ -570,7 +569,6 @@ async fn main() -> anyhow::Result<()> {
             caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
             #[cfg(feature = "subagents")]
             caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
-
 
             if !caps.is_empty() {
                 prompt_text.push_str("\n\n## Available Capabilities\n\n");

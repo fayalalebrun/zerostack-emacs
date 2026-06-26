@@ -248,38 +248,7 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
         );
         return Ok(());
     }
-<<<<<<< HEAD
-    let new_model = compact_str::CompactString::new(parts[1].trim());
-    let model = ctx.client.completion_model(new_model.to_string());
-    let temperature = crate::config::resolve_temperature(ctx.cli, ctx.cfg, &new_model);
-    let extra_body = crate::config::resolve_extra_body(ctx.cfg, &new_model);
-    *ctx.agent = Some(
-        crate::provider::build_agent(
-            model,
-            ctx.cli,
-            ctx.cfg,
-            ctx.context,
-            ctx.permission.clone(),
-            ctx.ask_tx.clone(),
-            ctx.sandbox.clone(),
-            *ctx.reasoning_enabled,
-            temperature,
-            extra_body,
-            #[cfg(feature = "mcp")]
-            ctx.mcp_manager,
-        )
-        .await,
-    );
-    ctx.session.model = new_model.clone();
-    ctx.session.provider = ctx.cli.resolve_provider(ctx.cfg);
-    ctx.session.update_context_window(
-        ctx.cfg
-            .resolve_context_window(&ctx.session.provider, &new_model),
-    );
-    write_ok(ctx.renderer, format!("switched to model: {}", new_model));
-=======
     apply_model(ctx, parts[1].trim()).await;
->>>>>>> cd14320 (fix(ui): keep model picker and subagents aligned)
     Ok(())
 }
 
@@ -595,6 +564,7 @@ mod tests {
                 output_token_cost: 0.0,
                 reserve_tokens: None,
                 temperature: None,
+                extra_body: None,
                 reasoning_effort: None,
             },
         );
@@ -607,6 +577,7 @@ mod tests {
                 output_token_cost: 0.0,
                 reserve_tokens: None,
                 temperature: None,
+                extra_body: None,
                 reasoning_effort: None,
             },
         );

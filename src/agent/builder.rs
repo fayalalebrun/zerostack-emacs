@@ -26,11 +26,7 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     };
     let suffix = crate::session::storage::load_suffix();
     let context_agents = context.agents.as_deref().unwrap_or("");
-    let skills_prompt = if cli.resolve_no_tools(cfg) {
-        None
-    } else {
-        crate::context::skills::format_for_prompt(&context.skills)
-    };
+    let skills_prompt = crate::context::skills::format_for_prompt(&context.skills);
     let context_skills = skills_prompt.as_deref().unwrap_or("");
     #[cfg(feature = "archmd")]
     let context_architecture = context.architecture.as_deref().unwrap_or("");

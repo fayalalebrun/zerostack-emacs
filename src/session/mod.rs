@@ -672,7 +672,7 @@ impl Session {
     }
 
     pub fn ctx_is_estimated(&self) -> bool {
-        self.latest_provider_context_tokens().is_none() && self.calibrated_tokens == 0
+        self.latest_provider_context_tokens().is_none()
     }
 
     fn estimated_message_tokens(&self) -> u64 {
@@ -692,22 +692,9 @@ impl Session {
         if let Some(tokens) = self.latest_provider_context_tokens() {
             return tokens;
         }
-        if self.calibrated_tokens == 0 {
-            // No real usage yet: per-message estimates cover only `messages`, so
-            // add the fixed overhead (system prompt, tools, context files) that
-            // every request also carries. After calibration this overhead is
-            // already inside the anchor, so it is not added in that branch.
-            return self
-                .overhead_tokens
-                .saturating_add(self.total_estimated_tokens);
+        self.overhead_tokens
+            .saturating_add(self.total_estimated_tokens)
 
-        }
-        let start = self.calibrated_msg_count.min(self.messages.len());
-        let delta: u64 = self.messages[start..]
-            .iter()
-            .map(|m| m.estimated_tokens)
-            .sum();
-        self.calibrated_tokens.saturating_add(delta)
     }
 
     pub fn select_compaction_cut(messages: &[SessionMessage], keep_recent: u64) -> usize {

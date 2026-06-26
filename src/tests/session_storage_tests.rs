@@ -1,6 +1,7 @@
 use crate::session::Session;
 use crate::session::storage::{
-    delete_session, find_all_sessions, find_sessions_by_prefix, load_suffix, save_session, suffix_path,
+    delete_session, find_all_sessions, find_sessions_by_prefix, load_suffix, save_session,
+    suffix_path,
 };
 use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};

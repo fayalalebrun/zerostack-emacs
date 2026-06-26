@@ -327,7 +327,10 @@ pub async fn handle_agent_event(
             )
             .await?;
         }
-        AgentEvent::CompletionCall { call_index: _, usage } => {
+        AgentEvent::CompletionCall {
+            call_index: _,
+            usage,
+        } => {
             let real = usage.context_tokens();
             if real > session.total_estimated_tokens {
                 session.total_estimated_tokens = real;
@@ -348,7 +351,6 @@ pub async fn handle_agent_event(
                 ),
                 Color::DarkGrey,
             )?;
-
         }
         AgentEvent::Error(e) => {
             *was_reasoning = false;

@@ -1253,7 +1253,10 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body.clone()),
+                merge_extra_body(
+                    openai_reasoning_params(reasoning_effort),
+                    extra_body.clone(),
+                ),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -1270,7 +1273,10 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body.clone()),
+                merge_extra_body(
+                    openai_reasoning_params(reasoning_effort),
+                    extra_body.clone(),
+                ),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )

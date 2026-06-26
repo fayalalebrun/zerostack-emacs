@@ -2134,9 +2134,10 @@ mod imp {
             let session = server.session.lock().await;
             session.model.to_string()
         });
-        let (temperature, reasoning_effort) = {
+        let (temperature, extra_body, reasoning_effort) = {
             let session = server.session.lock().await;
             let temperature = config::resolve_temperature(&server.cli, &server.cfg, &session.model);
+            let extra_body = config::resolve_extra_body(&server.cfg, &session.model);
             let reasoning_effort = {
                 let mutable = server.mutable.lock().await;
                 mutable.reasoning_effort.clone().or_else(|| {
@@ -2148,7 +2149,7 @@ mod imp {
                     )
                 })
             };
-            (temperature, reasoning_effort)
+            (temperature, extra_body, reasoning_effort)
         };
         let reasoning_enabled = server.mutable.lock().await.reasoning_enabled;
         let context = server.context.lock().await;
@@ -2179,6 +2180,7 @@ mod imp {
                 reasoning_enabled,
                 reasoning_effort.as_deref(),
                 temperature,
+                extra_body,
                 #[cfg(feature = "mcp")]
                 mcp_guard.as_ref(),
             )

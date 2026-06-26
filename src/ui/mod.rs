@@ -1035,6 +1035,7 @@ pub async fn run_interactive(
     if auto_trigger_msg.is_none() && agent.is_none() {
         let client_clone = client.clone();
         let session_model = session.model.to_string();
+        let session_provider = session.provider.to_string();
         let cli_clone = cli.clone();
         let cfg_clone = cfg.clone();
         let context_clone = context.clone();
@@ -1057,6 +1058,12 @@ pub async fn run_interactive(
             let temperature =
                 crate::config::resolve_temperature(&cli_clone, &cfg_clone, &session_model);
             let extra_body = crate::config::resolve_extra_body(&cfg_clone, &session_model);
+            let reasoning_effort = crate::config::resolve_reasoning_effort(
+                &cli_clone,
+                &cfg_clone,
+                &session_provider,
+                &session_model,
+            );
             let a = crate::provider::build_agent(
                 model,
                 &cli_clone,
@@ -1066,6 +1073,7 @@ pub async fn run_interactive(
                 ask_tx_clone,
                 sandbox_clone,
                 reasoning_enabled,
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -1171,10 +1179,11 @@ pub async fn run_interactive(
                                             let model = client.completion_model(session.model.to_string());
                                             let temperature = crate::config::resolve_temperature(cli, cfg, &session.model);
                                             let extra_body = crate::config::resolve_extra_body(cfg, &session.model);
+                                            let reasoning_effort = crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model);
                                             agent = Some(crate::provider::build_agent(
                                                 model, cli, cfg, context,
                                                 permission.clone(), ask_tx.clone(), sandbox.clone(),
-                                                reasoning_enabled, temperature, extra_body,
+                                                reasoning_enabled, reasoning_effort.as_deref(), temperature, extra_body,
                                                 mcp_manager.as_ref(),
                                             ).await);
                                             renderer.write_line(&format!("authorized and connected '{}'", server), C_AGENT)?;
