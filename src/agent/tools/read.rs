@@ -179,11 +179,39 @@ impl Tool for ReadTool {
             info
         };
 
+        let loaded = crate::context::nested_agents_for_read(
+            std::path::Path::new(&path),
+            &crate::agent::tools::read_loaded_context(),
+        );
+        let loaded_paths: Vec<std::path::PathBuf> =
+            loaded.iter().map(|(path, _)| path.clone()).collect();
+        crate::agent::tools::mark_read_context_loaded(&loaded_paths);
+
+        let info = if loaded.is_empty() {
+            info
+        } else {
+            format!(
+                "{}\n\n<system-reminder>\n{}\n</system-reminder>",
+                info,
+                loaded
+                    .iter()
+                    .map(|(_, content)| content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            )
+        };
+
+        let loaded_paths = loaded_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
         let info = match coaching {
             Some(msg) => format!("{}\n\n{}", msg, info),
             None => info,
         };
         let info = crate::agent::tools::truncate_live_tool_output(Self::NAME, &info);
+        crate::agent::tools::register_read_context_metadata(&info, loaded_paths);
 
         Ok(info)
     }

@@ -1,7 +1,7 @@
 pub mod chat_history;
 pub mod storage;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use compact_str::CompactString;
 use rig::OneOrMany;
@@ -54,6 +54,8 @@ pub struct SessionToolResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<CompactString>,
     pub name: CompactString,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loaded_context: Vec<CompactString>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +516,17 @@ impl Session {
         id: &str,
         call_id: Option<&str>,
     ) -> String {
+        self.add_tool_result_structured_with_context(name, output, id, call_id, Vec::new())
+    }
+
+    pub fn add_tool_result_structured_with_context(
+        &mut self,
+        name: &str,
+        output: &str,
+        id: &str,
+        call_id: Option<&str>,
+        loaded_context: Vec<String>,
+    ) -> String {
         let content = self.tool_result_content(name, output);
         let tokens = Self::estimate_tokens(&content);
         self.messages.push(SessionMessage {
@@ -527,6 +540,7 @@ impl Session {
                 id: CompactString::new(id),
                 call_id: call_id.map(CompactString::new),
                 name: CompactString::new(name),
+                loaded_context: loaded_context.into_iter().map(CompactString::new).collect(),
             }),
         });
         self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
@@ -553,6 +567,16 @@ impl Session {
             MessageRole::SubagentToolCall,
             &crate::ui::utils::format_tool_call_summary(name, args),
         );
+    }
+
+    pub fn loaded_read_context_paths(&self) -> Vec<PathBuf> {
+        self.messages
+            .iter()
+            .filter_map(|msg| msg.tool_result.as_ref())
+            .filter(|result| result.name == "read")
+            .flat_map(|result| result.loaded_context.iter())
+            .map(|path| PathBuf::from(path.as_str()))
+            .collect()
     }
 
     pub fn title(&self) -> String {
@@ -775,6 +799,57 @@ impl Session {
         // lines up. Drop it; the next completed turn re-anchors.
         self.reset_calibration();
         self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+
+    #[test]
+    fn tool_result_loaded_context_round_trips() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_tool_result_structured_with_context(
+            "read",
+            "output",
+            "call_1",
+            None,
+            vec!["/repo/src/AGENTS.md".to_string()],
+        );
+
+        let json = serde_json::to_string(&session).unwrap();
+        let loaded: Session = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            loaded.loaded_read_context_paths(),
+            vec![std::path::PathBuf::from("/repo/src/AGENTS.md")]
+        );
+    }
+
+    #[test]
+    fn compaction_drops_summarized_loaded_context_metadata() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_tool_result_structured_with_context(
+            "read",
+            "old",
+            "call_1",
+            None,
+            vec!["/repo/old/AGENTS.md".to_string()],
+        );
+        session.add_tool_result_structured_with_context(
+            "read",
+            "kept",
+            "call_2",
+            None,
+            vec!["/repo/kept/AGENTS.md".to_string()],
+        );
+
+        session.compress("summary".to_string(), 1, 10);
+
+        assert_eq!(
+            session.loaded_read_context_paths(),
+            vec![std::path::PathBuf::from("/repo/kept/AGENTS.md")]
+        );
     }
 }
 

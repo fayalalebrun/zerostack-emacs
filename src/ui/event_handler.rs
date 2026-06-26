@@ -214,8 +214,15 @@ pub async fn handle_agent_event(
             call_id,
             name,
             output,
+            loaded_context,
         } => {
-            session.add_tool_result_structured(&name, &output, &id, call_id.as_deref());
+            session.add_tool_result_structured_with_context(
+                &name,
+                &output,
+                &id,
+                call_id.as_deref(),
+                loaded_context,
+            );
             save_session_if_enabled(session, cli, renderer)?;
             if name == "todo_write" {
                 let list = TODO_LIST.lock().unwrap_or_else(|e| e.into_inner());

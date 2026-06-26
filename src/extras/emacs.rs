@@ -2366,14 +2366,25 @@ mod imp {
                     call_id,
                     name,
                     output,
+                    loaded_context,
                 } => {
+                    let loaded_lines = loaded_context
+                        .iter()
+                        .map(|path| {
+                            WireLine::new(
+                                format!("  loaded context: {}", sanitize_output(path)),
+                                "zs-muted",
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     let safe = {
                         let mut session = server.session.lock().await;
-                        let content = session.add_tool_result_structured(
+                        let content = session.add_tool_result_structured_with_context(
                             &name,
                             &output,
                             &id,
                             call_id.as_deref(),
+                            loaded_context,
                         );
                         let content = sanitize_output(&content);
                         if !server.cli.no_session {
@@ -2391,6 +2402,9 @@ mod imp {
                             None
                         }
                     };
+                    if !loaded_lines.is_empty() {
+                        server.append_lines("tool-render", turn, loaded_lines).await;
+                    }
                     if let Some(artifact) = artifact.as_ref() {
                         server
                             .append_lines(

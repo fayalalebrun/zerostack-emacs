@@ -221,6 +221,11 @@ where
 
 pub fn convert_history(session: &Session) -> Vec<Message> {
     crate::agent::tools::set_active_session_id(Some(session.id.to_string()));
+    crate::agent::tools::reset_read_context_loaded(session.loaded_read_context_paths());
+    convert_history_inner(session)
+}
+
+fn convert_history_inner(session: &Session) -> Vec<Message> {
     let (summary, first_kept) = session.compacted_context();
     let remaining = session.messages.len().saturating_sub(first_kept);
     let extra = if summary.is_some() { 1 } else { 0 };
@@ -427,7 +432,7 @@ pub fn build_btw_snapshot(
     turn_trace: &[CompactString],
     main_running: bool,
 ) -> Vec<Message> {
-    let mut snapshot = convert_history(session);
+    let mut snapshot = convert_history_inner(session);
     if main_running && !turn_trace.is_empty() {
         snapshot.push(Message::user(format!(
             "(Context only — the main assistant is working in parallel right now. \
@@ -523,12 +528,18 @@ where
                             .remove(&tool_result.id)
                             .or_else(|| last_tool_name.take())
                             .unwrap_or_default();
+                        let loaded_context = if name == "read" {
+                            crate::agent::tools::take_read_context_metadata(&output)
+                        } else {
+                            Vec::new()
+                        };
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
                                 id: CompactString::new(tool_result.id.clone()),
                                 call_id: tool_result.call_id.clone().map(CompactString::from),
                                 name: CompactString::new(name),
                                 output: CompactString::from(output),
+                                loaded_context,
                             })
                             .await;
                         tool_interactions.push(tool_result.clone().into());

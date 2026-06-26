@@ -11,7 +11,10 @@ pub(crate) mod write;
 
 pub(crate) use normalize::{levenshtein_similarity, normalize_whitespace};
 
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 
 use crate::config::types::EditSystem;
 
@@ -41,6 +44,38 @@ pub(crate) fn deny_repeated_reads() -> bool {
 
 static READ_TRACKER: Mutex<Vec<(String, usize, usize)>> = Mutex::new(Vec::new());
 static ACTIVE_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
+static READ_LOADED_CONTEXT: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static READ_CONTEXT_METADATA: LazyLock<Mutex<HashMap<u64, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn output_key(output: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    output.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) fn read_loaded_context() -> HashSet<PathBuf> {
+    READ_LOADED_CONTEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub(crate) fn mark_read_context_loaded(paths: &[PathBuf]) {
+    let mut loaded = READ_LOADED_CONTEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    loaded.extend(paths.iter().cloned());
+}
+
+pub(crate) fn reset_read_context_loaded(paths: impl IntoIterator<Item = PathBuf>) {
+    let mut loaded = READ_LOADED_CONTEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    loaded.clear();
+    loaded.extend(paths);
+}
 
 pub(crate) fn set_active_session_id(id: impl Into<Option<String>>) {
     *ACTIVE_SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = id.into();
@@ -82,6 +117,24 @@ pub(crate) fn truncate_live_tool_output(tool_name: &str, output: &str) -> String
     format!(
         "{head}\n\n[tool output truncated for live model context: {output_chars} characters; {omitted} omitted]{saved}\n\n{tail}"
     )
+}
+
+pub(crate) fn register_read_context_metadata(output: &str, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    READ_CONTEXT_METADATA
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(output_key(output), paths);
+}
+
+pub(crate) fn take_read_context_metadata(output: &str) -> Vec<String> {
+    READ_CONTEXT_METADATA
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&output_key(output))
+        .unwrap_or_default()
 }
 
 pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<String> {
