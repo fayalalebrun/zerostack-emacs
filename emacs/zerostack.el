@@ -235,6 +235,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 
 (defvar-local zerostack--process nil)
 (defvar-local zerostack--server-process nil)
+(defvar-local zerostack--server-args nil)
 (defvar-local zerostack--startup-timer nil)
 (defvar-local zerostack--socket nil)
 (defvar-local zerostack--session nil)
@@ -1465,6 +1466,7 @@ Return non-nil when DIRECTORY was newly added."
 
 (defun zerostack--start-server (args)
   "Start a zerostack server with ARGS in the current buffer."
+  (setq zerostack--server-args args)
   (let* ((client-buffer (current-buffer))
          (stderr-buffer (generate-new-buffer " *zerostack stderr*"))
          (command (append (list zerostack-command "--emacs") args))
@@ -2131,7 +2133,7 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _M_ MCP  _v_ view  _o_ artifact
+_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2146,7 +2148,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
     ("S" zerostack-subagent-model-menu)
     ("M" zerostack-mcp)
     ("v" zerostack-set-view)
-    ("o" zerostack-open-last-artifact)))
+    ("o" zerostack-open-last-artifact)
+    ("R" zerostack-restart-daemon)))
 
 (defun zerostack-command-menu ()
   "Open the zerostack command menu."
@@ -2160,7 +2163,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
   (let* ((commands (append '("skill" "attach" "compact" "fork" "loop" "thinking")
                            (when (zerostack--reasoning-effort-supported-p)
                              '("reasoning"))
-                           '("provider" "model" "subagent-provider" "subagent-model" "mcp" "view" "artifact")))
+                           '("provider" "model" "subagent-provider" "subagent-model" "mcp" "view" "artifact" "restart")))
          (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
@@ -2176,7 +2179,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
       ("subagent-model" (call-interactively #'zerostack-subagent-model-menu))
       ("mcp" (call-interactively #'zerostack-mcp))
       ("view" (call-interactively #'zerostack-set-view))
-      ("artifact" (zerostack-open-last-artifact)))))
+      ("artifact" (zerostack-open-last-artifact))
+      ("restart" (zerostack-restart-daemon)))))
 
 (defun zerostack-permission-menu ()
   "Select and answer a pending permission request."
@@ -2320,8 +2324,19 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
-  (zerostack--set-notice
-   "commands: C-c / opens skill, attach, compact, fork, loop, thinking, provider, model, mcp, view, artifact"))
+   (zerostack--set-notice
+    "commands: C-c / opens skill, attach, compact, fork, loop, thinking, provider, model, mcp, view, artifact, restart"))
+
+(defun zerostack-restart-daemon ()
+  "Restart this buffer's zerostack daemon without closing the buffer."
+  (interactive)
+  (let ((args (or zerostack--server-args
+                  (and zerostack--session (list "--session" zerostack--session)))))
+    (zerostack--delete-current-processes)
+    (setq zerostack--socket nil
+          zerostack--line-buffer "")
+    (zerostack--append-local-line "restarting zerostack --emacs" 'zs-muted)
+    (zerostack--start-server args)))
 
 (defun zerostack-disconnect ()
   "Disconnect from zerostack and stop a server process started by this buffer."

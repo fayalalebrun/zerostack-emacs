@@ -973,7 +973,7 @@
 (ert-deftest zerostack-test-command-menu-fallback-dispatches-to-protocol ()
   (zerostack-test--with-buffer
    (let (dispatched)
-     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "subagent-provider" "subagent-model" "mcp" "view")))
+     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "subagent-provider" "subagent-model" "mcp" "view" "restart")))
        (cl-letf (((symbol-function 'completing-read)
                   (lambda (&rest _) (pop choices)))
                  ((symbol-function 'zerostack-attachment-menu)
@@ -995,10 +995,29 @@
                  ((symbol-function 'zerostack-mcp)
                   (lambda () (interactive) (push 'mcp dispatched)))
                  ((symbol-function 'zerostack-set-view)
-                  (lambda () (interactive) (push 'view dispatched))))
-         (dotimes (_ 10)
+                  (lambda () (interactive) (push 'view dispatched)))
+                 ((symbol-function 'zerostack-restart-daemon)
+                  (lambda () (interactive) (push 'restart dispatched))))
+         (dotimes (_ 11)
            (zerostack--command-menu-fallback))))
-     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model subagent-provider subagent-model mcp view))))))
+     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model subagent-provider subagent-model mcp view restart))))))
+
+(ert-deftest zerostack-test-restart-daemon-reuses_session_without_closing_buffer ()
+  (zerostack-test--with-buffer
+   (let (deleted started)
+     (setq zerostack--session "session-1"
+           zerostack--socket "/tmp/old.sock"
+           zerostack--line-buffer "partial")
+     (cl-letf (((symbol-function 'zerostack--delete-current-processes)
+                (lambda () (setq deleted t)))
+               ((symbol-function 'zerostack--start-server)
+                (lambda (args) (setq started args))))
+       (zerostack-restart-daemon)
+       (should deleted)
+       (should (equal started '("--session" "session-1")))
+       (should-not zerostack--socket)
+       (should (string-empty-p zerostack--line-buffer))
+       (should (string-match-p "restarting zerostack --emacs" (buffer-string)))))))
 
 (ert-deftest zerostack-test-command-menu-permission-selection ()
   (zerostack-test--with-buffer

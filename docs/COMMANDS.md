@@ -466,7 +466,7 @@ Main entry points:
 
 | Command | Description |
 | ------- | ----------- |
-| `M-x zerostack` | Start `zerostack --emacs`, wait for its socket, connect, and attach. With a prefix argument, read extra CLI args. |
+| `M-x zerostack` | Start `zerostack --emacs`, wait for its socket, connect, and attach. With a prefix argument, read extra CLI args. The command menu includes `restart` to restart the buffer's daemon without closing the buffer. |
 | `M-x zerostack-connect` | Connect to an existing session socket. |
 | `M-x zerostack-list-sessions` | Run `zerostack --emacs-list` in a sessions buffer. |
 | `M-x zerostack-board` | Run `zerostack --emacs-board` and render a project/worktree/session tree. |
@@ -489,7 +489,7 @@ Key bindings in `zerostack-mode`:
 | --- | ------ |
 | `RET` | Send current input. |
 | `C-c C-c` | Abort the active turn. |
-| `C-c C-m`, `C-c /` | Open the Hydra command menu. |
+| `C-c C-m`, `C-c /` | Open the Hydra command menu, including `restart` for the current daemon. |
 | `C-c C-a` | Attach/render the full session snapshot. |
 | `C-c C-o` | Open artifact or LaTeX source at point. |
 | `C-c C-s` | Request session status. |
@@ -498,6 +498,7 @@ Command menu actions:
 
 | Action | Description |
 | ------ | ----------- |
+| `restart` | Restart the current buffer's `zerostack --emacs` daemon and reconnect without closing the buffer. |
 | `view` | Change server-side markdown render width. |
 | `attach` | Add a file by path, attach clipboard file/image/text contents, list queued attachments, or drop all queued attachments. |
 | `provider` | Switch the live session provider. This is session-local and does not rewrite config. |
