@@ -357,6 +357,9 @@ math macros while keeping the original LaTeX source and artifact link intact."
     (setq zerostack--cwd (file-name-as-directory cwd)))
   (when (and worktree-dir (not (string-empty-p worktree-dir)))
     (setq zerostack--worktree-dir (file-name-as-directory worktree-dir)))
+  (when-let ((dir (or zerostack--worktree-dir zerostack--cwd)))
+    (when (file-directory-p dir)
+      (setq default-directory (file-name-as-directory dir))))
   (zerostack--rename-chat-buffer))
 
 (defun zerostack--rename-chat-buffer ()

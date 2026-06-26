@@ -612,6 +612,24 @@
          (when (buffer-live-p chat-buffer)
            (kill-buffer chat-buffer)))))))
 
+(ert-deftest zerostack-test-session-metadata-updates-default-directory ()
+  (let* ((root (make-temp-file "zerostack-root" t))
+         (subdir (expand-file-name "subdir" root)))
+    (unwind-protect
+        (progn
+          (make-directory subdir)
+          (zerostack-test--with-buffer
+           (let ((default-directory temporary-file-directory))
+             (zerostack--set-session-metadata "Title" subdir root)
+             (should (equal default-directory (file-name-as-directory root))))))
+      (delete-directory root t))))
+
+(ert-deftest zerostack-test-session-metadata-ignores_missing_default_directory ()
+  (zerostack-test--with-buffer
+   (let ((default-directory temporary-file-directory))
+     (zerostack--set-session-metadata "Title" "/no/such/cwd" "/no/such/root")
+     (should (equal default-directory temporary-file-directory)))))
+
 (ert-deftest zerostack-test-connect-reuses-buffer-for-session ()
   (let (connected popped)
     (cl-letf (((symbol-function 'zerostack--connect-buffer)
