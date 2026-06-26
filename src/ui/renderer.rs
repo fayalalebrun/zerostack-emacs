@@ -37,6 +37,17 @@ pub struct Renderer {
     partial_color: Color,
     scroll_offset: usize,
     input_scroll_offset: usize,
+    input_vscroll_offset: usize,
+    input_max_vscroll: usize,
+    last_input_cursor: usize,
+    // Geometry of the last-rendered input area, used to map a mouse click to a
+    // cursor position inside the input buffer.
+    input_base_row: u16,
+    input_prompt_width: usize,
+    input_first_visible: usize,
+    input_visible_line_count: usize,
+    input_h_scroll: usize,
+    input_cursor_line: usize,
     monochrome: bool,
     chat_bg: Option<Color>,
     input_bg: Option<Color>,
@@ -66,6 +77,15 @@ impl Renderer {
             partial_color: Color::White,
             scroll_offset: 0,
             input_scroll_offset: 0,
+            input_vscroll_offset: 0,
+            input_max_vscroll: 0,
+            last_input_cursor: 0,
+            input_base_row: 0,
+            input_prompt_width: 0,
+            input_first_visible: 0,
+            input_visible_line_count: 0,
+            input_h_scroll: 0,
+            input_cursor_line: 0,
             monochrome: false,
             chat_bg: None,
             input_bg: None,
@@ -179,6 +199,29 @@ impl Renderer {
         rows.saturating_sub(input_height as u16 + self.statusline_reserve()) as usize
     }
 
+    /// Number of rows the input area will occupy for the given content. Kept in
+    /// sync with the height logic used while drawing the input in `draw_bottom`.
+    fn input_visible_height(&self, input_line: &str, rows: u16) -> usize {
+        if self.permission_prompt.is_some() || self.chain_prompt.is_some() {
+            return 2;
+        }
+        let available_rows = rows.saturating_sub(self.statusline_reserve()) as usize;
+        let max_input_rows = available_rows.min((available_rows * 3 / 10).max(5));
+        input_line.split('\n').count().min(max_input_rows).max(1)
+    }
+
+    /// Recompute the input height and reconcile `prev_input_height` before the
+    /// chat viewport is drawn, so the chat is sized against the height the input
+    /// is about to use. Without this, a height change (e.g. clearing or pasting
+    /// text) leaves the viewport drawn for the old size until the next redraw.
+    pub fn sync_input_height(&mut self, input_line: &str) -> io::Result<()> {
+        let (_, rows) = self.terminal_size();
+        let new_height = self.input_visible_height(input_line, rows);
+        self.clear_shrunk_rows(self.prev_input_height, new_height)?;
+        self.prev_input_height = new_height;
+        Ok(())
+    }
+
     pub fn buffer_line_at_row(&self, row: u16) -> Option<usize> {
         let (cols, _rows) = self.terminal_size();
         let max_width = cols.saturating_sub(1 + self.chat_margin) as usize;
@@ -275,6 +318,69 @@ impl Renderer {
 
     pub fn is_scrolling(&self) -> bool {
         self.scroll_offset > 0
+    }
+
+    /// Map a mouse click at `(row, col)` to a cursor byte offset inside the
+    /// input buffer, or `None` if the click falls outside the input area.
+    pub fn input_cursor_for_click(&self, row: u16, col: u16, input_line: &str) -> Option<usize> {
+        let vlc = self.input_visible_line_count;
+        if vlc == 0 {
+            return None;
+        }
+        if row < self.input_base_row || row >= self.input_base_row + vlc as u16 {
+            return None;
+        }
+        let visible_idx = (row - self.input_base_row) as usize;
+        let line_idx = self.input_first_visible + visible_idx;
+        let lines: SmallVec<[&str; 4]> = input_line.split('\n').collect();
+        let line_text = lines.get(line_idx)?;
+
+        // Display column the click lands on, within the line's text. Clicks on
+        // the prompt (or to its left) snap to the start of the line.
+        let click_col = col as usize;
+        let mut target_display = click_col.saturating_sub(self.input_prompt_width);
+        if line_idx == self.input_cursor_line {
+            target_display += self.input_h_scroll;
+        }
+
+        // Walk the line accumulating display width until we pass the target,
+        // landing on the nearest character boundary.
+        let mut width = 0usize;
+        let mut col_chars = 0usize;
+        for ch in line_text.chars() {
+            let cw = char_display_width(ch);
+            if width + cw > target_display {
+                break;
+            }
+            width += cw;
+            col_chars += 1;
+        }
+        Some(crate::ui::input::line_col_to_cursor(
+            input_line, line_idx, col_chars,
+        ))
+    }
+
+    /// Scroll the multi-line input viewport up one line (toward earlier lines).
+    /// Returns false when the input is already showing its top line, so the
+    /// caller can fall through to scrolling the chat history instead.
+    pub fn input_scroll_up(&mut self) -> bool {
+        if self.input_vscroll_offset > 0 {
+            self.input_vscroll_offset -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scroll the multi-line input viewport down one line (toward the end).
+    /// Returns false when the input is already at the bottom.
+    pub fn input_scroll_down(&mut self) -> bool {
+        if self.input_vscroll_offset < self.input_max_vscroll {
+            self.input_vscroll_offset += 1;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn scroll_line_up(&mut self) {
@@ -902,12 +1008,11 @@ impl Renderer {
         let line_count = lines.len();
 
         let available_rows = (rows.saturating_sub(reserve) as usize).max(1);
-        let need_scroll = line_count > available_rows;
-        let first_visible = if need_scroll {
-            line_count - available_rows
-        } else {
-            0
-        };
+        // Cap the input height to roughly 30% of the area so the chat history
+        // stays visible (and therefore scrollable) above a tall input instead
+        // of being squeezed to nothing.
+        let max_input_rows = available_rows.min((available_rows * 3 / 10).max(5));
+        let need_scroll = line_count > max_input_rows;
 
         const SPINNER: &[&str] = &["⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ "];
         let prompt = if is_running {
@@ -921,6 +1026,29 @@ impl Renderer {
 
         let (cursor_line, cursor_col) =
             crate::ui::input::cursor_to_line_col(input_line, cursor_pos);
+
+        // Vertical scroll: keep the cursor's line within the visible window so
+        // pressing Up/Down can reveal lines that don't fit on screen at once.
+        // Only follow the cursor when it actually moved, so mouse-wheel scrolling
+        // (which leaves the cursor put) is not snapped back every frame.
+        let cursor_moved = self.last_input_cursor != cursor_pos;
+        self.last_input_cursor = cursor_pos;
+        let first_visible = if need_scroll {
+            self.input_max_vscroll = line_count - max_input_rows;
+            if cursor_moved {
+                if cursor_line < self.input_vscroll_offset {
+                    self.input_vscroll_offset = cursor_line;
+                } else if cursor_line >= self.input_vscroll_offset + max_input_rows {
+                    self.input_vscroll_offset = cursor_line - max_input_rows + 1;
+                }
+            }
+            self.input_vscroll_offset = self.input_vscroll_offset.min(self.input_max_vscroll);
+            self.input_vscroll_offset
+        } else {
+            self.input_vscroll_offset = 0;
+            self.input_max_vscroll = 0;
+            0
+        };
 
         let visible_width = cols.saturating_sub(prompt_width as u16) as usize;
         let cursor_line_text = lines.get(cursor_line).unwrap_or(&"");
@@ -949,7 +1077,7 @@ impl Renderer {
 
         // Clear and draw input area
         let visible_line_count = if need_scroll {
-            available_rows
+            max_input_rows
         } else {
             line_count
         };
@@ -967,11 +1095,20 @@ impl Renderer {
             self.draw_separator(sep_above, cols)?;
         }
 
+        // Remember the input layout so a mouse click can be mapped back to a
+        // cursor position inside the input buffer.
+        self.input_base_row = input_top;
+        self.input_prompt_width = prompt_width;
+        self.input_first_visible = first_visible;
+        self.input_visible_line_count = visible_line_count;
+        self.input_h_scroll = h_scroll;
+        self.input_cursor_line = cursor_line;
+
         for (i, line) in lines
             .iter()
             .enumerate()
-            .take(line_count)
             .skip(first_visible)
+            .take(visible_line_count)
         {
             let render_row = (rows.saturating_sub(reserve) - visible_line_count as u16 + 1)
                 + (i - first_visible) as u16;
@@ -1029,8 +1166,12 @@ impl Renderer {
         // Status line
         self.draw_statusline(statusline, cols, self.scroll_offset > 0)?;
 
-        // Cursor
-        let cursor_render_idx = cursor_line.saturating_sub(first_visible);
+        // Cursor. Clamp to the visible input rows so that when the viewport is
+        // scrolled away from the cursor line, the terminal caret stays inside
+        // the input box instead of spilling onto the separator or status bar.
+        let cursor_render_idx = cursor_line
+            .saturating_sub(first_visible)
+            .min(visible_line_count.saturating_sub(1));
         let cursor_row = (rows.saturating_sub(reserve) - visible_line_count as u16 + 1)
             + cursor_render_idx as u16;
         let cursor_x = (prompt_width + cursor_display_col.saturating_sub(h_scroll)) as u16;

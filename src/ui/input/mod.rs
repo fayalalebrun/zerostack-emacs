@@ -58,6 +58,18 @@ impl InputEditor {
         }
     }
 
+    /// Move the cursor to `pos` (a byte offset), clamped to a char boundary
+    /// within the buffer. Used when a mouse click places the cursor.
+    pub fn set_cursor(&mut self, pos: usize) {
+        let pos = pos.min(self.buffer.len());
+        self.cursor = if self.buffer.is_char_boundary(pos) {
+            pos
+        } else {
+            prev_char_boundary(&self.buffer, pos)
+        };
+        self.yank_pos = None;
+    }
+
     pub fn clear_buffer(&mut self) {
         self.buffer.clear();
         self.cursor = 0;

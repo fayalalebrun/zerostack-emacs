@@ -90,6 +90,10 @@ fn refresh_display(
     btw_in: u64,
     btw_out: u64,
 ) -> io::Result<()> {
+    // Reconcile the input height first so the chat viewport is drawn against
+    // the size the input is about to occupy (avoids a stale separator when the
+    // input shrinks, or chat text hidden under it when the input grows).
+    renderer.sync_input_height(&input.buffer)?;
     renderer.render_viewport()?;
     let statusline_ctx = crate::ui::statusline::StatusContext {
         loop_label,
@@ -1061,17 +1065,31 @@ pub async fn run_interactive(
                         continue;
                     }
                     UserEvent::ScrollUp => {
-                        renderer.scroll_line_up();
+                        // Scroll the input viewport first; once it is at the top,
+                        // keep wheeling up to scroll back through the chat history.
+                        if !renderer.input_scroll_up() {
+                            renderer.scroll_line_up();
+                        }
                         refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
                         continue;
                     }
                     UserEvent::ScrollDown => {
-                        renderer.scroll_line_down();
+                        // Bring the chat history back down first, then the input.
+                        if renderer.is_scrolling() {
+                            renderer.scroll_line_down();
+                        } else {
+                            renderer.input_scroll_down();
+                        }
                         refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
                         continue;
                     }
-                    UserEvent::MouseDown { row, col: _ } => {
-                        if row < renderer.visible_lines() as u16
+                    UserEvent::MouseDown { row, col } => {
+                        // A click inside the input area moves the cursor there;
+                        // otherwise it starts a chat-history text selection.
+                        if let Some(pos) = renderer.input_cursor_for_click(row, col, &input.buffer) {
+                            input.set_cursor(pos);
+                            refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
+                        } else if row < renderer.visible_lines() as u16
                             && let Some(idx) = renderer.buffer_line_at_row(row) {
                                 renderer.selection_active = true;
                                 renderer.selection_start = Some(idx);
