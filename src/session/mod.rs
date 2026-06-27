@@ -718,7 +718,6 @@ impl Session {
         }
         self.overhead_tokens
             .saturating_add(self.total_estimated_tokens)
-
     }
 
     pub fn select_compaction_cut(messages: &[SessionMessage], keep_recent: u64) -> usize {
