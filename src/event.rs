@@ -114,7 +114,10 @@ pub enum AgentEvent {
         delay_ms: u64,
         message: CompactString,
     },
-    Error(CompactString),
+    Error {
+        message: CompactString,
+        reasoning: Vec<ProviderReasoning>,
+    },
     /// Provider call finished mid-stream. Carries the real provider-reported
     /// token usage for that call (when available). Used to update the
     /// status-bar estimate and to drive mid-turn compaction decisions

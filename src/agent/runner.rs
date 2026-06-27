@@ -622,8 +622,12 @@ where
                                 .await;
                             continue;
                         }
+                        let reasoning = std::mem::take(&mut response_reasoning);
                         let _ = event_tx
-                            .send(AgentEvent::Error(CompactString::new(message)))
+                            .send(AgentEvent::Error {
+                                message: CompactString::new(message),
+                                reasoning,
+                            })
                             .await;
                         return;
                     }

@@ -377,7 +377,7 @@ async fn run_prompt(
             AgentEvent::Done { .. } => {
                 break;
             }
-            AgentEvent::Error(_) => {
+            AgentEvent::Error { .. } => {
                 break;
             }
         }

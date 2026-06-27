@@ -2597,13 +2597,13 @@ mod imp {
                     }
                     return Ok(Some(response.to_string()));
                 }
-                AgentEvent::Error(e) => {
+                AgentEvent::Error { message, .. } => {
                     server
                         .append_lines(
                             "error-render",
                             turn,
                             vec![WireLine::new(
-                                format!("error: {}", sanitize_output(&e)),
+                                format!("error: {}", sanitize_output(&message)),
                                 "zs-error",
                             )],
                         )
@@ -2611,7 +2611,7 @@ mod imp {
                     server
                         .broadcast_event(
                             "error",
-                            format!(" :turn {} :message {}", turn, sexp_quote(&e)),
+                            format!(" :turn {} :message {}", turn, sexp_quote(&message)),
                         )
                         .await;
                     return Ok(None);

@@ -359,10 +359,17 @@ pub async fn handle_agent_event(
                 Color::DarkGrey,
             )?;
         }
-        AgentEvent::Error(e) => {
+        AgentEvent::Error { message, reasoning } => {
             *was_reasoning = false;
-            let safe = sanitize_output(&e);
+            let safe = sanitize_output(&message);
             renderer.write_line(&format!("error: {}", safe), C_ERROR)?;
+            if !reasoning.is_empty() {
+                session.add_message_with_reasoning(
+                    MessageRole::Assistant,
+                    "[turn failed; partial provider reasoning captured]",
+                    reasoning,
+                );
+            }
             *is_running = false;
             if let Some(ss) = status_signals.as_ref() {
                 ss.send_stop();

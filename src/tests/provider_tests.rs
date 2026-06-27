@@ -7,7 +7,7 @@ use crate::provider::{
     create_client, expand_env, is_agent_model, merge_extra_body, openrouter_anthropic_routing,
     resolve_api_style, resolve_provider_config, serialize_conversation,
 };
-use crate::session::{MessageRole, SessionMessage};
+use crate::session::{MessageRole, SessionMessage, SessionToolCall, SessionToolResult};
 use compact_str::CompactString;
 use std::collections::HashMap;
 
@@ -212,7 +212,12 @@ fn serialize_multiple_roles() {
             estimated_tokens: 1,
             provider_reasoning: Vec::new(),
             provider_usage: None,
-            tool_call: None,
+            tool_call: Some(SessionToolCall {
+                id: CompactString::new("call_1"),
+                call_id: None,
+                name: CompactString::new("read"),
+                arguments: serde_json::json!({ "path": "file" }),
+            }),
             tool_result: None,
         },
         SessionMessage {
@@ -222,7 +227,12 @@ fn serialize_multiple_roles() {
             provider_reasoning: Vec::new(),
             provider_usage: None,
             tool_call: None,
-            tool_result: None,
+            tool_result: Some(SessionToolResult {
+                id: CompactString::new("call_1"),
+                call_id: None,
+                name: CompactString::new("read"),
+                loaded_context: Vec::new(),
+            }),
         },
     ];
     let result = serialize_conversation(&msgs);
@@ -231,6 +241,44 @@ fn serialize_multiple_roles() {
     assert!(result.contains("[System]: note"));
     assert!(result.contains("[ToolCall]: read {path}"));
     assert!(result.contains("[ToolResult]: read:\ncontents"));
+}
+
+#[test]
+fn serialize_skips_legacy_text_only_tool_events() {
+    let msgs = vec![
+        SessionMessage {
+            role: MessageRole::User,
+            content: CompactString::new("keep me"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+        SessionMessage {
+            role: MessageRole::ToolCall,
+            content: CompactString::new("legacy call"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+        SessionMessage {
+            role: MessageRole::ToolResult,
+            content: CompactString::new("legacy result"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+    ];
+
+    let result = serialize_conversation(&msgs);
+    assert!(result.contains("[User]: keep me"));
+    assert!(!result.contains("legacy call"));
+    assert!(!result.contains("legacy result"));
 }
 
 // --- resolve_provider_config tests ---

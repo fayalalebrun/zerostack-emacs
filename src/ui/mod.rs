@@ -548,7 +548,7 @@ async fn mid_turn_compact_and_respawn(
         Color::DarkGrey,
     )?;
 
-    // 3. Compact the session (no-op if its text history is under the limit).
+    // 3. Compact the session.
     #[cfg(feature = "mcp")]
     let mcp_ref = ensure_mcp_manager(mcp_manager, cfg).await;
     let compress_result = handle_compress(
@@ -2119,7 +2119,7 @@ pub async fn run_interactive(
                             )));
                         }
                     }
-                    AgentEvent::Done { .. } | AgentEvent::Error(_) => {
+                    AgentEvent::Done { .. } | AgentEvent::Error { .. } => {
                         turn_trace.clear();
                         awaiting_compaction_relief = false;
                     }
@@ -2183,7 +2183,7 @@ pub async fn run_interactive(
                 let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
                 // Peek before the event is consumed: a failed turn rolls the
                 // in-flight interactive message back into the input editor.
-                let turn_errored = matches!(&event, AgentEvent::Error(_));
+                let turn_errored = matches!(&event, AgentEvent::Error { .. });
                 handle_agent_event(
                     event, &mut renderer, session, cfg, cli, context,
                     &mut is_running, &mut agent_rx, &mut agent_line_started,

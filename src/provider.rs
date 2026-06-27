@@ -817,8 +817,18 @@ pub(crate) fn serialize_conversation(messages: &[SessionMessage]) -> String {
             crate::session::MessageRole::User => "User",
             crate::session::MessageRole::Assistant => "Assistant",
             crate::session::MessageRole::System => "System",
-            crate::session::MessageRole::ToolCall => "ToolCall",
-            crate::session::MessageRole::ToolResult => "ToolResult",
+            crate::session::MessageRole::ToolCall => {
+                if msg.tool_call.is_none() {
+                    continue;
+                }
+                "ToolCall"
+            }
+            crate::session::MessageRole::ToolResult => {
+                if msg.tool_result.is_none() {
+                    continue;
+                }
+                "ToolResult"
+            }
             crate::session::MessageRole::SubagentToolCall => "SubagentToolCall",
         };
         result.push_str(&format!("[{}]: {}\n\n", role_tag, msg.content));
