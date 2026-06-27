@@ -236,6 +236,14 @@ impl Config {
         Self::catalog_context_window(provider, model_id).unwrap_or(128_000)
     }
 
+    fn codex_effective_input_window(model_id: &str) -> Option<u64> {
+        if model_id == "gpt-5.5" || model_id.starts_with("gpt-5.5-") || model_id.contains("codex") {
+            Some(272_000)
+        } else {
+            None
+        }
+    }
+
     /// The model's context window straight from the static catalog, or `None`
     /// when the provider/model is not listed (custom gateways, ollama, or an id
     /// without a `context` entry). Unlike [`resolve_context_window`], this
@@ -243,11 +251,17 @@ impl Config {
     /// real catalog value apart from the default.
     pub fn catalog_context_window(provider: &str, model_id: &str) -> Option<u64> {
         let entries = crate::models_catalog::catalog_entries(provider)?;
-        entries
+        let catalog = entries
             .iter()
             .find(|e| e.id == model_id)
             .and_then(|e| e.context_length)
-            .map(|cl| cl as u64)
+            .map(|cl| cl as u64);
+        if matches!(provider, "openai-codex" | "codex")
+            && let Some(window) = Self::codex_effective_input_window(model_id)
+        {
+            return Some(catalog.map_or(window, |cw| cw.min(window)));
+        }
+        catalog
     }
 
     pub fn resolve_reserve_tokens(

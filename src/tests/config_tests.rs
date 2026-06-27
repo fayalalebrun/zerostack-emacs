@@ -168,3 +168,23 @@ fn resolve_context_window_prefers_config_pin_over_catalog() {
         1_048_576
     );
 }
+
+#[test]
+fn openai_codex_gpt_55_uses_codex_input_window() {
+    let cfg = Config::default();
+    assert_eq!(cfg.resolve_context_window("openai", "gpt-5.5"), 1_050_000);
+    assert_eq!(
+        cfg.resolve_context_window("openai-codex", "gpt-5.5"),
+        272_000
+    );
+    assert_eq!(cfg.resolve_context_window("codex", "gpt-5.5"), 272_000);
+}
+
+#[test]
+fn openai_codex_keeps_smaller_catalog_limits() {
+    let cfg = Config::default();
+    assert_eq!(
+        cfg.resolve_context_window("openai-codex", "gpt-5.3-codex-spark"),
+        128_000
+    );
+}
