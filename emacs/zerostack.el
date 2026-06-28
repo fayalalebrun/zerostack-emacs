@@ -605,6 +605,16 @@ The root is resolved with Projectile when available, then `project.el', then
     (zerostack-board--render snapshot)
     (zerostack--goto-line-column line column)))
 
+(defun zerostack-board--refresh-if-visible ()
+  "Refresh the board buffer when it already exists."
+  (when-let ((buffer (get-buffer zerostack-board-buffer-name)))
+    (run-at-time
+     0 nil
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (zerostack-board-refresh)))))))
+
 (defun zerostack-board--fetch ()
   "Fetch and read one board snapshot S-expression."
   (if zerostack-board--fetch-function
@@ -2551,7 +2561,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (zerostack--set-thinking t))
     ('compact-done
      (zerostack--set-thinking nil)
-     (zerostack--set-status nil))
+     (zerostack--set-status nil)
+     (zerostack-board--refresh-if-visible))
     ('tool-call
      nil)
     ('subagent-tool-call
@@ -2561,7 +2572,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
     ('reasoning
      (zerostack--remember-artifact (plist-get plist :artifact)))
     ('permission-request
-     (zerostack--handle-permission-request plist))
+     (zerostack--handle-permission-request plist)
+     (zerostack-board--refresh-if-visible))
     ('permission-answered
      (when-let ((request (plist-get plist :request)))
        (remhash request zerostack--pending-permissions))
@@ -2575,7 +2587,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (zerostack--clear-pending-permissions)
      (zerostack--set-thinking nil)
      (unless zerostack--loop-active
-       (zerostack--set-status nil)))
+       (zerostack--set-status nil))
+     (zerostack-board--refresh-if-visible))
     ('latex-preview-ready
      (zerostack--handle-latex-preview-ready (plist-get plist :items)))
     ('aborted

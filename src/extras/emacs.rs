@@ -1797,6 +1797,7 @@ mod imp {
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
+            mark_attention(server, "after compaction").await;
             server
                 .broadcast_event("compact-done", format!(" :turn {}", turn))
                 .await;
@@ -1816,6 +1817,7 @@ mod imp {
         if let Some(ss) = server.status_signals.as_ref() {
             ss.send_stop();
         }
+        mark_attention(server, "after compaction").await;
         server
             .broadcast_event("compact-done", format!(" :turn {}", turn))
             .await;
@@ -2756,6 +2758,13 @@ mod imp {
         }
     }
 
+    async fn mark_attention(server: &Arc<Server>, reason: &str) {
+        let session_id = server.current_session_id().await;
+        if let Err(e) = crate::extras::emacs_attention::mark(&session_id) {
+            tracing::warn!("failed to mark Emacs attention {reason}: {e}");
+        }
+    }
+
     #[cfg(feature = "loop")]
     async fn run_loop_validation(run_cmd: Option<&str>) -> Option<String> {
         let cmd = run_cmd?.trim();
@@ -2797,6 +2806,7 @@ mod imp {
                 mutable.pending_permissions.insert(id, req);
                 id
             };
+            mark_attention(&server, "for permission request").await;
             server
                 .broadcast_event(
                     "permission-request",
