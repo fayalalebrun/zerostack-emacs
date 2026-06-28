@@ -60,6 +60,7 @@ pub async fn atomic_write(
     let write_result = async {
         let mut f = tokio::fs::File::create(&tmp_path).await?;
         f.write_all(contents.as_ref()).await?;
+        f.flush().await?;
         Ok::<(), std::io::Error>(())
     }
     .await;
