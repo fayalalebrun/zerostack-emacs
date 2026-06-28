@@ -725,6 +725,7 @@ pub async fn run_interactive(
     #[cfg(feature = "advisor")] mut handoff_rx: Option<crate::extras::advisor::HandoffReceiver>,
 ) -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
+    crate::startup_profile::mark("ui:terminal_ready");
 
     // Display preference: whether the status bar shows the cost even at $0.0000.
     session.show_cost_always = cfg.resolve_show_cost_always();
@@ -737,12 +738,14 @@ pub async fn run_interactive(
     if crate::ui::statusline::needs_git_status() {
         session.refresh_git_status();
     }
+    crate::startup_profile::mark("ui:git_ready");
     let mut last_branch_check = std::time::Instant::now();
 
     #[cfg(feature = "mcp")]
     let mut mcp_manager: Option<McpClientManager> = None;
 
     let mut renderer = Renderer::new()?;
+    crate::startup_profile::mark("ui:renderer_ready");
     renderer.set_statusline_height(crate::ui::statusline::line_count());
     renderer.set_monochrome(cli.no_color);
     renderer.set_chat_margin(cfg.resolve_chat_left_margin());
@@ -784,6 +787,7 @@ pub async fn run_interactive(
         input.set_provider_names(providers);
     }
     input.load_global_history();
+    crate::startup_profile::mark("ui:history_loaded");
     let mut is_running = false;
     let mut agent_rx: Option<mpsc::Receiver<AgentEvent>> = None;
     // Abort handle for the single in-flight main run. Enforces "at most one main
@@ -850,6 +854,7 @@ pub async fn run_interactive(
     };
 
     render_session(&mut renderer, session, cli, cfg, context)?;
+    crate::startup_profile::mark("ui:session_rendered");
     let marker_path = crate::session::storage::data_dir().join("shown_welcome_msg");
     if cfg.resolve_always_show_welcome() || !marker_path.exists() {
         crate::ui::events::show_welcome(&mut renderer)?;
@@ -873,6 +878,10 @@ pub async fn run_interactive(
         btw_total_in,
         btw_total_out,
     )?;
+    crate::startup_profile::mark("ui:first_paint");
+    if crate::startup_profile::exit_after_first_paint() {
+        return Ok(());
+    }
 
     // pre-warm the current provider's live models into the picker (best-effort)
     // Moved after first paint so the TUI is visible while the network call completes.

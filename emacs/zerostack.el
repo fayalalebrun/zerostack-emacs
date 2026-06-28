@@ -256,6 +256,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--cols nil)
 (defvar-local zerostack--metadata-status-request nil)
 (defvar-local zerostack--line-markers nil)
+(defvar-local zerostack--backfill-queue nil)
+(defvar-local zerostack--backfill-timer nil)
 (defvar-local zerostack--notice-start-marker nil)
 (defvar-local zerostack--prompt-start-marker nil)
 (defvar-local zerostack--input-marker nil)
@@ -314,6 +316,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--context-window nil)
   (setq-local zerostack--metadata-status-request nil)
   (setq-local zerostack--line-markers nil)
+  (setq-local zerostack--backfill-queue nil)
+  (setq-local zerostack--backfill-timer nil)
   (setq-local zerostack--notice-start-marker nil)
   (setq-local zerostack--controls-start-marker nil)
   (setq-local zerostack--line-buffer "")
@@ -2521,6 +2525,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      (zerostack--clear-render-caches)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
+    ('session-prepend
+     (zerostack--queue-prepend-lines (or (plist-get plist :lines) nil)))
     ((or 'user-render 'assistant-render 'reasoning-render 'tool-render 'error-render 'retry-render)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
@@ -2737,6 +2743,50 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
                     (read-string "Allow-always pattern: "
                                  (or (plist-get permission :suggested-pattern) "")))))
     (zerostack-permission-answer request decision pattern)))
+
+(defun zerostack--queue-prepend-lines (lines)
+  "Queue older rendered logical LINES for idle backfill."
+  (when lines
+    (setq zerostack--backfill-queue (append zerostack--backfill-queue (list lines)))
+    (unless (timerp zerostack--backfill-timer)
+      (setq zerostack--backfill-timer
+            (run-at-time 0.01 0.01 #'zerostack--backfill-step (current-buffer))))))
+
+(defun zerostack--backfill-step (buffer)
+  "Insert one queued history chunk into BUFFER."
+  (if (not (buffer-live-p buffer))
+      (when (timerp zerostack--backfill-timer)
+        (cancel-timer zerostack--backfill-timer))
+    (with-current-buffer buffer
+      (if zerostack--backfill-queue
+          (let ((lines (pop zerostack--backfill-queue)))
+            (zerostack--prepend-lines lines))
+        (when (timerp zerostack--backfill-timer)
+          (cancel-timer zerostack--backfill-timer))
+        (setq zerostack--backfill-timer nil)))))
+
+(defun zerostack--prepend-lines (lines)
+  "Insert rendered logical LINES before the current transcript."
+  (zerostack--ensure-prompt)
+  (when lines
+    (zerostack--without-undo
+      (let ((saved-point (copy-marker (point) nil)))
+        (unwind-protect
+            (let ((new-markers nil)
+                  (inhibit-read-only t)
+                  (start (if zerostack--line-markers
+                             (marker-position (car zerostack--line-markers))
+                           (marker-position zerostack--notice-start-marker))))
+              (save-excursion
+                (goto-char start)
+                (dolist (line lines)
+                  (let ((marker (copy-marker (point) nil)))
+                    (push marker new-markers)
+                    (zerostack--insert-wire-line line)))
+                (setq zerostack--line-markers
+                      (append (nreverse new-markers) zerostack--line-markers))))
+          (goto-char saved-point)
+          (set-marker saved-point nil))))))
 
 (defun zerostack--replace-lines (replace-from lines)
   "Replace rendered logical lines from REPLACE-FROM with LINES."

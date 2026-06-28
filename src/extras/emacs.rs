@@ -284,6 +284,7 @@ mod imp {
         status_signals: Option<StatusSignals>,
     ) -> anyhow::Result<()> {
         let (registration, listener) = Registration::create(&session)?;
+        crate::startup_profile::mark("emacs:socket_ready");
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let server = Arc::new(Server {
             client: Mutex::new(client),
@@ -622,6 +623,7 @@ mod imp {
                 sexp_quote(server.socket_path.to_string_lossy().as_ref()),
             ))
             .await;
+        crate::startup_profile::mark("emacs:client_ready_sent");
 
         loop {
             match reader.next_line().await {
@@ -717,6 +719,10 @@ mod imp {
         cmd: &Command,
         out: &mpsc::Sender<String>,
     ) -> anyhow::Result<()> {
+        const INITIAL_TAIL_LINES: usize = 800;
+        const BACKFILL_CHUNK_LINES: usize = 400;
+
+        crate::startup_profile::mark("emacs:attach_start");
         let session_id = server.current_session_id().await;
         if let Err(e) = crate::extras::emacs_attention::dismiss(&session_id) {
             tracing::warn!("failed to dismiss Emacs attention marker: {e}");
@@ -726,16 +732,53 @@ mod imp {
         }
         let cols = server.mutable.lock().await.cols;
         let lines = render_session_lines(server, cols).await;
+        crate::startup_profile::mark("emacs:attach_rendered");
         let running = server.mutable.lock().await.running;
         if !running {
             server.mutable.lock().await.line_count = lines.len();
         }
-        let seq = server.next_seq().await;
+        let session_id = server.current_session_id().await;
+        if lines.len() <= INITIAL_TAIL_LINES {
+            let seq = server.next_seq().await;
+            send_lines_event(out, seq, &session_id, "session-render", 0, &lines).await?;
+        } else {
+            let split = lines.len() - INITIAL_TAIL_LINES;
+            let seq = server.next_seq().await;
+            send_lines_event(out, seq, &session_id, "session-render", 0, &lines[split..]).await?;
+            crate::startup_profile::mark("emacs:attach_tail_sent");
+            for start in (0..split).step_by(BACKFILL_CHUNK_LINES).rev() {
+                let end = (start + BACKFILL_CHUNK_LINES).min(split);
+                let seq = server.next_seq().await;
+                send_lines_event(
+                    out,
+                    seq,
+                    &session_id,
+                    "session-prepend",
+                    0,
+                    &lines[start..end],
+                )
+                .await?;
+            }
+        }
+        crate::startup_profile::mark("emacs:attach_sent");
+        Ok(())
+    }
+
+    async fn send_lines_event(
+        out: &mpsc::Sender<String>,
+        seq: u64,
+        session_id: &str,
+        event_type: &str,
+        replace_from: usize,
+        lines: &[WireLine],
+    ) -> anyhow::Result<()> {
         out.send(format!(
-            "(event :seq {} :session {} :type session-render :replace-from 0 :lines {})",
+            "(event :seq {} :session {} :type {} :replace-from {} :lines {})",
             seq,
-            sexp_quote(&server.current_session_id().await),
-            lines_to_sexp(&lines),
+            sexp_quote(session_id),
+            event_type,
+            replace_from,
+            lines_to_sexp(lines),
         ))
         .await?;
         Ok(())

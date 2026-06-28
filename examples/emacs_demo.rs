@@ -136,17 +136,7 @@ mod unix_demo {
         let connect = first_socket
             .map(|socket| {
                 let socket = emacs_lisp_string(&socket.to_string_lossy());
-                let prompt = emacs_lisp_string(
-                    "Show the native Emacs demo. Take multiple tool turns with visible thinking, use the project-local demo skills if relevant, exercise every available zerostack tool including a task subagent call, produce one long bash output that is saved outside the transcript, read the saved output path back with the read tool, then return markdown with a table, code block, task list, inline LaTeX, and display LaTeX. The first tool call should ask me for permission; I can answer with the inline permission buttons below the prompt. I may press C-c C-c to abort while you are thinking.",
-                );
-                format!(
-                    "(let ((buf (zerostack-connect {socket}))) \
-                      (run-at-time 1 nil \
-                        (lambda () \
-                          (when (buffer-live-p buf) \
-                            (with-current-buffer buf \
-                              (zerostack-send-prompt {prompt}))))))"
-                )
+                format!("(zerostack-connect {socket})")
             })
             .unwrap_or_default();
         format!(
@@ -402,13 +392,22 @@ timeout_secs = 60
         )?;
 
         let mut specs = vec![
+            seed_session_with_messages(
+                env,
+                "Huge transcript stress test",
+                &alpha.main,
+                true,
+                false,
+                0,
+                huge_demo_messages(),
+            )?,
             seed_session(
                 env,
                 "Live table rendering",
                 &alpha_tables,
                 true,
                 true,
-                0,
+                1,
                 "Can you inspect README.md and show off tables, code, tool output, and LaTeX?",
             )?,
             seed_session(
@@ -417,7 +416,7 @@ timeout_secs = 60
                 &alpha_latex,
                 true,
                 false,
-                1,
+                2,
                 "Please demonstrate reasoning artifacts and AUCTeX-ready math metadata.",
             )?,
             seed_session(
@@ -448,15 +447,7 @@ timeout_secs = 60
                 "Keep this older main-worktree session for ordering contrast.",
             )?,
         ];
-        specs.push(seed_session_with_messages(
-            env,
-            "Huge transcript stress test",
-            &alpha.main,
-            false,
-            false,
-            5,
-            huge_demo_messages(),
-        )?);
+
         for idx in 0..12 {
             specs.push(seed_session(
                 env,
@@ -718,23 +709,41 @@ timeout_secs = 60
 
     fn huge_demo_messages() -> Vec<DemoMessage> {
         let mut messages = Vec::new();
+        let prose = "markdown-heavy session replay benchmark ".repeat(220);
+        let code = (0..160)
+            .map(|idx| format!("fn generated_{idx}() {{ println!(\"line {idx}\"); }}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let table = (0..40)
+            .map(|idx| format!("| {idx} | **bold** | `code` |"))
+            .collect::<Vec<_>>()
+            .join("\n");
         messages.push(DemoMessage::new(
             "user",
-            "Create a long-running architecture review with enough text to stress the Emacs transcript renderer.",
+            "Open this intentionally huge transcript to test tail-first Emacs loading and older-history backfill.",
         ));
         for turn in 1..=80 {
             messages.push(DemoMessage::new(
                 "assistant",
                 &format!(
-                    "## Huge transcript section {turn}\n\n{}\n\n| Area | Detail |\n| --- | --- |\n| renderer | preserves point while replacing rendered markdown |\n| board | keeps huge sessions discoverable without flooding rows |\n| math | $E = mc^2$ and $\\alpha + \\beta$ remain inline |\n\n```rust\nfn section_{turn}() {{ println!(\"large demo transcript\"); }}\n```\n",
-                    "This seeded assistant message repeats enough explanatory prose to make the session visibly large when opened. ".repeat(18)
+                    "# Huge transcript block {turn}\n\n{prose}\n\n```rust\n{code}\n```\n\n| a | b | c |\n|---|---|---|\n{table}\n\nInline math $E = mc^2$ and display math:\n\n$$\\alpha + \\beta = \\gamma$$\n"
                 ),
             ));
             messages.push(DemoMessage::new(
+                "tool_call",
+                &format!("bash {{\"command\":\"printf block-{turn}\"}}"),
+            ));
+            let output = (0..180)
+                .map(|idx| format!("\x1b[31mtool result {turn}.{idx}\x1b[0m lorem ipsum"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            messages.push(DemoMessage::new(
+                "tool_result",
+                &format!("bash output:\n{output}"),
+            ));
+            messages.push(DemoMessage::new(
                 "user",
-                &format!(
-                    "Continue section {turn} with more notes about the native Emacs board demo."
-                ),
+                &format!("Continue block {turn} with more notes about the native Emacs demo."),
             ));
         }
         messages

@@ -15,6 +15,7 @@ mod pricing;
 mod provider;
 mod sandbox;
 mod session;
+mod startup_profile;
 mod ui;
 
 #[cfg(test)]
@@ -104,8 +105,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    crate::startup_profile::mark("main:start");
     let cli = cli::Cli::parse();
+    crate::startup_profile::mark("cli:parsed");
     let (mut cfg, is_first_startup) = config::load();
+    crate::startup_profile::mark("config:loaded");
 
     if cli.print_config {
         print_config(&cli, &cfg);
@@ -169,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
     // (Version-change / ARCHITECTURE.md prompts are deferred to right before
     // the TUI to avoid blocking startup on stdin.)
     let mut context = context::load(cli.resolve_no_context_files(&cfg));
+    crate::startup_profile::mark("context:loaded");
 
     let mut provider = cli.resolve_provider(&cfg);
     let mut model = cli.resolve_model(&cfg);
@@ -205,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
         && let Some(s) = sessions.into_iter().next()
     {
         session = s;
+        crate::startup_profile::mark("session:continued");
     }
 
     if let Some(session_id) = &cli.session {
@@ -213,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("no session matching '{}'", session_id);
         } else if sessions.len() == 1 {
             session = sessions.into_iter().next().unwrap();
+            crate::startup_profile::mark("session:loaded");
         } else {
             eprintln!("multiple sessions match '{}':", session_id);
             for s in &sessions {
@@ -258,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.api_keys.as_ref(),
         Some(session.id.as_str()),
     )?;
+    crate::startup_profile::mark("client:created");
 
     #[cfg(feature = "subagents")]
     {
@@ -798,6 +806,7 @@ async fn main() -> anyhow::Result<()> {
         if !initial_msg.is_empty() {
             session.add_message(MessageRole::User, &initial_msg);
         }
+        crate::startup_profile::mark("ui:enter");
         ui::run_interactive(
             client,
             None,
