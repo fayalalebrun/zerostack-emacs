@@ -1432,7 +1432,7 @@ Return non-nil when DIRECTORY was newly added."
        (message "Press x on a worktree or session to move it to trash")))))
 
 (defun zerostack-board--stop-session (session)
-  "Stop a live SESSION process and refresh the board."
+  "Stop a live SESSION process, close its chat buffer, and refresh the board."
   (let ((pid (plist-get session :pid))
         (title (or (plist-get session :title) (plist-get session :id))))
     (unless (plist-get session :alive)
@@ -1441,6 +1441,9 @@ Return non-nil when DIRECTORY was newly added."
       (user-error "Live session has no process id: %s" title))
     (when (yes-or-no-p (format "Stop zerostack process %s for %s? " pid title))
       (signal-process pid 'term)
+      (when-let ((chat-buffer (zerostack--find-chat-buffer (plist-get session :id)
+                                                            (plist-get session :socket))))
+        (kill-buffer chat-buffer))
       (message "Stopped zerostack process %s" pid)
       (run-at-time 0.2 nil
                    (lambda (buffer)
