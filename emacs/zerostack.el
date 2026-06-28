@@ -675,7 +675,10 @@ The root is resolved with Projectile when available, then `project.el', then
 (defun zerostack-board-set-default-subagent-model ()
   "Switch the persisted default zerostack subagent model."
   (interactive)
-  (let* ((model (zerostack--read-model nil nil))
+  (let* ((fields (cdr zerostack-board--snapshot))
+         (provider (or (plist-get fields :subagent-provider)
+                       (plist-get fields :provider)))
+         (model (zerostack--read-model provider nil))
          (output (zerostack--config-command "set-subagent-model" model)))
     (zerostack-board-refresh)
     (message "zerostack subagent default %s" (replace-regexp-in-string "\n" ", " output))))
