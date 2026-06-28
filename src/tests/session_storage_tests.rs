@@ -213,8 +213,6 @@ fn find_all_sessions_returns_saved_sessions_newest_first() {
     save_session(&newer).unwrap();
 
     let found = find_all_sessions().unwrap();
-    let found = find_all_sessions().unwrap();
-    let found = find_all_sessions().unwrap();
     assert_eq!(found.len(), 2);
     assert_eq!(found[0].id, newer.id);
     assert_eq!(found[1].id, older.id);

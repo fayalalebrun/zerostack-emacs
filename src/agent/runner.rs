@@ -565,17 +565,15 @@ where
                         break;
                     }
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                        if let Some(usage) = call.usage {
-                            let usage = TokenUsage::from(usage);
-                            usage_total += usage;
-                            latest_usage = Some(usage);
-                            let _ = event_tx
-                                .send(AgentEvent::CompletionCall {
-                                    call_index: call.call_index,
-                                    usage,
-                                })
-                                .await;
-                        }
+                        let usage = TokenUsage::from(call.usage);
+                        usage_total += usage;
+                        latest_usage = Some(usage);
+                        let _ = event_tx
+                            .send(AgentEvent::CompletionCall {
+                                call_index: call.call_index,
+                                usage,
+                            })
+                            .await;
                     }
                     Err(e) => {
                         let message = e.to_string();
@@ -699,11 +697,9 @@ where
                 }
             }
             Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                if let Some(usage) = call.usage {
-                    let usage = TokenUsage::from(usage);
-                    usage_total += usage;
-                    latest_usage = Some(usage);
-                }
+                let usage = TokenUsage::from(call.usage);
+                usage_total += usage;
+                latest_usage = Some(usage);
             }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
             Ok(_) => {}

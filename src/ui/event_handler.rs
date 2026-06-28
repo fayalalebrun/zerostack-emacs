@@ -503,6 +503,7 @@ async fn handle_agent_done(
         renderer.write_line("auto-compacting...", Color::DarkGrey)?;
         let compress_result = handle_compress(
             None,
+            true,
             agent,
             client,
             renderer,
