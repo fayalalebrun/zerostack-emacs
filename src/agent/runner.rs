@@ -564,19 +564,6 @@ where
                         }
                         break;
                     }
-                        if let Some(usage) = call.usage {
-                            let usage = TokenUsage::from(usage);
-                            usage_total += usage;
-                            let _ = event_tx
-                                .send(AgentEvent::CompletionCall {
-                                    call_index: call.call_index,
-                                    usage,
-                                })
-                                .await;
-                        }
->>>>>>> 0ac01d0 (Fix Codex token usage accounting)
-                    }
-=======
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                         if let Some(usage) = call.usage {
                             let usage = TokenUsage::from(usage);
@@ -589,19 +576,6 @@ where
                                 })
                                 .await;
                         }
-                    }
-=======
-                        if let Some(usage) = call.usage {
-                            let usage = TokenUsage::from(usage);
-                            usage_total += usage;
-                            let _ = event_tx
-                                .send(AgentEvent::CompletionCall {
-                                    call_index: call.call_index,
-                                    usage,
-                                })
-                                .await;
-                        }
->>>>>>> 0ac01d0 (Fix Codex token usage accounting)
                     }
                     Err(e) => {
                         let message = e.to_string();

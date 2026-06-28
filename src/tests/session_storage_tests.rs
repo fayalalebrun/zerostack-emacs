@@ -88,9 +88,6 @@ fn save_session_preserves_messages() {
     drop(env);
 }
 
->>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
-fn find_all_sessions_returns_saved_sessions_newest_first() {
-=======
 #[test]
 fn save_session_preserves_provider_reasoning() {
     let env = setup_test_env();
@@ -202,9 +199,6 @@ fn long_tool_result_save_failure_keeps_full_output() {
 
 #[test]
 fn find_all_sessions_returns_saved_sessions_newest_first() {
-=======
->>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
-fn find_all_sessions_returns_saved_sessions_newest_first() {
     let env = setup_test_env();
     let mut older = Session::new("openai", "gpt-4", 128000);
     older.updated_at = "2026-01-01T00:00:00Z".into();
@@ -219,12 +213,8 @@ fn find_all_sessions_returns_saved_sessions_newest_first() {
     save_session(&newer).unwrap();
 
     let found = find_all_sessions().unwrap();
->>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
-=======
     let found = find_all_sessions().unwrap();
-=======
     let found = find_all_sessions().unwrap();
->>>>>>> 67360bd (feat(emacs-board): add project worktree session board)
     assert_eq!(found.len(), 2);
     assert_eq!(found[0].id, newer.id);
     assert_eq!(found[1].id, older.id);
