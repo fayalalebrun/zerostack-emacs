@@ -284,8 +284,6 @@ mod imp {
         status_signals: Option<StatusSignals>,
     ) -> anyhow::Result<()> {
         let (registration, listener) = Registration::create(&session)?;
-        let initial_line_count =
-            render_session_lines(&session, &cli, &cfg, &context, DEFAULT_COLS).len();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let server = Arc::new(Server {
             client: Mutex::new(client),
@@ -303,7 +301,7 @@ mod imp {
             mutable: Mutex::new(MutableState {
                 seq: 0,
                 cols: DEFAULT_COLS,
-                line_count: initial_line_count,
+                line_count: 0,
                 running: false,
                 reasoning_enabled: true,
                 reasoning_effort: None,
@@ -727,11 +725,7 @@ mod imp {
             server.mutable.lock().await.cols = cols.max(20);
         }
         let cols = server.mutable.lock().await.cols;
-        let lines = {
-            let session = server.session.lock().await;
-            let context = server.context.lock().await;
-            render_session_lines(&session, &server.cli, &server.cfg, &context, cols)
-        };
+        let lines = render_session_lines(server, cols).await;
         let running = server.mutable.lock().await.running;
         if !running {
             server.mutable.lock().await.line_count = lines.len();
@@ -1701,11 +1695,7 @@ mod imp {
         };
         server.update_meta_from_session().await;
         let cols = server.mutable.lock().await.cols;
-        let lines = {
-            let session = server.session.lock().await;
-            let context = server.context.lock().await;
-            render_session_lines(&session, &server.cli, &server.cfg, &context, cols)
-        };
+        let lines = render_session_lines(server, cols).await;
         server
             .send_render_event("session-render", 0, 0, lines)
             .await;
@@ -1754,6 +1744,26 @@ mod imp {
 
         let instructions = string_arg(cmd, "instructions");
         let outcome = compact_session(server, instructions.as_deref()).await;
+        if outcome.is_err() {
+            {
+                let mut mutable = server.mutable.lock().await;
+                if mutable.turn == turn {
+                    mutable.running = false;
+                }
+            }
+            if let Some(ss) = server.status_signals.as_ref() {
+                ss.send_stop();
+            }
+            server
+                .broadcast_event("compact-done", format!(" :turn {}", turn))
+                .await;
+        }
+        let outcome = outcome?;
+        let cols = server.mutable.lock().await.cols;
+        let lines = render_session_lines(server, cols).await;
+        server
+            .send_render_event("session-render", turn, 0, lines)
+            .await;
         {
             let mut mutable = server.mutable.lock().await;
             if mutable.turn == turn {
@@ -1763,22 +1773,6 @@ mod imp {
         if let Some(ss) = server.status_signals.as_ref() {
             ss.send_stop();
         }
-
-        if outcome.is_err() {
-            server
-                .broadcast_event("compact-done", format!(" :turn {}", turn))
-                .await;
-        }
-        let outcome = outcome?;
-        let cols = server.mutable.lock().await.cols;
-        let lines = {
-            let session = server.session.lock().await;
-            let context = server.context.lock().await;
-            render_session_lines(&session, &server.cli, &server.cfg, &context, cols)
-        };
-        server
-            .send_render_event("session-render", turn, 0, lines)
-            .await;
         server
             .broadcast_event("compact-done", format!(" :turn {}", turn))
             .await;
@@ -2435,26 +2429,14 @@ mod imp {
                             None
                         }
                     };
-                    if !loaded_lines.is_empty() {
-                        server.append_lines("tool-render", turn, loaded_lines).await;
-                    }
-                    if let Some(artifact) = artifact.as_ref() {
-                        server
-                            .append_lines(
-                                "tool-render",
-                                turn,
-                                vec![WireLine::with_artifact(
-                                    format!(
-                                        "  output: {} ({})",
-                                        sanitize_output(&name),
-                                        format_bytes(artifact.bytes),
-                                    ),
-                                    "zs-link",
-                                    artifact.clone(),
-                                )],
-                            )
-                            .await;
-                    }
+                    let mut lines = loaded_lines;
+                    lines.extend(render_tool_result_lines(
+                        Some(&name),
+                        &safe,
+                        artifact.clone(),
+                        &[],
+                    ));
+                    server.append_lines("tool-render", turn, lines).await;
                     let preview = preview_text(&safe);
                     server
                         .broadcast_event(
@@ -2521,13 +2503,11 @@ mod imp {
                         None => server.mutable.lock().await.line_count,
                     };
                     let mut lines = with_source_lines(
-                        render_assistant_lines(&response, cols, false),
+                        render_assistant_final_lines(&response, cols),
                         assistant_index,
                         MessageRole::Assistant,
                     );
                     let latex_items = attach_latex_metadata(&server, turn, start, &mut lines).await;
-                    lines.push(blank_line().with_source(assistant_index, MessageRole::Assistant));
-                    lines.push(blank_line().with_source(assistant_index, MessageRole::Assistant));
                     server
                         .send_render_event("assistant-render", turn, start, lines)
                         .await;
@@ -2819,12 +2799,27 @@ mod imp {
         }
     }
 
-    fn render_session_lines(
+    async fn render_session_lines(server: &Arc<Server>, cols: usize) -> Vec<WireLine> {
+        let session = server.session.lock().await.clone();
+        let context = server.context.lock().await.clone();
+        render_session_lines_for(
+            &session,
+            &server.cli,
+            &server.cfg,
+            &context,
+            cols,
+            Some(server),
+        )
+        .await
+    }
+
+    async fn render_session_lines_for(
         session: &Session,
         cli: &Cli,
         cfg: &Config,
         context: &ContextFiles,
         cols: usize,
+        server: Option<&Arc<Server>>,
     ) -> Vec<WireLine> {
         let mut out = Vec::new();
         if context.agents.is_some() {
@@ -2836,7 +2831,11 @@ mod imp {
             out.push(WireLine::new("[system] loaded ARCHITECTURE.md", "zs-muted"));
             out.push(blank_line());
         }
-        if !session.compactions.is_empty() {
+        let has_compaction_summary = session
+            .messages
+            .first()
+            .is_some_and(|msg| msg.role == MessageRole::System);
+        if !session.compactions.is_empty() && !has_compaction_summary {
             out.push(WireLine::new(
                 format!(
                     "compacted {} times (saved ~{} tokens)",
@@ -2853,58 +2852,19 @@ mod imp {
         }
         for (message_index, msg) in session.messages.iter().enumerate() {
             match msg.role {
-                MessageRole::User => out.extend(
-                    render_user_lines(&msg.content)
-                        .into_iter()
-                        .map(|line| line.with_source(message_index, msg.role)),
-                ),
-                MessageRole::Assistant => {
+                MessageRole::ToolResult => {
                     out.extend(
-                        render_assistant_lines(&msg.content, cols, true)
+                        render_tool_result_message_lines(msg, server)
+                            .await
                             .into_iter()
                             .map(|line| line.with_source(message_index, msg.role)),
                     );
                 }
-                MessageRole::System => {
-                    for line in msg.content.lines() {
-                        out.push(
-                            WireLine::new(format!("# {}", line), "zs-muted")
-                                .with_source(message_index, msg.role),
-                        );
-                    }
-                    out.push(blank_line().with_source(message_index, msg.role));
-                }
-                MessageRole::ToolCall => {
-                    out.push(
-                        WireLine::new(format!("◈ {}", sanitize_output(&msg.content)), "zs-tool")
-                            .with_source(message_index, msg.role),
-                    );
-                    out.push(blank_line().with_source(message_index, msg.role));
-                }
-                MessageRole::ToolResult => {
-                    let output = msg
-                        .content
-                        .split_once(":\n")
-                        .map(|(_, output)| output)
-                        .unwrap_or(&msg.content);
-                    for line in output.lines() {
-                        out.push(
-                            WireLine::new(
-                                format!("◈ result {}", sanitize_output(line)),
-                                "zs-muted",
-                            )
-                            .with_source(message_index, msg.role),
-                        );
-                    }
-                    out.push(blank_line().with_source(message_index, msg.role));
-                }
-                MessageRole::SubagentToolCall => {
-                    out.push(
-                        WireLine::new(format!("⌥ {}", sanitize_output(&msg.content)), "zs-tool")
-                            .with_source(message_index, msg.role),
-                    );
-                    out.push(blank_line().with_source(message_index, msg.role));
-                }
+                _ => out.extend(
+                    render_message_lines(msg.role, &msg.content, cols)
+                        .into_iter()
+                        .map(|line| line.with_source(message_index, msg.role)),
+                ),
             }
         }
 
@@ -2938,6 +2898,108 @@ mod imp {
         out
     }
 
+    fn render_message_lines(role: MessageRole, content: &str, cols: usize) -> Vec<WireLine> {
+        match role {
+            MessageRole::User => render_user_lines(content),
+            MessageRole::Assistant => render_assistant_final_lines(content, cols),
+            MessageRole::System => render_compaction_summary_lines(content),
+            MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
+            MessageRole::ToolResult => render_tool_result_lines(None, content, None, &[]),
+            MessageRole::SubagentToolCall => render_prefixed_lines("⌥", content, "zs-tool"),
+        }
+    }
+
+    async fn render_tool_result_message_lines(
+        msg: &crate::session::SessionMessage,
+        server: Option<&Arc<Server>>,
+    ) -> Vec<WireLine> {
+        let name = msg
+            .tool_result
+            .as_ref()
+            .map(|result| result.name.as_str())
+            .or_else(|| msg.content.split_once(":\n").map(|(name, _)| name));
+        let loaded_context = msg
+            .tool_result
+            .as_ref()
+            .map(|result| result.loaded_context.as_slice())
+            .unwrap_or(&[]);
+        let safe = sanitize_output(&msg.content);
+        let artifact = match (server, name) {
+            (Some(server), Some(name)) => server
+                .create_artifact(0, "tool-output", name, &safe)
+                .await
+                .ok(),
+            _ => None,
+        };
+        render_tool_result_lines(name, &safe, artifact, loaded_context)
+    }
+
+    fn render_compaction_summary_lines(content: &str) -> Vec<WireLine> {
+        let mut out = vec![
+            blank_line(),
+            WireLine::new("── compacted history ──", "zs-muted"),
+        ];
+        for line in content.lines() {
+            out.push(WireLine::new(sanitize_output(line), "zs-muted"));
+        }
+        out.push(WireLine::new("───────────────────────", "zs-muted"));
+        out.push(blank_line());
+        out
+    }
+
+    fn render_prefixed_lines(prefix: &str, content: &str, face: &'static str) -> Vec<WireLine> {
+        let mut out = Vec::new();
+        for line in content.lines() {
+            out.push(WireLine::new(
+                format!("{} {}", prefix, sanitize_output(line)),
+                face,
+            ));
+        }
+        out.push(blank_line());
+        out
+    }
+
+    fn render_tool_result_lines(
+        name: Option<&str>,
+        content: &str,
+        artifact: Option<ArtifactInfo>,
+        loaded_context: &[CompactString],
+    ) -> Vec<WireLine> {
+        let mut out = loaded_context
+            .iter()
+            .map(|path| {
+                WireLine::new(
+                    format!("  loaded context: {}", sanitize_output(path)),
+                    "zs-muted",
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(artifact) = artifact {
+            out.push(WireLine::with_artifact(
+                format!(
+                    "  output: {} ({})",
+                    sanitize_output(name.unwrap_or("tool")),
+                    format_bytes(artifact.bytes),
+                ),
+                "zs-link",
+                artifact,
+            ));
+        } else {
+            let output = content
+                .split_once(":\n")
+                .map(|(_, output)| output)
+                .unwrap_or(content);
+            for line in output.lines() {
+                out.push(WireLine::new(
+                    format!("◈ result {}", sanitize_output(line)),
+                    "zs-muted",
+                ));
+            }
+        }
+        out.push(blank_line());
+        out
+    }
+
     fn with_source_lines(
         lines: Vec<WireLine>,
         message_index: usize,
@@ -2965,8 +3027,16 @@ mod imp {
         out
     }
 
+    fn render_assistant_final_lines(text: &str, cols: usize) -> Vec<WireLine> {
+        let mut out = render_assistant_lines(text, cols, false);
+        out.push(blank_line());
+        out.push(blank_line());
+        out
+    }
+
     fn render_assistant_lines(text: &str, cols: usize, trailing_blank: bool) -> Vec<WireLine> {
-        let mut out = markdown_to_wire_lines(text, cols);
+        let safe = sanitize_output(text);
+        let mut out = markdown_to_wire_lines(&safe, cols);
         if out.is_empty() {
             out.push(WireLine::new("< ", "zs-normal"));
         } else if let Some(first) = out.first_mut() {
@@ -4419,23 +4489,42 @@ mod imp {
             );
         }
 
-        #[test]
-        fn session_render_lines_include_message_source_metadata() {
+        #[tokio::test]
+        async fn session_render_lines_include_message_source_metadata() {
             let mut session = Session::new("openai", "gpt", 1000);
             session.add_message(MessageRole::User, "hello");
             session.add_message(MessageRole::Assistant, "world");
             let cli = Cli::default();
             let cfg = Config::default();
             let context = crate::context::load(true);
-            let lines = render_session_lines(&session, &cli, &cfg, &context, 100);
+            let lines = render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await;
             let encoded = lines_to_sexp(&lines);
 
             assert!(encoded.contains(":message-index 0 :role user"));
             assert!(encoded.contains(":message-index 1 :role assistant"));
         }
 
-        #[test]
-        fn session_render_lines_include_persisted_tool_events() {
+        #[tokio::test]
+        async fn compacted_session_summary_is_rendered_as_section_not_system_noise() {
+            let mut session = Session::new("openai", "gpt", 1000);
+            session.add_message(MessageRole::User, "old");
+            session.add_message(MessageRole::Assistant, "kept");
+            session.compress("summary line\nmore".to_string(), 1, 10);
+            let cli = Cli::default();
+            let cfg = Config::default();
+            let context = crate::context::load(true);
+            let encoded = lines_to_sexp(
+                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await,
+            );
+
+            assert!(encoded.contains("── compacted history ──"));
+            assert!(encoded.contains("summary line"));
+            assert!(!encoded.contains("# summary line"));
+            assert!(!encoded.contains("compacted 1 times"));
+        }
+
+        #[tokio::test]
+        async fn session_render_lines_include_persisted_tool_events() {
             let mut session = Session::new("openai", "gpt", 1000);
             session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
             session.add_tool_result("bash", "hi\n");
@@ -4443,7 +4532,9 @@ mod imp {
             let cli = Cli::default();
             let cfg = Config::default();
             let context = crate::context::load(true);
-            let encoded = lines_to_sexp(&render_session_lines(&session, &cli, &cfg, &context, 100));
+            let encoded = lines_to_sexp(
+                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await,
+            );
 
             assert!(encoded.contains(":role tool-call"));
             assert!(encoded.contains("◈"));
@@ -4451,6 +4542,32 @@ mod imp {
             assert!(encoded.contains("hi"));
             assert!(encoded.contains(":role subagent-tool-call"));
             assert!(encoded.contains("⌥"));
+        }
+
+        #[test]
+        fn tool_result_lines_use_artifact_summary_when_available() {
+            let artifact = ArtifactInfo {
+                kind: "tool-output",
+                path: PathBuf::from("/tmp/zs/artifacts/turn-0/0001-bash.txt"),
+                mime: "text/plain; charset=utf-8",
+                bytes: 8,
+                preview: "bash: hi".to_string(),
+            };
+            let lines = render_tool_result_lines(Some("bash"), "bash:\nhi\n", Some(artifact), &[]);
+            let encoded = lines_to_sexp(&lines);
+
+            assert!(encoded.contains("  output: bash (8 B)"));
+            assert!(encoded.contains(":artifact"));
+            assert!(!encoded.contains("◈ result hi"));
+        }
+
+        #[test]
+        fn tool_result_lines_fall_back_to_inline_output_without_artifact() {
+            let lines = render_tool_result_lines(None, "bash:\nhi\n", None, &[]);
+            let encoded = lines_to_sexp(&lines);
+
+            assert!(encoded.contains("◈ result hi"));
+            assert!(!encoded.contains(":artifact"));
         }
 
         #[test]

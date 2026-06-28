@@ -2514,7 +2514,11 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
 (defun zerostack--handle-event (plist)
   "Handle event PLIST."
   (pcase (plist-get plist :type)
-    ((or 'session-render 'user-render 'assistant-render 'reasoning-render 'tool-render 'error-render 'retry-render)
+    ('session-render
+     (zerostack--clear-render-caches)
+     (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
+                               (or (plist-get plist :lines) nil)))
+    ((or 'user-render 'assistant-render 'reasoning-render 'tool-render 'error-render 'retry-render)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
     ('loop-started
@@ -2823,6 +2827,14 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
      ((and (listp face) (memq 'zerostack-link-face face)) face)
      ((listp face) (cons 'zerostack-link-face face))
      (t (list 'zerostack-link-face face)))))
+
+(defun zerostack--clear-render-caches ()
+  "Clear metadata tied to the current rendered transcript."
+  (setq zerostack--artifacts nil)
+  (when (hash-table-p zerostack--latex-items)
+    (clrhash zerostack--latex-items))
+  (mapc #'delete-overlay zerostack--latex-overlays)
+  (setq zerostack--latex-overlays nil))
 
 (defun zerostack--remember-artifact (artifact)
   "Remember ARTIFACT if non-nil."

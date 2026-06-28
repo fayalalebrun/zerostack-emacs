@@ -71,7 +71,8 @@ pub fn render_session(
             render_tool_result(renderer, &msg.content, cfg)?;
         } else if msg.role == MessageRole::Assistant {
             let max_width = renderer.line_width();
-            let mut styled = markdown::markdown_to_styled(&msg.content, max_width);
+            let safe = sanitize_output(&msg.content);
+            let mut styled = markdown::markdown_to_styled(&safe, max_width);
             if !styled.is_empty() {
                 styled[0].text = CompactString::from(format!("{} {}", prefix, styled[0].text));
             }

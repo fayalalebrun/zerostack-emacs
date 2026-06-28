@@ -780,7 +780,6 @@ impl Session {
         for msg in &mut self.messages {
             msg.provider_usage = None;
         }
-        self.total_estimated_tokens = self.estimated_message_tokens();
 
         // Recompute total from remaining messages so the count is always
         // consistent — no underflow risk when token_savings is stale.
