@@ -43,7 +43,9 @@ pub fn save_session(session: &Session) -> anyhow::Result<()> {
     let dir = session_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", session.id));
-    let json = serde_json::to_string(session)?;
+    let mut session = session.clone();
+    session.goal = crate::agent::tools::goal::current_goal_state();
+    let json = serde_json::to_string(&session)?;
     std::fs::write(path, json)?;
     Ok(())
 }

@@ -24,6 +24,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     );
     write_result(
         ctx.renderer,
+        "  /goal [clear]          show or clear goal evaluator state",
+    );
+    write_result(
+        ctx.renderer,
         "  /memory [status|search|read|write|editor|clear]  manage memory",
     );
     write_result(ctx.renderer, "  /clear [/new]          clear screen");

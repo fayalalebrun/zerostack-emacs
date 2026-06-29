@@ -7,6 +7,8 @@ use compact_str::CompactString;
 use rig::OneOrMany;
 use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent, Text};
 use serde::{Deserialize, Serialize};
+
+use crate::agent::tools::goal::GoalState;
 use uuid::Uuid;
 
 pub const TOOL_RESULT_SAVE_THRESHOLD: usize = 12_000;
@@ -196,6 +198,8 @@ pub struct Session {
     pub name: CompactString,
     pub messages: Vec<SessionMessage>,
     pub compactions: Vec<Compaction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalState>,
     pub created_at: CompactString,
     pub updated_at: CompactString,
     #[serde(default)]
@@ -301,6 +305,7 @@ impl Session {
             name: CompactString::new(""),
             messages: Vec::new(),
             compactions: Vec::new(),
+            goal: None,
             created_at: now.clone(),
             updated_at: now,
             total_input_tokens: 0,
@@ -802,7 +807,10 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use compact_str::CompactString;
+
     use super::Session;
+    use crate::agent::tools::goal::GoalState;
 
     #[test]
     fn tool_result_loaded_context_round_trips() {
@@ -822,6 +830,28 @@ mod tests {
             loaded.loaded_read_context_paths(),
             vec![std::path::PathBuf::from("/repo/src/AGENTS.md")]
         );
+    }
+
+    #[test]
+    fn goal_round_trips_and_survives_compaction() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.goal = Some(GoalState {
+            content: "Ship feature".to_string(),
+            status: CompactString::new("in_progress"),
+            priority: CompactString::new("high"),
+            evidence: Some("cargo test goal_tests passed".to_string()),
+            evaluator_status: None,
+            evaluator_summary: None,
+        });
+        session.add_message(super::MessageRole::User, "old context");
+        session.add_message(super::MessageRole::Assistant, "new context");
+
+        let json = serde_json::to_string(&session).unwrap();
+        let mut loaded: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.goal, session.goal);
+
+        loaded.compress("summary".to_string(), 1, 10);
+        assert_eq!(loaded.goal, session.goal);
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub(crate) mod bash;
 pub(crate) mod crc;
 pub(crate) mod edit;
 pub(crate) mod find_files;
+pub(crate) mod goal;
 pub(crate) mod grep;
 pub(crate) mod list_dir;
 pub(crate) mod normalize;
@@ -164,6 +165,7 @@ pub(crate) fn untrack_read_path(path: &str) {
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use find_files::FindFilesTool;
+pub use goal::UpdateGoal;
 pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use read::ReadTool;

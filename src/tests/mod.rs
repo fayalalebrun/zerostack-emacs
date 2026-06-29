@@ -25,6 +25,8 @@ mod crc_tests;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
+mod goal_tests;
+#[cfg(test)]
 mod grep_tests;
 #[cfg(test)]
 mod input_tests;

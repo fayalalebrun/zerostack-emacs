@@ -312,7 +312,7 @@ impl PermissionChecker {
     }
 
     pub fn check(&mut self, tool: &str, input: &str) -> CheckResult {
-        if tool == "todo_write" {
+        if tool == "todo_write" || tool == "goal_update" {
             return CheckResult::Allowed;
         }
         if self.allow_all_mcp_calls && tool == "mcp_tool" {
@@ -344,7 +344,7 @@ impl PermissionChecker {
     }
 
     pub fn check_path(&mut self, tool: &str, path: &str) -> CheckResult {
-        if tool == "todo_write" {
+        if tool == "todo_write" || tool == "goal_update" {
             return CheckResult::Allowed;
         }
 

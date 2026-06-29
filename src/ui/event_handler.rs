@@ -2,6 +2,7 @@ use compact_str::CompactString;
 use crossterm::style::Color;
 use tokio::sync::mpsc;
 
+use crate::agent::tools::goal::GOAL;
 use crate::agent::tools::todo::TODO_LIST;
 use crate::cli::Cli;
 use crate::config::{Config, ResolvedShowToolDetails};
@@ -258,6 +259,58 @@ pub async fn handle_agent_event(
                             status_color,
                         )?;
                     }
+                }
+            } else if name == "goal_update" {
+                let goal = GOAL.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(goal) = goal {
+                    renderer.write_line("goal", C_TOOL)?;
+                    let icon = match goal.status.as_str() {
+                        "completed" => "[x]",
+                        "in_progress" => "[>]",
+                        "cancelled" => "[-]",
+                        _ => "[ ]",
+                    };
+                    let status_color = match goal.status.as_str() {
+                        "completed" => Color::Green,
+                        "in_progress" => C_TOOL,
+                        "cancelled" => Color::DarkGrey,
+                        _ => Color::DarkGrey,
+                    };
+                    let priority_mark = match goal.priority.as_str() {
+                        "high" => "!!",
+                        "medium" => "! ",
+                        _ => "  ",
+                    };
+                    let evaluator = goal
+                        .evaluator_status
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| format!(" [{}]", s.trim()))
+                        .unwrap_or_default();
+                    renderer.write_line(
+                        &format!("  {} {} {}{}", icon, priority_mark, goal.content, evaluator),
+                        status_color,
+                    )?;
+                    if let Some(evidence) =
+                        goal.evidence.as_deref().filter(|s| !s.trim().is_empty())
+                    {
+                        renderer.write_line(
+                            &format!("      evidence: {}", evidence.trim()),
+                            Color::DarkGrey,
+                        )?;
+                    }
+                    if let Some(summary) = goal
+                        .evaluator_summary
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        renderer.write_line(
+                            &format!("      evaluator: {}", summary.trim()),
+                            Color::DarkGrey,
+                        )?;
+                    }
+                } else {
+                    renderer.write_line("goal cleared", Color::DarkGrey)?;
                 }
             } else {
                 let show_details = cfg
@@ -534,6 +587,63 @@ async fn handle_agent_done(
         ss.send_stop();
     }
     *agent_rx = None;
+
+    #[cfg(feature = "loop")]
+    let loop_running_now = loop_state.as_ref().is_some_and(|ls| ls.active);
+    #[cfg(not(feature = "loop"))]
+    let loop_running_now = false;
+
+    if !loop_running_now
+        && let Some(prompt) =
+            crate::agent::tools::goal::next_goal_nudge(cfg.resolve_goal_max_nudges())
+    {
+        renderer.write_line("goal still open; continuing...", Color::DarkGrey)?;
+        let history = crate::agent::runner::convert_history(session);
+        session.add_message(MessageRole::User, &prompt);
+        if !cli.no_session {
+            let _ = save_session(session);
+        }
+        if agent.is_none() {
+            let model = client.completion_model(session.model.to_string());
+            let temperature = crate::config::resolve_temperature(cli, cfg, &session.model);
+            let extra_body = crate::config::resolve_extra_body(cfg, &session.model);
+            *agent = Some(
+                crate::provider::build_agent(
+                    model,
+                    cli,
+                    cfg,
+                    context,
+                    permission.clone(),
+                    ask_tx.clone(),
+                    sandbox.clone(),
+                    true,
+                    crate::config::resolve_reasoning_effort(
+                        cli,
+                        cfg,
+                        &session.provider,
+                        &session.model,
+                    )
+                    .as_deref(),
+                    temperature,
+                    extra_body,
+                    #[cfg(feature = "mcp")]
+                    mcp_manager,
+                )
+                .await,
+            );
+        }
+        let runner = agent
+            .as_ref()
+            .unwrap()
+            .clone()
+            .spawn_runner(prompt, history);
+        *agent_rx = Some(runner.event_rx);
+        *is_running = true;
+        if let Some(ss) = status_signals.as_ref() {
+            ss.send_start();
+        }
+        return Ok(());
+    }
 
     #[cfg(feature = "loop")]
     if let Some(ls) = loop_state

@@ -35,6 +35,7 @@ mod unix_demo {
         "find_files",
         "grep",
         "task",
+        "goal_update",
         "write",
         "edit",
         "bash",
@@ -580,7 +581,7 @@ timeout_secs = 60
             &repo.join(".opencode").join("skills").join("tool-tour"),
             "tool-tour",
             "Walk through every built-in tool that the native Emacs demo provider offers.",
-            "Use this skill when the user asks for a demo tour. Mention that the demo intentionally exercises read, list_dir, find_files, grep, task subagents, write, edit, bash, and write_todo_list, then reads back the saved sidecar path for a deliberately long bash output. Delayed reasoning lets C-c C-c interruption be tested.",
+            "Use this skill when the user asks for a demo tour. Mention that the demo intentionally exercises read, list_dir, find_files, grep, task subagents, goal_update evaluation, write, edit, bash, and write_todo_list, then reads back the saved sidecar path for a deliberately long bash output. Delayed reasoning lets C-c C-c interruption be tested.",
         )?;
         Ok(())
     }
@@ -796,6 +797,10 @@ timeout_secs = 60
             },
             DemoPermissionAllowEntry {
                 tool: "task",
+                pattern: "**",
+            },
+            DemoPermissionAllowEntry {
+                tool: "goal_update",
                 pattern: "**",
             },
             DemoPermissionAllowEntry {
@@ -1231,6 +1236,12 @@ timeout_secs = 60
     }
 
     fn chat_completion_frames(request: &Value, sequence: u64) -> Vec<String> {
+        if request_contains_text(request, "narrow independent goal evaluator") {
+            return final_text_frames(
+                sequence,
+                "PASS\nEvidence cites the demo tool tour and supports the single goal.",
+            );
+        }
         let tool = choose_tool(request);
         let reasoning_effort = request
             .get("reasoning")
@@ -1332,6 +1343,46 @@ timeout_secs = 60
     fn demo_prompt_tokens(request: &Value, sequence: u64) -> u64 {
         let request_tokens = request.to_string().len() as u64 / 4;
         256 + sequence + request_tokens
+    }
+
+    fn final_text_frames(sequence: u64, text: &str) -> Vec<String> {
+        let mut frames = Vec::new();
+        for part in split_response(text) {
+            frames.push(sse_chunk(json!({
+                "id": format!("chatcmpl-demo-{sequence}"),
+                "object": "chat.completion.chunk",
+                "created": sequence,
+                "model": MODEL,
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": part },
+                    "finish_reason": null
+                }]
+            })));
+        }
+        frames.push(sse_chunk(json!({
+            "id": format!("chatcmpl-demo-{sequence}"),
+            "object": "chat.completion.chunk",
+            "created": sequence,
+            "model": MODEL,
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+        })));
+        frames.push("data: [DONE]\n\n".to_string());
+        frames
+    }
+
+    fn request_contains_text(request: &Value, needle: &str) -> bool {
+        request
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| content.contains(needle))
+                })
+            })
     }
 
     #[derive(Clone, Debug)]
@@ -1756,6 +1807,13 @@ timeout_secs = 60
                     json!({ "command": DEMO_LONG_BASH_COMMAND, "timeout": 45000, "disable_rtk": true }).to_string()
                 }
             }
+            "goal_update" => json!({
+                "content": "Verify the Emacs demo tool tour",
+                "status": "completed",
+                "priority": "high",
+                "evidence": "Demo provider exercised read, list_dir, find_files, grep, task, write, edit, bash, and saved-output readback before final response."
+            })
+            .to_string(),
             "write_todo_list" => json!({
                 "todos": [
                     { "content": "Render board", "status": "completed", "priority": "high" },
@@ -1817,7 +1875,7 @@ The local OpenAI-compatible provider returned **bold text**, *italic text*, `inl
 
 - [x] styled span sexps
 - [x] real tool calls and tool-output artifacts
-- [x] built-in tool tour: read, list_dir, find_files, grep, task subagent, write, edit, bash, write_todo_list
+- [x] built-in tool tour: read, list_dir, find_files, grep, task subagent, goal_update evaluator, write, edit, bash, write_todo_list
 - [x] saved long tool output path discovered from the transcript and inspected with read
 - [x] project-local skills discovered from .claude/skills and .opencode/skills
 - [x] Rust-rendered inline LaTeX SVG artifacts
@@ -1933,6 +1991,7 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             assert!(claude.contains("inline LaTeX SVGs"));
             assert!(opencode.contains("name: tool-tour"));
             assert!(opencode.contains("task subagents"));
+            assert!(opencode.contains("goal_update"));
             assert!(opencode.contains("write_todo_list"));
         }
 
@@ -1999,6 +2058,7 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
                 "find_files",
                 "grep",
                 "task",
+                "goal_update",
                 "write",
                 "edit",
                 "bash",

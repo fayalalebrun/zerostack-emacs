@@ -179,7 +179,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         let max_grep_results = cfg.resolve_max_grep_results();
         let max_find_results = cfg.resolve_max_find_results();
         let max_list_dir_entries = cfg.resolve_max_list_dir_entries();
-        let base_tools: SmallVec<[Box<dyn rig::tool::ToolDyn>; 8]> = SmallVec::from_buf([
+        let base_tools: SmallVec<[Box<dyn rig::tool::ToolDyn>; 9]> = SmallVec::from_buf([
             Box::new(tools::ReadTool::new(
                 permission.clone(),
                 ask_tx.clone(),
@@ -217,6 +217,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 permission.clone(),
                 ask_tx.clone(),
             )),
+            Box::new(tools::UpdateGoal::new(permission.clone(), ask_tx.clone())),
         ]);
 
         let mut builder = builder.tools(base_tools.into_vec());

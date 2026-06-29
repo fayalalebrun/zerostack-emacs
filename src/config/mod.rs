@@ -46,6 +46,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_agent_turns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_max_nudges: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_text_file_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_read_lines: Option<u64>,
@@ -201,6 +203,10 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn resolve_goal_max_nudges(&self) -> usize {
+        self.goal_max_nudges.unwrap_or(10)
+    }
+
     pub fn custom_providers_map(&self) -> HashMap<String, types::CustomProviderConfig> {
         self.custom_providers.clone().unwrap_or_default()
     }

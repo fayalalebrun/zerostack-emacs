@@ -9,7 +9,9 @@ This keeps the main agent's context clean while enabling thorough lookups.
 
 Subagents are designed for **highly specific questions**, not wide exploration.
 Avoid broad instructions like "check all documentation" — instead ask precise
-questions that can be answered with a few file reads and searches.
+questions that can be answered with a few file reads and searches. The same
+narrow shape is used for goal evaluation: the subagent checks concrete evidence
+against one goal instead of judging the whole conversation.
 
 When the main agent calls the `task` tool, one subagent is spawned per prompt.
 If multiple prompts are given, they run in **parallel**. Each subagent has
@@ -113,6 +115,27 @@ Example `opencode.json`:
   "subagent_provider": "openrouter"
 }
 ```
+
+## Goal Evaluation
+
+`goal_update` tracks a single active implementation goal separately from ordinary
+todos. A `completed` goal is a verified completion claim and must include:
+
+- `evidence`: concrete proof such as commands run with relevant output, files
+  changed, or explicit user confirmation.
+When evidence is present, `goal_update` automatically runs a narrow evaluator
+subagent. The tool stores `evaluator_status` and `evaluator_summary` from that
+report. If evidence is missing, or the evaluator verdict is not `PASS`,
+`goal_update` rejects the completed status and leaves the active goal unchanged.
+`blocked` is accepted only with concrete evidence of an external dependency,
+missing user input, or permission denial, and it is evaluated by the same
+independent subagent path. `cancelled` is accepted only with concrete evidence of
+a user-requested scope change.
+
+This intentionally works with a smaller subagent model: the evaluator receives
+only one goal and the claimed evidence. It must return `PASS`, `FAIL`, or
+`INSUFFICIENT` with citations; it does not infer broad intent from the full
+transcript.
 
 ## Slash Commands
 

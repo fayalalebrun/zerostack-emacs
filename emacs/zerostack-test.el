@@ -966,6 +966,9 @@
      (zerostack-model-menu "gpt-5.5")
      (zerostack-subagent-provider-menu "openrouter")
      (zerostack-subagent-model-menu "deepseek/deepseek-chat-v3.1")
+     (zerostack-goal)
+     (zerostack-clear-goal)
+     (zerostack-list-tools)
      (zerostack-mcp)
      (zerostack-thinking-menu "off")
      (zerostack-send-prompt "hello\nworld")
@@ -985,7 +988,7 @@
 
      (let ((forms (zerostack-test--sent-forms sent)))
        (should (equal (mapcar #'car forms)
-                      '(hello attach render set-view provider model subagent-provider subagent-model mcp thinking prompt compact compact loop-start
+                      '(hello attach render set-view provider model subagent-provider subagent-model goal goal list-tools mcp thinking prompt compact compact loop-start
                               loop-status loop-stop file-add file-list file-drop-all abort
                               permission-answer list-sessions status)))
        (should (equal (nth 0 forms) '(hello :request 1 :protocol 1 :cols 100)))
@@ -996,26 +999,29 @@
        (should (equal (nth 5 forms) '(model :request 6 :model "gpt-5.5")))
        (should (equal (nth 6 forms) '(subagent-provider :request 7 :provider "openrouter")))
        (should (equal (nth 7 forms) '(subagent-model :request 8 :model "deepseek/deepseek-chat-v3.1")))
-       (should (equal (nth 8 forms) '(mcp :request 9)))
-       (should (equal (nth 9 forms) '(thinking :request 10 :level "off")))
-       (should (equal (nth 10 forms) '(prompt :request 11 :text "hello\nworld")))
-       (should (equal (nth 11 forms) '(compact :request 12)))
-       (should (equal (nth 12 forms)
-                      '(compact :request 13 :instructions "keep recent tool output")))
-       (should (equal (nth 13 forms)
-                      '(loop-start :request 14 :prompt "fix bugs" :max 2
+       (should (equal (nth 8 forms) '(goal :request 9 :action show)))
+       (should (equal (nth 9 forms) '(goal :request 10 :action clear)))
+       (should (equal (nth 10 forms) '(list-tools :request 11)))
+       (should (equal (nth 11 forms) '(mcp :request 12)))
+       (should (equal (nth 12 forms) '(thinking :request 13 :level "off")))
+       (should (equal (nth 13 forms) '(prompt :request 14 :text "hello\nworld")))
+       (should (equal (nth 14 forms) '(compact :request 15)))
+       (should (equal (nth 15 forms)
+                      '(compact :request 16 :instructions "keep recent tool output")))
+       (should (equal (nth 16 forms)
+                      '(loop-start :request 17 :prompt "fix bugs" :max 2
                                    :run "cargo test")))
-       (should (equal (nth 14 forms) '(loop-status :request 15)))
-       (should (equal (nth 15 forms) '(loop-stop :request 16)))
-       (should (equal (nth 16 forms) '(file-add :request 17 :path "/tmp/photo.png")))
-       (should (equal (nth 17 forms) '(file-list :request 18)))
-       (should (equal (nth 18 forms) '(file-drop-all :request 19)))
-       (should (equal (nth 19 forms) '(abort :request 20)))
-       (should (equal (nth 20 forms)
+       (should (equal (nth 17 forms) '(loop-status :request 18)))
+       (should (equal (nth 18 forms) '(loop-stop :request 19)))
+       (should (equal (nth 19 forms) '(file-add :request 20 :path "/tmp/photo.png")))
+       (should (equal (nth 20 forms) '(file-list :request 21)))
+       (should (equal (nth 21 forms) '(file-drop-all :request 22)))
+       (should (equal (nth 22 forms) '(abort :request 23)))
+       (should (equal (nth 23 forms)
                       '(permission-answer :request 42 :decision allow-always
                                           :pattern "bash cargo test")))
-       (should (equal (nth 21 forms) '(list-sessions :request 21 :limit 7)))
-       (should (equal (nth 22 forms) '(status :request 22)))))))
+       (should (equal (nth 24 forms) '(list-sessions :request 24 :limit 7)))
+       (should (equal (nth 25 forms) '(status :request 25)))))))
 
 (ert-deftest zerostack-test-send-form-escapes-newlines ()
   (zerostack-test--with-buffer
@@ -1038,12 +1044,29 @@
        (zerostack--handle-ok '(:request 1 :compacted t :messages 2 :saved-tokens 10 :message "compressed"))
        (should-not zerostack--thinking)
        (should-not zerostack--status)
+       (should-not notified)
+       (sit-for 0.25)
        (should notified)))))
+
+(ert-deftest zerostack-test-goal-nudge-cancels-ready-notification ()
+  (zerostack-test--with-buffer
+   (let (notified)
+     (cl-letf (((symbol-function 'zerostack--notify-ready)
+                (lambda () (setq notified t))))
+       (zerostack--set-thinking t)
+       (zerostack--handle-form
+        '(event :seq 1 :session "s" :type done :turn 1))
+       (should-not zerostack--thinking)
+       (zerostack--handle-form
+        '(event :seq 2 :session "s" :type goal-nudge :message "goal still open; continuing..."))
+       (should zerostack--thinking)
+       (sit-for 0.25)
+       (should-not notified)))))
 
 (ert-deftest zerostack-test-command-menu-fallback-dispatches-to-protocol ()
   (zerostack-test--with-buffer
    (let (dispatched)
-     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "subagent-provider" "subagent-model" "mcp" "view" "restart")))
+     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "subagent-provider" "subagent-model" "goal" "clear-goal" "tools" "mcp" "view" "restart")))
        (cl-letf (((symbol-function 'completing-read)
                   (lambda (&rest _) (pop choices)))
                  ((symbol-function 'zerostack-attachment-menu)
@@ -1062,15 +1085,21 @@
                   (lambda (&optional _) (interactive) (push 'subagent-provider dispatched)))
                  ((symbol-function 'zerostack-subagent-model-menu)
                   (lambda (&optional _) (interactive) (push 'subagent-model dispatched)))
-                 ((symbol-function 'zerostack-mcp)
-                  (lambda () (interactive) (push 'mcp dispatched)))
+                  ((symbol-function 'zerostack-goal)
+                   (lambda (&optional _) (interactive) (push 'goal dispatched)))
+                  ((symbol-function 'zerostack-clear-goal)
+                   (lambda () (interactive) (push 'clear-goal dispatched)))
+                  ((symbol-function 'zerostack-list-tools)
+                   (lambda () (interactive) (push 'tools dispatched)))
+                  ((symbol-function 'zerostack-mcp)
+                   (lambda () (interactive) (push 'mcp dispatched)))
                  ((symbol-function 'zerostack-set-view)
                   (lambda () (interactive) (push 'view dispatched)))
                  ((symbol-function 'zerostack-restart-daemon)
                   (lambda () (interactive) (push 'restart dispatched))))
-         (dotimes (_ 11)
+         (dotimes (_ 14)
            (zerostack--command-menu-fallback))))
-     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model subagent-provider subagent-model mcp view restart))))))
+     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model subagent-provider subagent-model goal clear-goal tools mcp view restart))))))
 
 (ert-deftest zerostack-test-restart-daemon-reuses_session_without_closing_buffer ()
   (zerostack-test--with-buffer
@@ -1457,6 +1486,15 @@
     '(event :seq 12 :session "s" :type done :turn 1
             :input-tokens 10 :output-tokens 2))
    (should zerostack--loop-active)
+   (setq zerostack--loop-active nil)
+   (zerostack--handle-form
+    '(event :seq 12 :session "s" :type done :turn 1
+            :input-tokens 10 :output-tokens 2))
+   (should-not zerostack--thinking)
+   (zerostack--handle-form
+    '(event :seq 12 :session "s" :type goal-nudge :message "goal still open; continuing..."))
+   (should zerostack--thinking)
+   (should (equal zerostack--status "continuing goal"))
    (zerostack--handle-form
     `(event :seq 13 :session "s" :type latex-preview-ready :turn 1
             :items (,zerostack-test--latex-item)))
@@ -1649,6 +1687,8 @@
                 (lambda (&rest args) (push args processes))))
        (zerostack--set-thinking t)
        (zerostack--set-thinking nil)
+       (should-not processes)
+       (sit-for 0.25)
        (should (equal processes
                       '(("zerostack-notify" nil "notify-send" "zerostack" "Demo needs input: ready"))))))))
 

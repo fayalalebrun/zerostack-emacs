@@ -37,11 +37,15 @@ pub(crate) fn with_config<F, R>(f: F) -> R
 where
     F: FnOnce(&SubagentConfig) -> R,
 {
+    try_with_config(f).expect("subagents: SubagentConfig not initialized (call init() in main.rs)")
+}
+
+pub(crate) fn try_with_config<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&SubagentConfig) -> R,
+{
     let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = guard
-        .as_ref()
-        .expect("subagents: SubagentConfig not initialized (call init() in main.rs)");
-    f(cfg)
+    guard.as_ref().map(f)
 }
 
 pub fn init(

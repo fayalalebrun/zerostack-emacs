@@ -699,6 +699,8 @@ mod imp {
             "model" => handle_model(&server, &cmd, out).await,
             "subagent-provider" => handle_subagent_provider(&server, &cmd, out).await,
             "subagent-model" => handle_subagent_model(&server, &cmd, out).await,
+            "list-tools" | "tools" => handle_list_tools(&server, &cmd, out).await,
+            "goal" => handle_goal(&server, &cmd, out).await,
             "mcp" => handle_mcp(&server, &cmd, out).await,
             "thinking" | "reasoning" => handle_thinking(&server, &cmd, out).await,
             "loop-start" => handle_loop_start(server.clone(), &cmd, out).await,
@@ -1022,6 +1024,119 @@ mod imp {
         )
         .await;
         Ok(())
+    }
+
+    async fn handle_goal(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        use crate::agent::tools::goal::GOAL;
+
+        if atom_arg(cmd, "action").as_deref() == Some("clear") {
+            crate::agent::tools::goal::clear_goal_state();
+            if !server.cli.no_session {
+                let session = server.session.lock().await;
+                crate::session::storage::save_session(&session)?;
+            }
+            send_ok(
+                out,
+                request_arg(cmd),
+                format!(" :active nil :message {}", sexp_quote("goal cleared")),
+            )
+            .await;
+            return Ok(());
+        }
+
+        let message = {
+            let goal = GOAL.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(goal) = goal {
+                let verdict = goal
+                    .evaluator_status
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!(" [{}]", s.trim()))
+                    .unwrap_or_default();
+                let mut lines = vec![format!(
+                    "goal: {} ({}){}",
+                    goal.content, goal.status, verdict
+                )];
+                if let Some(evidence) = goal.evidence.as_deref().filter(|s| !s.trim().is_empty()) {
+                    lines.push(format!("  evidence: {}", evidence.trim()));
+                }
+                lines.join("\n")
+            } else {
+                "no goal".to_string()
+            }
+        };
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(" :active t :message {}", sexp_quote(&message)),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn handle_list_tools(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let tools = builtin_tool_names(&server.cfg);
+        let lines = std::iter::once("Built-in tools:".to_string())
+            .chain(tools.iter().map(|name| format!("  - {name}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :count {} :tools {} :message {}",
+                tools.len(),
+                string_list_to_sexp(&tools),
+                sexp_quote(&lines),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    fn builtin_tool_names(cfg: &Config) -> Vec<&'static str> {
+        let mut tools = vec![
+            "read",
+            "write",
+            "edit",
+            "bash",
+            "grep",
+            "find_files",
+            "list_dir",
+            "todo_write",
+            "goal_update",
+        ];
+        #[cfg(feature = "subagents")]
+        if cfg.task_enabled.unwrap_or(true) {
+            tools.push("task");
+        }
+        #[cfg(feature = "memory")]
+        tools.extend(["memory_write", "memory_read", "memory_search"]);
+        #[cfg(feature = "advisor")]
+        if crate::extras::advisor::with_config(|c| c.enabled) {
+            tools.push("advisor");
+        }
+        tools.sort_unstable();
+        tools
+    }
+
+    fn string_list_to_sexp(items: &[&str]) -> String {
+        format!(
+            "({})",
+            items
+                .iter()
+                .map(|item| sexp_quote(item))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     }
 
     async fn handle_mcp(
@@ -2119,13 +2234,45 @@ mod imp {
     }
 
     async fn run_prompt(server: Arc<Server>, text: String, turn: u64) {
-        let _ = run_prompt_once(server, text, turn).await;
+        let mut prompt = text;
+        let mut current_turn = turn;
+        loop {
+            let (cleared_current_turn, response) =
+                run_prompt_once(server.clone(), prompt, current_turn, false).await;
+            if !cleared_current_turn || response.is_none() {
+                if cleared_current_turn {
+                    mark_session_attention(&server).await;
+                }
+                break;
+            }
+            let Some(next_prompt) =
+                crate::agent::tools::goal::next_goal_nudge(server.cfg.resolve_goal_max_nudges())
+            else {
+                mark_session_attention(&server).await;
+                break;
+            };
+            clear_session_attention(&server).await;
+            server
+                .broadcast_event(
+                    "goal-nudge",
+                    format!(" :message {}", sexp_quote("goal still open; continuing...")),
+                )
+                .await;
+            current_turn = {
+                let mut mutable = server.mutable.lock().await;
+                mutable.turn += 1;
+                mutable.running = true;
+                mutable.turn
+            };
+            prompt = next_prompt;
+        }
     }
 
     async fn run_prompt_once(
         server: Arc<Server>,
         text: String,
         turn: u64,
+        mark_attention_on_clear: bool,
     ) -> (bool, Option<String>) {
         let response = match run_prompt_inner(server.clone(), text, turn).await {
             Ok(response) => response,
@@ -2162,19 +2309,32 @@ mod imp {
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
-            let session_id = server.current_session_id().await;
-            if let Err(e) = crate::extras::emacs_attention::mark(&session_id) {
-                tracing::warn!("failed to mark Emacs attention: {e}");
+            if mark_attention_on_clear {
+                mark_session_attention(&server).await;
             }
         }
         (cleared_current_turn, response)
+    }
+
+    async fn mark_session_attention(server: &Arc<Server>) {
+        let session_id = server.current_session_id().await;
+        if let Err(e) = crate::extras::emacs_attention::mark(&session_id) {
+            tracing::warn!("failed to mark Emacs attention: {e}");
+        }
+    }
+
+    async fn clear_session_attention(server: &Arc<Server>) {
+        let session_id = server.current_session_id().await;
+        if let Err(e) = crate::extras::emacs_attention::dismiss(&session_id) {
+            tracing::warn!("failed to clear Emacs attention: {e}");
+        }
     }
 
     #[cfg(feature = "loop")]
     async fn run_loop(server: Arc<Server>, mut prompt: String, mut turn: u64) {
         loop {
             let (cleared_current_turn, response) =
-                run_prompt_once(server.clone(), prompt, turn).await;
+                run_prompt_once(server.clone(), prompt, turn, true).await;
             if !cleared_current_turn {
                 break;
             }
@@ -3135,6 +3295,18 @@ mod imp {
                 )
             })
             .collect::<Vec<_>>();
+        if name == Some("goal_update") {
+            let output = content
+                .split_once(":\n")
+                .map(|(_, output)| output)
+                .unwrap_or(content);
+            for line in output.lines() {
+                out.push(WireLine::new(sanitize_output(line), "zs-muted"));
+            }
+            out.push(blank_line());
+            return out;
+        }
+
         if let Some(artifact) = artifact {
             out.push(WireLine::with_artifact(
                 format!(
@@ -4570,6 +4742,31 @@ mod imp {
         }
 
         #[test]
+        fn builtin_tools_include_goal_update() {
+            let tools = builtin_tool_names(&Config::default());
+            assert!(tools.contains(&"goal_update"));
+            assert!(tools.contains(&"todo_write"));
+            assert!(string_list_to_sexp(&["goal_update", "todo_write"]).contains("goal_update"));
+        }
+
+        #[test]
+        fn goal_update_result_renders_evaluator_summary_inline() {
+            let lines = render_tool_result_lines(
+                Some("goal_update"),
+                "goal_update:\nGoal:\n  [x] [high] Ship it\n      evaluator: PASS — verified files\n",
+                None,
+                &[],
+            );
+            let text = lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("evaluator: PASS — verified files"));
+            assert!(!text.contains("◈ result"));
+        }
+
+        #[test]
         fn compact_command_reads_instructions_and_serializes_outcome() {
             let cmd = parse_command(
                 "(compact :request 12 :instructions \"preserve test failure details\")",
@@ -5113,7 +5310,10 @@ mod imp {
                     no_session: true,
                     ..Cli::default()
                 },
-                cfg: Config::default(),
+                cfg: Config {
+                    goal_max_nudges: Some(0),
+                    ..Config::default()
+                },
                 context: Mutex::new(crate::context::load(true)),
                 session: Mutex::new(session),
                 permission: None,

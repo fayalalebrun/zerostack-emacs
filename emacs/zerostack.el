@@ -273,6 +273,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--status nil)
 (defvar-local zerostack--notice nil)
 (defvar-local zerostack--notice-timer nil)
+(defvar-local zerostack--ready-notify-timer nil)
 (defvar-local zerostack--send-function nil)
 (defvar-local zerostack--pending-permissions nil)
 (defvar-local zerostack--artifacts nil)
@@ -329,9 +330,10 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--reasoning-effort-supported nil)
   (setq-local zerostack--reasoning-effort nil)
   (setq-local zerostack--status nil)
-  (setq-local zerostack--notice nil)
-  (setq-local zerostack--notice-timer nil)
-  (setq-local zerostack--pending-permissions (make-hash-table :test 'eql))
+   (setq-local zerostack--notice nil)
+   (setq-local zerostack--notice-timer nil)
+   (setq-local zerostack--ready-notify-timer nil)
+   (setq-local zerostack--pending-permissions (make-hash-table :test 'eql))
   (setq-local zerostack--latex-items (make-hash-table :test 'equal))
   (setq-local zerostack--artifacts nil)
   (setq-local zerostack--clipboard-temp-files nil)
@@ -1766,6 +1768,28 @@ Return non-nil when DIRECTORY was newly added."
                            :request (zerostack--next-request)
                            :model model))
 
+(defun zerostack-list-tools ()
+  "List built-in zerostack tools exposed to the current session."
+  (interactive)
+  (zerostack--send-command 'list-tools :request (zerostack--next-request)))
+
+(defun zerostack-tools ()
+  "Alias for `zerostack-list-tools'."
+  (interactive)
+  (zerostack-list-tools))
+
+(defun zerostack-goal (&optional clear)
+  "Show current goal evaluator state. With CLEAR, clear the goal."
+  (interactive "P")
+  (zerostack--send-command 'goal
+                           :request (zerostack--next-request)
+                           :action (if clear 'clear 'show)))
+
+(defun zerostack-clear-goal ()
+  "Clear the current goal evaluator state."
+  (interactive)
+  (zerostack-goal t))
+
 (defun zerostack-mcp ()
   "List configured MCP servers and tools."
   (interactive)
@@ -2222,12 +2246,14 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
+_k_ skill  _a_ attach  _c_ compact  _f_ fork  _g_ goal  _G_ clear goal  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
     ("c" zerostack-compact)
     ("f" zerostack-fork)
+    ("g" zerostack-goal)
+    ("G" zerostack-clear-goal)
     ("l" zerostack-loop)
     ("t" zerostack-thinking-menu)
     ("r" zerostack-reasoning-effort-menu)
@@ -2235,6 +2261,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
     ("m" zerostack-model-menu)
     ("P" zerostack-subagent-provider-menu)
     ("S" zerostack-subagent-model-menu)
+    ("T" zerostack-list-tools)
     ("M" zerostack-mcp)
     ("v" zerostack-set-view)
     ("o" zerostack-open-last-artifact)
@@ -2252,7 +2279,7 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
   (let* ((commands (append '("skill" "attach" "compact" "fork" "loop" "thinking")
                            (when (zerostack--reasoning-effort-supported-p)
                              '("reasoning"))
-                           '("provider" "model" "subagent-provider" "subagent-model" "mcp" "view" "artifact" "restart")))
+                           '("provider" "model" "subagent-provider" "subagent-model" "goal" "clear-goal" "tools" "mcp" "view" "artifact" "restart")))
          (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
@@ -2266,6 +2293,9 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
       ("model" (call-interactively #'zerostack-model-menu))
       ("subagent-provider" (call-interactively #'zerostack-subagent-provider-menu))
       ("subagent-model" (call-interactively #'zerostack-subagent-model-menu))
+      ("goal" (call-interactively #'zerostack-goal))
+      ("clear-goal" (call-interactively #'zerostack-clear-goal))
+      ("tools" (call-interactively #'zerostack-list-tools))
       ("mcp" (call-interactively #'zerostack-mcp))
       ("view" (call-interactively #'zerostack-set-view))
       ("artifact" (zerostack-open-last-artifact))
@@ -2377,6 +2407,8 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
                 (append (list (car args) "deny") (cdr args))))
       ("/artifact" (zerostack-open-last-artifact))
       ("/latex" (zerostack-open-last-latex-artifact))
+      ("/goal" (zerostack-goal nil))
+      ((or "/tools" "/list-tools") (zerostack-list-tools))
       ("/mcp" (zerostack-mcp))
       ((or "/thinking" "/reasoning")
        (if (car args)
@@ -2559,6 +2591,13 @@ _k_ skill  _a_ attach  _c_ compact  _f_ fork  _l_ loop  _t_ thinking  _r_ reason
       (if (eq (plist-get plist :reason) 'max)
           "loop stopped: max iterations reached"
         "loop stopped")))
+    ('goal-nudge
+     (zerostack--clear-pending-permissions)
+     (zerostack--set-thinking t)
+     (zerostack--set-status "continuing goal")
+     (when-let ((message (plist-get plist :message)))
+       (zerostack--set-notice message))
+     (zerostack-board--refresh-if-visible))
     ('compact-started
      (zerostack--set-status "compacting...")
      (zerostack--set-thinking t))
@@ -3177,12 +3216,31 @@ inserted into the transcript."
 (defun zerostack--set-thinking (thinking)
   "Set whether the input prompt should indicate THINKING."
   (zerostack--ensure-prompt)
+  (when (and thinking zerostack--ready-notify-timer)
+    (cancel-timer zerostack--ready-notify-timer)
+    (setq zerostack--ready-notify-timer nil))
   (unless (eq zerostack--thinking thinking)
     (let ((became-ready (and zerostack--thinking (not thinking))))
       (setq zerostack--thinking thinking)
       (zerostack--refresh-prompt)
       (when became-ready
-        (zerostack--notify-ready)))))
+        (zerostack--schedule-ready-notify)))))
+
+(defun zerostack--schedule-ready-notify ()
+  "Notify ready shortly after completion unless another turn starts."
+  (when zerostack--ready-notify-timer
+    (cancel-timer zerostack--ready-notify-timer))
+  (let ((buffer (current-buffer)))
+    (setq zerostack--ready-notify-timer
+          (run-at-time
+           0.2 nil
+           (lambda (buffer)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (setq zerostack--ready-notify-timer nil)
+                 (unless zerostack--thinking
+                   (zerostack--notify-ready)))))
+           buffer))))
 
 (defun zerostack--notify-ready ()
   "Send a desktop notification that this session is ready for input."

@@ -1,6 +1,7 @@
 pub(crate) mod add;
 mod content;
 mod features;
+mod goal;
 mod help;
 pub(crate) mod init;
 mod memory;
@@ -365,6 +366,7 @@ pub async fn handle_slash(
         }
         "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"
         | "/fork" => session::handle(&parts, &mut ctx).await,
+        "/goal" => goal::handle(&parts, &mut ctx).await,
         "/help" => {
             help::handle(&parts, &mut ctx);
             Ok(())

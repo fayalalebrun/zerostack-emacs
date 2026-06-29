@@ -979,6 +979,24 @@ fn todo_write_path_check_always_allowed() {
     ));
 }
 
+#[test]
+fn goal_update_always_allowed_in_restrictive() {
+    let mut checker = make_checker(SecurityMode::Restrictive);
+    assert!(matches!(
+        checker.check("goal_update", ""),
+        CheckResult::Allowed
+    ));
+}
+
+#[test]
+fn goal_update_path_check_always_allowed() {
+    let mut checker = make_checker(SecurityMode::Restrictive);
+    assert!(matches!(
+        checker.check_path("goal_update", "/any/path"),
+        CheckResult::Allowed
+    ));
+}
+
 // --- Empty permission_modes (all modes skip config rules) ---
 
 #[test]

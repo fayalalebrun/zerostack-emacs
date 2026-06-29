@@ -246,6 +246,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    crate::agent::tools::goal::set_goal_state(session.goal.clone());
+
     sync_runtime_target_from_session(&mut provider, &mut model, &session);
 
     // A resumed session persisted its context_window when first saved, which can
