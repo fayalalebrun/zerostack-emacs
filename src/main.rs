@@ -245,6 +245,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    sync_runtime_target_from_session(&mut provider, &mut model, &session);
+
     // A resumed session persisted its context_window when first saved, which can
     // be stale if the model's catalog entry has changed since (e.g. a model that
     // grew from 128k to 1M). Re-derive it from the catalog for the session's own
@@ -922,6 +924,15 @@ fn print_sessions() {
         println!();
         println!("Use --session <id> to load a session by its ID prefix.");
     }
+}
+
+pub(crate) fn sync_runtime_target_from_session(
+    provider: &mut compact_str::CompactString,
+    model: &mut compact_str::CompactString,
+    session: &session::Session,
+) {
+    *provider = session.provider.clone();
+    *model = session.model.clone();
 }
 
 fn print_config(cli: &cli::Cli, cfg: &config::Config) {

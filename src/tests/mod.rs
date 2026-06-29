@@ -33,6 +33,8 @@ mod list_dir_tests;
 #[cfg(all(test, feature = "loop"))]
 mod loop_tests;
 #[cfg(test)]
+mod main_tests;
+#[cfg(test)]
 mod markdown_tests;
 #[cfg(all(test, feature = "mcp"))]
 mod mcp_oauth_tests;
