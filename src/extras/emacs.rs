@@ -111,6 +111,34 @@ mod imp {
         message: String,
     }
 
+    fn should_auto_compact(session: &Session, cfg: &Config, _memory: Option<&str>) -> bool {
+        if !cfg.resolve_compact_enabled() || session.context_window == 0 {
+            return false;
+        }
+        let qm = crate::config::quick_models_map(cfg);
+        #[cfg(feature = "memory")]
+        let reserve = crate::extras::memory::effective_reserve(
+            cfg.resolve_reserve_tokens(&session.model, &qm),
+            _memory,
+        );
+        #[cfg(not(feature = "memory"))]
+        let reserve = cfg.resolve_reserve_tokens(&session.model, &qm);
+        session.needs_compaction(reserve)
+    }
+
+    fn should_mid_turn_compact(
+        input_tokens: u64,
+        context_window: u64,
+        cfg: &Config,
+    ) -> Option<f64> {
+        if !cfg.resolve_compact_enabled() || context_window == 0 {
+            return None;
+        }
+        let threshold = cfg.resolve_mid_turn_compact_threshold()?;
+        let pressure = input_tokens as f64 / context_window as f64;
+        (pressure > threshold).then_some(pressure)
+    }
+
     struct AttachmentOutcome {
         kind: &'static str,
         path: PathBuf,
@@ -1836,6 +1864,32 @@ mod imp {
         )
     }
 
+    async fn maybe_auto_compact_session(
+        server: &Arc<Server>,
+        turn: u64,
+    ) -> anyhow::Result<CompactionOutcome> {
+        let should_compact = {
+            let session = server.session.lock().await;
+            should_auto_compact(&session, &server.cfg, None)
+        };
+        if !should_compact || server.cli.no_session {
+            return Ok(CompactionOutcome {
+                compacted: false,
+                messages: 0,
+                saved_tokens: 0,
+                message: "auto-compact not needed".to_string(),
+            });
+        }
+        server
+            .broadcast_event("compact-started", format!(" :turn {} :auto t", turn))
+            .await;
+        let outcome = compact_session(server, None).await?;
+        server
+            .broadcast_event("compact-finished", compact_outcome_fields(&outcome))
+            .await;
+        Ok(outcome)
+    }
+
     async fn compact_session(
         server: &Arc<Server>,
         instructions: Option<&str>,
@@ -2535,6 +2589,47 @@ mod imp {
                             ),
                         )
                         .await;
+                    if !server.cli.no_session
+                        && let Some(pressure) =
+                            should_mid_turn_compact(usage.input_tokens, context_window, &server.cfg)
+                    {
+                        if let Some(handle) = server.mutable.lock().await.abort_handle.take() {
+                            handle.abort();
+                        }
+                        server
+                            .broadcast_event(
+                                "compact-started",
+                                format!(
+                                    " :turn {} :auto t :mid-turn t :pressure {}",
+                                    turn,
+                                    (pressure * 100.0).round() as u64
+                                ),
+                            )
+                            .await;
+                        match compact_session(&server, None).await {
+                            Ok(outcome) => {
+                                server
+                                    .broadcast_event(
+                                        "compact-finished",
+                                        format!("{} :mid-turn t", compact_outcome_fields(&outcome)),
+                                    )
+                                    .await;
+                            }
+                            Err(e) => {
+                                server
+                                    .broadcast_event(
+                                        "error",
+                                        format!(
+                                            " :turn {} :message {}",
+                                            turn,
+                                            sexp_quote(&format!("mid-turn compact error: {e}"))
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                        return Ok(None);
+                    }
                 }
                 AgentEvent::Done {
                     response,
@@ -2588,9 +2683,6 @@ mod imp {
                                 .saturating_add(context_usage.cache_creation_input_tokens),
                             context_usage.output_tokens,
                         );
-                        if !server.cli.no_session {
-                            crate::session::storage::save_session(&session)?;
-                        }
                         (
                             session.effective_context_tokens(),
                             session.context_window,
@@ -2598,6 +2690,22 @@ mod imp {
                             billable_output_tokens,
                         )
                     };
+                    if let Err(e) = maybe_auto_compact_session(&server, turn).await {
+                        server
+                            .broadcast_event(
+                                "error",
+                                format!(
+                                    " :turn {} :message {}",
+                                    turn,
+                                    sexp_quote(&format!("auto-compact error: {e}"))
+                                ),
+                            )
+                            .await;
+                    }
+                    if !server.cli.no_session {
+                        let session = server.session.lock().await;
+                        crate::session::storage::save_session(&session)?;
+                    }
                     server.update_meta_from_session().await;
                     server
                         .broadcast_event(
@@ -4671,6 +4779,24 @@ mod imp {
                 ..mutable
             };
             assert!(!should_report_agent_ended(&stopped, 2));
+        }
+
+        #[test]
+        fn emacs_auto_compact_gate_uses_session_threshold() {
+            let cfg = Config::default();
+            let mut session = Session::new("openai", "gpt", 1_000);
+            session.add_message(MessageRole::User, &"x".repeat(900 * 4));
+            assert!(should_auto_compact(&session, &cfg, None));
+        }
+
+        #[test]
+        fn emacs_mid_turn_gate_uses_config_threshold() {
+            let cfg = Config {
+                mid_turn_compact_threshold: Some(0.90),
+                ..Config::default()
+            };
+            assert_eq!(should_mid_turn_compact(901, 1_000, &cfg), Some(0.901));
+            assert_eq!(should_mid_turn_compact(900, 1_000, &cfg), None);
         }
 
         #[test]

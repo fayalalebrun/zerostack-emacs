@@ -325,6 +325,8 @@ no_context_files = true
 max_agent_turns = 12
 max_read_lines = 120
 max_list_dir_entries = 80
+compact_enabled = true
+mid_turn_compact_threshold = 0.90
 
 [custom_providers.{PROVIDER}]
 provider_type = "openai"
@@ -1282,7 +1284,8 @@ timeout_secs = 60
                     "index": 0,
                     "delta": {},
                     "finish_reason": "tool_calls"
-                }]
+                }],
+                "usage": demo_usage(request, sequence)
             })));
         } else {
             for part in split_response(&demo_markdown_response(sequence)) {
@@ -1308,16 +1311,27 @@ timeout_secs = 60
                     "delta": {},
                     "finish_reason": "stop"
                 }],
-                "usage": {
-                    "prompt_tokens": 256 + sequence,
-                    "completion_tokens": 96,
-                    "total_tokens": 352 + sequence
-                }
+                "usage": demo_usage(request, sequence)
             })));
         }
 
         frames.push("data: [DONE]\n\n".to_string());
         frames
+    }
+
+    fn demo_usage(request: &Value, sequence: u64) -> Value {
+        let prompt_tokens = demo_prompt_tokens(request, sequence);
+        let completion_tokens = 96;
+        json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        })
+    }
+
+    fn demo_prompt_tokens(request: &Value, sequence: u64) -> u64 {
+        let request_tokens = request.to_string().len() as u64 / 4;
+        256 + sequence + request_tokens
     }
 
     #[derive(Clone, Debug)]
@@ -2231,6 +2245,28 @@ Open the tool artifact, resize the view with `/view 120`, or refresh the board w
             assert!(command.contains("Raw live-output demo"));
             assert!(command.contains("-lt 260"));
             assert!(command.contains("sleep 0.12"));
+        }
+
+        #[test]
+        fn demo_config_enables_emacs_auto_compaction() {
+            let root = DemoRoot::new().unwrap();
+            let config = root.path().join("config");
+            fs::create_dir_all(&config).unwrap();
+            write_config(&config, "http://127.0.0.1:12345/v1").unwrap();
+            let config = fs::read_to_string(config.join("config.toml")).unwrap();
+
+            assert!(config.contains("compact_enabled = true"));
+            assert!(config.contains("mid_turn_compact_threshold = 0.90"));
+        }
+
+        #[test]
+        fn demo_usage_scales_with_prompt_size_for_compaction_events() {
+            let small = json!({ "messages": [{ "role": "user", "content": "demo" }] });
+            let large = json!({
+                "messages": [{ "role": "user", "content": "x".repeat(8_000) }]
+            });
+
+            assert!(demo_prompt_tokens(&large, 1) > demo_prompt_tokens(&small, 1));
         }
 
         #[test]
