@@ -164,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
 
     let version_changed = docs::ensure_global()?;
     let emacs_mode = cli.emacs;
+    let allow_missing_startup_key = allow_missing_startup_key(&cli);
     #[cfg(feature = "acp")]
     let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode && !emacs_mode;
     #[cfg(not(feature = "acp"))]
@@ -260,13 +261,23 @@ async fn main() -> anyhow::Result<()> {
         session.update_context_window(cw);
     }
 
-    let client = provider::create_client(
-        &provider,
-        cli.api_key.as_deref(),
-        &cfg.custom_providers_map(),
-        cfg.api_keys.as_ref(),
-        Some(session.id.as_str()),
-    )?;
+    let client = if allow_missing_startup_key {
+        provider::create_client_allow_missing_api_key(
+            &provider,
+            cli.api_key.as_deref(),
+            &cfg.custom_providers_map(),
+            cfg.api_keys.as_ref(),
+            Some(session.id.as_str()),
+        )?
+    } else {
+        provider::create_client(
+            &provider,
+            cli.api_key.as_deref(),
+            &cfg.custom_providers_map(),
+            cfg.api_keys.as_ref(),
+            Some(session.id.as_str()),
+        )?
+    };
     crate::startup_profile::mark("client:created");
 
     #[cfg(feature = "subagents")]
@@ -924,6 +935,10 @@ fn print_sessions() {
         println!();
         println!("Use --session <id> to load a session by its ID prefix.");
     }
+}
+
+pub(crate) fn allow_missing_startup_key(cli: &cli::Cli) -> bool {
+    !cli.print && !cli.loop_mode
 }
 
 pub(crate) fn sync_runtime_target_from_session(

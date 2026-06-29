@@ -4,8 +4,9 @@ use crate::config::{ApiStyle, CustomProviderConfig};
 use crate::provider::ModelEntry;
 use crate::provider::{AnyClient, OpenAiClient};
 use crate::provider::{
-    create_client, expand_env, is_agent_model, merge_extra_body, openrouter_anthropic_routing,
-    resolve_api_style, resolve_provider_config, serialize_conversation,
+    create_client, create_client_allow_missing_api_key, expand_env, is_agent_model,
+    merge_extra_body, openrouter_anthropic_routing, resolve_api_style, resolve_provider_config,
+    serialize_conversation,
 };
 use crate::session::{MessageRole, SessionMessage, SessionToolCall, SessionToolResult};
 use compact_str::CompactString;
@@ -41,6 +42,16 @@ fn explicit_model_still_overrides_explicit_provider_default() {
     };
 
     assert_eq!(cli.resolve_model(&cfg), "gpt-5.3-codex-spark");
+}
+
+#[test]
+fn allow_missing_api_key_builds_placeholder_client() {
+    let custom = HashMap::new();
+    let client = create_client_allow_missing_api_key("openai", None, &custom, None, None).unwrap();
+    assert!(matches!(
+        client,
+        AnyClient::OpenAI(OpenAiClient::Responses(_))
+    ));
 }
 
 fn cfg(api_style: Option<ApiStyle>) -> CustomProviderConfig {

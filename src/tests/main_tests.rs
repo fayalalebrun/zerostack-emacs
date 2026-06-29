@@ -13,3 +13,12 @@ fn resumed_session_provider_overrides_current_config_provider() {
     assert_eq!(provider.as_str(), "openai");
     assert_eq!(model.as_str(), "gpt-5.5");
 }
+
+#[test]
+fn server_modes_allow_missing_startup_key() {
+    let cli = crate::cli::Cli {
+        emacs: true,
+        ..Default::default()
+    };
+    assert!(crate::allow_missing_startup_key(&cli));
+}

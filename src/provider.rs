@@ -1118,6 +1118,41 @@ pub fn create_client(
     config_api_keys: Option<&HashMap<String, String>>,
     codex_prompt_cache_key: Option<&str>,
 ) -> anyhow::Result<AnyClient> {
+    create_client_inner(
+        provider_name,
+        api_key,
+        custom_providers,
+        config_api_keys,
+        codex_prompt_cache_key,
+        false,
+    )
+}
+
+pub fn create_client_allow_missing_api_key(
+    provider_name: &str,
+    api_key: Option<&str>,
+    custom_providers: &HashMap<String, CustomProviderConfig>,
+    config_api_keys: Option<&HashMap<String, String>>,
+    codex_prompt_cache_key: Option<&str>,
+) -> anyhow::Result<AnyClient> {
+    create_client_inner(
+        provider_name,
+        api_key,
+        custom_providers,
+        config_api_keys,
+        codex_prompt_cache_key,
+        true,
+    )
+}
+
+fn create_client_inner(
+    provider_name: &str,
+    api_key: Option<&str>,
+    custom_providers: &HashMap<String, CustomProviderConfig>,
+    config_api_keys: Option<&HashMap<String, String>>,
+    codex_prompt_cache_key: Option<&str>,
+    allow_missing_api_key: bool,
+) -> anyhow::Result<AnyClient> {
     let config = resolve_provider_config(provider_name, custom_providers)?;
     let base_url = resolve_base_url(&config);
 
@@ -1138,7 +1173,18 @@ pub fn create_client(
         .with_auth_keys(auth_api_keys.as_ref())
         .with_config_keys(config_api_keys)
         .with_custom_provider_name(Some(provider_name));
-    let key = resolver.resolve()?;
+    let key = match resolver.resolve() {
+        Ok(key) => key,
+        Err(err) if allow_missing_api_key && err.to_string().starts_with("No API key found.") => {
+            tracing::warn!(
+                "starting without API key for provider '{}': {}",
+                provider_name,
+                err
+            );
+            "missing-api-key".to_string()
+        }
+        Err(err) => return Err(err),
+    };
 
     match config.kind {
         ProviderKind::OpenAI => {
