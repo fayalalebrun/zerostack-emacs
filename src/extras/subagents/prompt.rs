@@ -12,6 +12,7 @@ cross-referencing, and synthesizing findings. Report your answer concisely.
 
 ## Rules
 
+- Repository instructions from AGENTS.md/CLAUDE.md may be included in your context or returned by tools; follow them.
 - If ARCHITECTURE.md exists at the project root, you may read it for context.
 - Focus solely on answering the specific question. Do not wander.
 - Search, cross-reference, and verify before answering.

@@ -3,12 +3,15 @@ use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
-use crate::agent::tools::{AskSender, GrepArgs, PermCheck, ToolError, check_perm, is_skip_dir};
+use crate::agent::tools::{
+    AskSender, ContextTracker, GrepArgs, PermCheck, ToolError, check_perm, is_skip_dir,
+};
 
 pub struct GrepTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub max_results: u64,
+    pub context_tracker: Option<ContextTracker>,
 }
 
 impl GrepTool {
@@ -17,7 +20,13 @@ impl GrepTool {
             permission,
             ask_tx,
             max_results,
+            context_tracker: None,
         }
+    }
+
+    pub fn with_context_tracker(mut self, tracker: ContextTracker) -> Self {
+        self.context_tracker = Some(tracker);
+        self
     }
 
     pub(crate) fn glob_to_regex(glob: &str) -> String {
@@ -84,6 +93,13 @@ impl Tool for GrepTool {
             .map_err(|e| ToolError::Msg(format!("Invalid regex pattern: {}", e)))?;
 
         let search_path = crate::fs::expand_tilde(args.path.as_deref().unwrap_or("."));
+        let loaded = crate::context::nested_agents_for_dir(
+            std::path::Path::new(&search_path),
+            &crate::agent::tools::loaded_context_from(&self.context_tracker),
+        );
+        let loaded_paths: Vec<std::path::PathBuf> =
+            loaded.iter().map(|(path, _)| path.clone()).collect();
+        crate::agent::tools::mark_context_loaded_in(&self.context_tracker, &loaded_paths);
         let context = args.context_lines.unwrap_or(0);
 
         let include_re = args.include.as_ref().map(|g| {
@@ -204,7 +220,11 @@ impl Tool for GrepTool {
         }
 
         if all_results.is_empty() {
-            let msg = "No matches found.".to_string();
+            let mut msg = "No matches found.".to_string();
+            if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+                msg.push_str("\n\n");
+                msg.push_str(&reminder);
+            }
             return Ok(match coaching {
                 Some(c) => format!("{}\n\n{}", c, msg),
                 None => msg,
@@ -242,6 +262,12 @@ impl Tool for GrepTool {
                 "{}\n\n[{} matches across {} files; for cross-file enumeration or synthesis, `task` returns a verified summary in one call]",
                 result, total, files_with_matches,
             )
+        } else {
+            result
+        };
+
+        let result = if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+            format!("{}\n\n{}", result, reminder)
         } else {
             result
         };

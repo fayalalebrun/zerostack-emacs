@@ -212,14 +212,34 @@ pub(crate) fn nested_agents_for_read(
     path: &Path,
     already_loaded: &HashSet<PathBuf>,
 ) -> Vec<(PathBuf, String)> {
+    nested_agents_for_path(path, already_loaded, false)
+}
+
+pub(crate) fn nested_agents_for_dir(
+    path: &Path,
+    already_loaded: &HashSet<PathBuf>,
+) -> Vec<(PathBuf, String)> {
+    nested_agents_for_path(path, already_loaded, true)
+}
+
+fn nested_agents_for_path(
+    path: &Path,
+    already_loaded: &HashSet<PathBuf>,
+    include_target_dir: bool,
+) -> Vec<(PathBuf, String)> {
     let Ok(root) = std::env::current_dir().and_then(|p| p.canonicalize()) else {
         return Vec::new();
     };
     let Ok(target) = path.canonicalize() else {
         return Vec::new();
     };
-    let Some(mut current) = target.parent().map(Path::to_path_buf) else {
-        return Vec::new();
+    let mut current = if include_target_dir && target.is_dir() {
+        target
+    } else {
+        let Some(parent) = target.parent() else {
+            return Vec::new();
+        };
+        parent.to_path_buf()
     };
     if !current.starts_with(&root) {
         return Vec::new();
@@ -252,7 +272,7 @@ pub(crate) fn nested_agents_for_read(
 
 #[cfg(test)]
 mod tests {
-    use super::nested_agents_for_read;
+    use super::{nested_agents_for_dir, nested_agents_for_read};
     use std::collections::HashSet;
     use std::fs;
     use std::sync::Mutex;
@@ -284,6 +304,27 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, expected);
+        assert!(found[0].1.contains("components"));
+    }
+
+    #[test]
+    fn nested_agents_for_dir_includes_target_directory() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "zerostack-nested-dir-agents-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/components")).unwrap();
+        fs::write(root.join("src/components/AGENTS.md"), "components").unwrap();
+
+        std::env::set_current_dir(&root).unwrap();
+        let found = nested_agents_for_dir(&root.join("src/components"), &HashSet::new());
+        std::env::set_current_dir(original).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(found.len(), 1);
         assert!(found[0].1.contains("components"));
     }
 }

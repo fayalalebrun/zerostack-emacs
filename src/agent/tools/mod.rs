@@ -15,7 +15,7 @@ pub(crate) use normalize::{levenshtein_similarity, normalize_whitespace};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::config::types::EditSystem;
 
@@ -50,6 +50,12 @@ static READ_LOADED_CONTEXT: LazyLock<Mutex<HashSet<PathBuf>>> =
 static READ_CONTEXT_METADATA: LazyLock<Mutex<HashMap<u64, Vec<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) type ContextTracker = Arc<Mutex<HashSet<PathBuf>>>;
+
+pub(crate) fn new_context_tracker(paths: impl IntoIterator<Item = PathBuf>) -> ContextTracker {
+    Arc::new(Mutex::new(paths.into_iter().collect()))
+}
+
 fn output_key(output: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     output.hash(&mut hasher);
@@ -76,6 +82,38 @@ pub(crate) fn reset_read_context_loaded(paths: impl IntoIterator<Item = PathBuf>
         .unwrap_or_else(|e| e.into_inner());
     loaded.clear();
     loaded.extend(paths);
+}
+
+pub(crate) fn loaded_context_from(tracker: &Option<ContextTracker>) -> HashSet<PathBuf> {
+    tracker
+        .as_ref()
+        .map(|t| t.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        .unwrap_or_else(read_loaded_context)
+}
+
+pub(crate) fn mark_context_loaded_in(tracker: &Option<ContextTracker>, paths: &[PathBuf]) {
+    if let Some(t) = tracker {
+        t.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(paths.iter().cloned());
+    } else {
+        mark_read_context_loaded(paths);
+    }
+}
+
+pub(crate) fn format_context_reminder(loaded: &[(PathBuf, String)]) -> Option<String> {
+    if loaded.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            loaded
+                .iter()
+                .map(|(_, content)| content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ))
+    }
 }
 
 pub(crate) fn set_active_session_id(id: impl Into<Option<String>>) {

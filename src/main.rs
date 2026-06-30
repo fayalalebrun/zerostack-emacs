@@ -343,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
             sub_model.to_string(),
             task_max_turns,
             cfg.clone(),
+            context.agents.clone(),
             #[cfg(feature = "archmd")]
             context.architecture.clone(),
         );

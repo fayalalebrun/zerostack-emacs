@@ -52,7 +52,10 @@ impl Tool for TaskTool {
 Use for any cross-file question: where is X used, how does Y work, \
 find/list/count all X across the codebase, what calls Z, audit Q. \
 The subagent reads, greps, finds files, lists directories, accesses memory, \
-and returns a verified summary. \
+and returns a verified summary. Subagents receive repository instructions \
+and architecture context, but not conversation history; include the user's \
+goal, relevant constraints, known files/symbols, and desired answer shape \
+in each prompt. \
 More reliable than running multiple grep/read calls yourself; the subagent \
 enumerates completely without truncation gaps or synthesis errors across partial views. \
 Multiple prompts run in parallel. \
@@ -65,7 +68,7 @@ editing in a known location, grepping for a literal you will act on immediately.
                     "prompts": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Investigation prompt for the subagent. Use one for a focused question, or multiple to run independent investigations in parallel. Examples: 'List all tests in this project', 'Where is config loaded?', 'How does the agent loop work?'"
+                        "description": "Investigation prompt for the subagent. Include enough standalone context: the user's goal, relevant constraints, known files/symbols, and desired answer shape. Use one for a focused question, or multiple to run independent investigations in parallel. Examples: 'List all tests in this project', 'Where is config loaded?', 'How does the agent loop work?'"
                     }
                 },
                 "required": ["prompts"]
@@ -86,12 +89,13 @@ editing in a known location, grepping for a literal you will act on immediately.
         )
         .await?;
 
-        let (client, model_name, max_turns, config) = with_config(|cfg| {
+        let (client, model_name, max_turns, config, agents) = with_config(|cfg| {
             (
                 cfg.client.clone(),
                 cfg.model_name.clone(),
                 cfg.max_turns,
                 cfg.config.clone(),
+                cfg.agents.clone(),
             )
         });
 
@@ -113,11 +117,18 @@ editing in a known location, grepping for a literal you will act on immediately.
             let model = client.completion_model(model_name.clone());
             let event_tx = subagent_event_tx.clone();
             let architecture = architecture.clone();
+            let agents = agents.clone();
             let config = config.clone();
             let join_handle = tokio::spawn(async move {
                 let work = async {
-                    let agent =
-                        builder::build_explore_agent(model, max_turns, &config, architecture).await;
+                    let agent = builder::build_explore_agent(
+                        model,
+                        max_turns,
+                        &config,
+                        agents,
+                        architecture,
+                    )
+                    .await;
                     agent
                         .run_subagent(&prompt_text, max_turns, event_tx.as_ref())
                         .await

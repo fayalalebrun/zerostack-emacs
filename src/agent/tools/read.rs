@@ -3,7 +3,7 @@ use rig::tool::Tool;
 
 use crate::agent::tools::crc::crc32_hex;
 use crate::agent::tools::{
-    AskSender, PermCheck, ReadArgs, ToolError, check_perm_path, edit_system,
+    AskSender, ContextTracker, PermCheck, ReadArgs, ToolError, check_perm_path, edit_system,
 };
 use crate::config::types::EditSystem;
 
@@ -14,6 +14,7 @@ pub struct ReadTool {
     pub ask_tx: Option<AskSender>,
     pub max_text_file_size: u64,
     pub max_lines: u64,
+    pub context_tracker: Option<ContextTracker>,
 }
 
 impl ReadTool {
@@ -28,7 +29,13 @@ impl ReadTool {
             ask_tx,
             max_text_file_size: max_text_file_size.unwrap_or(DEFAULT_MAX_TEXT_SIZE),
             max_lines,
+            context_tracker: None,
         }
+    }
+
+    pub fn with_context_tracker(mut self, tracker: ContextTracker) -> Self {
+        self.context_tracker = Some(tracker);
+        self
     }
 }
 
@@ -181,23 +188,19 @@ impl Tool for ReadTool {
 
         let loaded = crate::context::nested_agents_for_read(
             std::path::Path::new(&path),
-            &crate::agent::tools::read_loaded_context(),
+            &crate::agent::tools::loaded_context_from(&self.context_tracker),
         );
         let loaded_paths: Vec<std::path::PathBuf> =
             loaded.iter().map(|(path, _)| path.clone()).collect();
-        crate::agent::tools::mark_read_context_loaded(&loaded_paths);
+        crate::agent::tools::mark_context_loaded_in(&self.context_tracker, &loaded_paths);
 
         let info = if loaded.is_empty() {
             info
         } else {
             format!(
-                "{}\n\n<system-reminder>\n{}\n</system-reminder>",
+                "{}\n\n{}",
                 info,
-                loaded
-                    .iter()
-                    .map(|(_, content)| content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
+                crate::agent::tools::format_context_reminder(&loaded).unwrap_or_default()
             )
         };
 

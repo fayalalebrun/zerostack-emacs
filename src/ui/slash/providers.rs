@@ -539,6 +539,7 @@ async fn model_for_subagent(
         model,
         max_turns,
         ctx.cfg,
+        None,
         #[cfg(feature = "archmd")]
         None,
     )

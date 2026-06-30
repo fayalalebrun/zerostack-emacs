@@ -39,12 +39,13 @@ const GOAL_EVALUATOR_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 #[cfg(feature = "subagents")]
 async fn evaluate_goal(goal: &GoalState, action: &str) -> Result<String, ToolError> {
-    let (client, model_name, max_turns, config) = try_with_config(|cfg| {
+    let (client, model_name, max_turns, config, agents) = try_with_config(|cfg| {
         (
             cfg.client.clone(),
             cfg.model_name.clone(),
             cfg.max_turns,
             cfg.config.clone(),
+            cfg.agents.clone(),
         )
     })
     .ok_or_else(|| {
@@ -61,7 +62,8 @@ async fn evaluate_goal(goal: &GoalState, action: &str) -> Result<String, ToolErr
     let model = client.completion_model(model_name);
     let event_tx = clone_subagent_event_tx();
     let work = async move {
-        let agent = builder::build_explore_agent(model, max_turns, &config, architecture).await;
+        let agent =
+            builder::build_explore_agent(model, max_turns, &config, agents, architecture).await;
         agent
             .run_subagent(&prompt, max_turns, event_tx.as_ref())
             .await
