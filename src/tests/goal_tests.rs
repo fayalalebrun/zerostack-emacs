@@ -5,6 +5,8 @@ use crate::agent::tools::goal::{
 use compact_str::CompactString;
 use rig::tool::Tool;
 
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn reset_goal() {
     clear_goal_state();
 }
@@ -21,6 +23,7 @@ fn args(content: &str, status: &str) -> GoalUpdateArgs {
 
 #[tokio::test]
 async fn definition_name() {
+    let _guard = TEST_LOCK.lock().unwrap();
     let tool = UpdateGoal::new(None, None);
     let def = tool.definition(String::new()).await;
     assert_eq!(def.name, "goal_update");
@@ -28,6 +31,7 @@ async fn definition_name() {
 
 #[tokio::test]
 async fn clear_goal() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let result = tool
@@ -45,6 +49,7 @@ async fn clear_goal() {
 
 #[tokio::test]
 async fn open_goal_nudges_until_limit() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     tool.call(args("Ship feature", "in_progress"))
@@ -59,6 +64,7 @@ async fn open_goal_nudges_until_limit() {
 
 #[tokio::test]
 async fn blocked_goal_requires_concrete_external_reason() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let result = tool.call(args("Ship feature", "blocked")).await;
@@ -69,6 +75,7 @@ async fn blocked_goal_requires_concrete_external_reason() {
 
 #[tokio::test]
 async fn blocked_goal_with_reason_runs_evaluator() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let mut goal = args("Ship feature", "blocked");
@@ -88,6 +95,7 @@ async fn blocked_goal_with_reason_runs_evaluator() {
 
 #[tokio::test]
 async fn cancelled_goal_does_not_nudge_when_evidence_is_provided() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let mut goal = args("Ship feature", "cancelled");
@@ -99,6 +107,7 @@ async fn cancelled_goal_does_not_nudge_when_evidence_is_provided() {
 
 #[tokio::test]
 async fn completed_goal_requires_evidence() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let result = tool.call(args("Ship feature", "completed")).await;
@@ -121,6 +130,7 @@ fn parses_evaluator_verdict_from_first_non_empty_line() {
 
 #[tokio::test]
 async fn completed_goal_runs_evaluator() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let mut goal = args("Ship feature", "completed");
@@ -139,6 +149,7 @@ async fn completed_goal_runs_evaluator() {
 
 #[tokio::test]
 async fn in_progress_goal_with_evidence_is_accepted_without_evaluator() {
+    let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let mut goal = args("Ship feature", "in_progress");

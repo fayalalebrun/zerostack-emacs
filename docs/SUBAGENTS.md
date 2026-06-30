@@ -119,7 +119,9 @@ Example `opencode.json`:
 ## Goal Evaluation
 
 `goal_update` tracks a single active implementation goal separately from ordinary
-todos. A `completed` goal is a verified completion claim and must include:
+todos. Agents should create one only when the user explicitly asks for a
+tracked goal/active goal, or when updating an existing active goal. A
+`completed` goal is a verified completion claim and must include:
 
 - `evidence`: concrete proof such as commands run with relevant output, files
   changed, or explicit user confirmation.
