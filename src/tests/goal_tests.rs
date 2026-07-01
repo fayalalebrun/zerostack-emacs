@@ -124,8 +124,40 @@ async fn completed_goal_requires_evidence() {
 #[test]
 fn parses_evaluator_verdict_from_first_non_empty_line() {
     assert_eq!(parse_evaluator_verdict("PASS\nverified"), "PASS");
+    assert_eq!(parse_evaluator_verdict("**PASS**\nverified"), "PASS");
+    assert_eq!(parse_evaluator_verdict("FAIL: missing evidence"), "FAIL");
     assert_eq!(parse_evaluator_verdict("\nfail: missing evidence"), "FAIL");
     assert_eq!(parse_evaluator_verdict("maybe"), "INSUFFICIENT");
+}
+
+#[tokio::test]
+async fn cannot_clear_after_failed_evaluator_verdict() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    reset_goal();
+    use crate::agent::tools::goal::{GoalState, set_goal_state};
+    set_goal_state(Some(GoalState {
+        content: "Ship feature".to_string(),
+        status: CompactString::new("completed"),
+        priority: CompactString::new("high"),
+        evidence: Some("claimed evidence".to_string()),
+        evaluator_status: Some(CompactString::new("INSUFFICIENT")),
+        evaluator_summary: Some("INSUFFICIENT\nmissing proof".to_string()),
+    }));
+    let tool = UpdateGoal::new(None, None);
+
+    let result = tool
+        .call(GoalUpdateArgs {
+            clear: true,
+            content: None,
+            status: None,
+            priority: None,
+            evidence: None,
+        })
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("failed evaluator"));
+    reset_goal();
 }
 
 #[tokio::test]

@@ -100,6 +100,7 @@ pub(crate) fn parse_evaluator_verdict(report: &str) -> &'static str {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("")
+        .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
         .to_ascii_uppercase();
     if first.starts_with("PASS") {
         "PASS"
@@ -149,6 +150,16 @@ impl Tool for UpdateGoal {
         let coaching = check_perm(&self.permission, &self.ask_tx, "goal_update", "").await?;
 
         if args.clear {
+            if let Some(current) = current_goal_state()
+                && current
+                    .evaluator_status
+                    .as_deref()
+                    .is_some_and(|status| status != "PASS")
+            {
+                return Err(ToolError::Msg(
+                    "Cannot clear a goal immediately after a failed evaluator verdict; keep it in_progress or ask the user.".to_string(),
+                ));
+            }
             clear_goal_state();
             return Ok(prefix_coaching(coaching, "Goal cleared.".to_string()));
         }
@@ -192,6 +203,7 @@ impl Tool for UpdateGoal {
             goal.evaluator_status = Some(CompactString::new(verdict));
             goal.evaluator_summary = Some(report.trim().to_string());
             if verdict != "PASS" {
+                *GOAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(goal.clone());
                 return Err(ToolError::Msg(format!(
                     "Cannot mark '{}' blocked: evaluator returned {verdict}.\n\n{}",
                     goal.content,
@@ -213,6 +225,7 @@ impl Tool for UpdateGoal {
             goal.evaluator_status = Some(CompactString::new(verdict));
             goal.evaluator_summary = Some(report.trim().to_string());
             if verdict != "PASS" {
+                *GOAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(goal.clone());
                 return Err(ToolError::Msg(format!(
                     "Cannot mark '{}' completed: evaluator returned {verdict}.\n\n{}",
                     goal.content,
