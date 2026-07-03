@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod load;
 pub mod types;
 
@@ -10,7 +11,6 @@ pub use load::*;
 pub use types::*;
 
 use crate::permission::{PermissionConfig, PermissionConfigs};
-use crate::retry::RetryConfig;
 
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::config::McpServerConfig;
@@ -29,15 +29,10 @@ pub struct Config {
     pub max_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    /// Provider-specific JSON shallow-merged into every completion request body
-    /// as a global default. A matching `quick_models` entry's `extra_body`
-    /// overrides this. Note: body params are provider-specific, so a global
-    /// value does not follow model switches — bundle per-`quick_models` when in
-    /// doubt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
-    #[serde(default)]
-    pub retry: RetryConfig,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "reasoning-effort")]
+    pub reasoning_effort: Option<CompactString>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +45,8 @@ pub struct Config {
     pub keep_recent_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_agent_turns: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_max_nudges: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_text_file_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,11 +161,6 @@ pub struct Config {
     pub api_keys: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quick_models: Option<HashMap<String, types::QuickModelConfig>>,
-    /// Map prompt names to quick-model names. When switching to a prompt,
-    /// zerostack looks up the quick model and switches provider+model.
-    /// Empty-string values are treated as "no change".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_to_model: Option<HashMap<String, String>>,
     #[cfg(feature = "mcp")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<HashMap<String, McpServerConfig>>,
@@ -211,6 +203,10 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn resolve_goal_max_nudges(&self) -> usize {
+        self.goal_max_nudges.unwrap_or(10)
+    }
+
     pub fn custom_providers_map(&self) -> HashMap<String, types::CustomProviderConfig> {
         self.custom_providers.clone().unwrap_or_default()
     }
@@ -246,6 +242,14 @@ impl Config {
         Self::catalog_context_window(provider, model_id).unwrap_or(128_000)
     }
 
+    fn codex_effective_input_window(model_id: &str) -> Option<u64> {
+        if model_id == "gpt-5.5" || model_id.starts_with("gpt-5.5-") || model_id.contains("codex") {
+            Some(272_000)
+        } else {
+            None
+        }
+    }
+
     /// The model's context window straight from the static catalog, or `None`
     /// when the provider/model is not listed (custom gateways, ollama, or an id
     /// without a `context` entry). Unlike [`resolve_context_window`], this
@@ -253,11 +257,17 @@ impl Config {
     /// real catalog value apart from the default.
     pub fn catalog_context_window(provider: &str, model_id: &str) -> Option<u64> {
         let entries = crate::models_catalog::catalog_entries(provider)?;
-        entries
+        let catalog = entries
             .iter()
             .find(|e| e.id == model_id)
             .and_then(|e| e.context_length)
-            .map(|cl| cl as u64)
+            .map(|cl| cl as u64);
+        if matches!(provider, "openai-codex" | "codex")
+            && let Some(window) = Self::codex_effective_input_window(model_id)
+        {
+            return Some(catalog.map_or(window, |cw| cw.min(window)));
+        }
+        catalog
     }
 
     pub fn resolve_reserve_tokens(
@@ -307,10 +317,6 @@ impl Config {
         self.temperature.map(|t| t.clamp(0.0, 2.0))
     }
 
-    /// Resolves provider-specific request-body params: quick-model `extra_body` >
-    /// global `extra_body`. Returns `None` when neither is configured. The
-    /// resolved value is shallow-merged into the completion request body at
-    /// agent-build time.
     pub fn resolve_extra_body(
         &self,
         model_id: &str,
@@ -326,8 +332,32 @@ impl Config {
         self.extra_body.clone()
     }
 
+    pub fn resolve_reasoning_effort(
+        &self,
+        cli: &crate::cli::Cli,
+        provider: &str,
+        model_id: &str,
+        qm: &HashMap<String, types::QuickModelConfig>,
+    ) -> Option<CompactString> {
+        if !crate::provider::supports_reasoning_effort(provider, model_id) {
+            return None;
+        }
+        let quick_effort = qm.values().find_map(|qmc| {
+            (qmc.provider.as_str() == provider && qmc.model.as_str() == model_id)
+                .then(|| qmc.reasoning_effort.as_deref())
+                .flatten()
+        });
+        let effort = cli
+            .reasoning_effort
+            .as_deref()
+            .or(quick_effort)
+            .or(self.reasoning_effort.as_deref())?;
+        crate::provider::normalize_reasoning_effort_value(provider, model_id, effort)
+            .map(CompactString::new)
+    }
+
     pub fn resolve_compact_enabled(&self) -> bool {
-        self.compact_enabled.unwrap_or(false)
+        self.compact_enabled.unwrap_or(true)
     }
 
     /// Mid-turn compaction pressure threshold as a fraction of the context
@@ -408,19 +438,6 @@ impl Config {
         self.show_cost_always.unwrap_or(false)
     }
 
-    /// Look up the quick-model name associated with a prompt in
-    /// `[prompt_to_model]`. Returns `None` when the prompt is not mapped or
-    /// the value is an empty string (which means "no change").
-    pub fn resolve_prompt_model(&self, prompt_name: &str) -> Option<&str> {
-        let map = self.prompt_to_model.as_ref()?;
-        let val = map.get(prompt_name)?;
-        if val.is_empty() {
-            None
-        } else {
-            Some(val.as_str())
-        }
-    }
-
     #[cfg(feature = "mcp")]
     pub fn resolve_enable_exa_mcp(&self) -> bool {
         self.enable_exa_mcp.unwrap_or(true)
@@ -491,10 +508,19 @@ pub fn resolve_temperature(cli: &crate::cli::Cli, cfg: &Config, model_id: &str) 
     cfg.resolve_temperature(cli, model_id, &qm)
 }
 
-/// Convenience: resolves extra body params (quick model, global config).
 pub fn resolve_extra_body(cfg: &Config, model_id: &str) -> Option<serde_json::Value> {
     let qm = quick_models_map(cfg);
     cfg.resolve_extra_body(model_id, &qm)
+}
+
+pub fn resolve_reasoning_effort(
+    cli: &crate::cli::Cli,
+    cfg: &Config,
+    provider: &str,
+    model_id: &str,
+) -> Option<CompactString> {
+    let qm = quick_models_map(cfg);
+    cfg.resolve_reasoning_effort(cli, provider, model_id, &qm)
 }
 
 impl ShowToolDetails {
@@ -504,87 +530,5 @@ impl ShowToolDetails {
             ShowToolDetails::Bool(true) => ResolvedShowToolDetails::Unlimited,
             ShowToolDetails::Lines(n) => ResolvedShowToolDetails::Limited(*n),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn make_config(map: HashMap<String, String>) -> Config {
-        Config {
-            prompt_to_model: Some(map),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn resolve_prompt_model_returns_value_for_known_key() {
-        let mut map = HashMap::new();
-        map.insert("plan".to_string(), "glm-52".to_string());
-        let cfg = make_config(map);
-        assert_eq!(cfg.resolve_prompt_model("plan"), Some("glm-52"));
-    }
-
-    #[test]
-    fn resolve_prompt_model_returns_none_for_unknown_key() {
-        let mut map = HashMap::new();
-        map.insert("plan".to_string(), "glm-52".to_string());
-        let cfg = make_config(map);
-        assert_eq!(cfg.resolve_prompt_model("code"), None);
-    }
-
-    #[test]
-    fn resolve_prompt_model_returns_none_for_empty_string() {
-        let mut map = HashMap::new();
-        map.insert("brainstorm".to_string(), "".to_string());
-        let cfg = make_config(map);
-        assert_eq!(cfg.resolve_prompt_model("brainstorm"), None);
-    }
-
-    #[test]
-    fn resolve_prompt_model_returns_none_when_map_is_none() {
-        let cfg = Config {
-            prompt_to_model: None,
-            ..Default::default()
-        };
-        assert_eq!(cfg.resolve_prompt_model("plan"), None);
-    }
-
-    #[test]
-    fn resolve_prompt_model_returns_none_for_empty_map() {
-        let cfg = make_config(HashMap::new());
-        assert_eq!(cfg.resolve_prompt_model("plan"), None);
-    }
-
-    #[test]
-    fn toml_deserializes_prompt_to_model() {
-        let toml_str = r#"
-prompt_to_model = { plan = "glm-52", code = "deepseek-v4-pro", empty_val = "" }
-"#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.resolve_prompt_model("plan"), Some("glm-52"));
-        assert_eq!(cfg.resolve_prompt_model("code"), Some("deepseek-v4-pro"));
-        assert_eq!(cfg.resolve_prompt_model("empty_val"), None);
-        assert_eq!(cfg.resolve_prompt_model("unknown"), None);
-    }
-
-    #[test]
-    fn toml_prompt_to_model_with_dotted_syntax() {
-        let toml_str = r#"
-[prompt_to_model]
-plan = "glm-52"
-code = "deepseek-v4-pro"
-"#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.resolve_prompt_model("plan"), Some("glm-52"));
-        assert_eq!(cfg.resolve_prompt_model("code"), Some("deepseek-v4-pro"));
-    }
-
-    #[test]
-    fn default_config_has_no_prompt_to_model() {
-        let cfg = Config::default();
-        assert_eq!(cfg.resolve_prompt_model("plan"), None);
     }
 }

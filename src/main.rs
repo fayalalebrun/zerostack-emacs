@@ -9,14 +9,13 @@ mod docs;
 mod event;
 mod extras;
 mod fs;
-mod logging;
 mod models_catalog;
 mod permission;
 mod pricing;
 mod provider;
-mod retry;
 mod sandbox;
 mod session;
+mod startup_profile;
 mod ui;
 
 #[cfg(test)]
@@ -26,6 +25,7 @@ mod tests;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
+#[cfg(feature = "advisor")]
 use compact_str::CompactString;
 use session::MessageRole;
 #[cfg(feature = "advisor")]
@@ -91,46 +91,69 @@ fn build_permission_checker(
     (Some(perm), Some(ask_tx), Some(ask_rx))
 }
 
-/// Apply the `[prompt_to_model]` mapping at startup before the TUI is
-/// available. Updates `provider`, `model`, and `session` fields so the
-/// initial agent is built with the correct model.
-fn apply_startup_prompt_model(
-    prompt_name: &str,
-    cfg: &config::Config,
-    provider: &mut CompactString,
-    model: &mut CompactString,
-    session: &mut session::Session,
-) {
-    let qm_name = match cfg.resolve_prompt_model(prompt_name) {
-        Some(name) => name,
-        None => return,
-    };
-    let qm = config::quick_models_map(cfg);
-    let Some(qmc) = qm.get(qm_name) else {
-        return;
-    };
-    *provider = qmc.provider.clone();
-    *model = qmc.model.clone();
-    session.model = qmc.model.clone();
-    session.provider = qmc.provider.clone();
-    session.input_token_cost = qmc.input_token_cost;
-    session.output_token_cost = qmc.output_token_cost;
-    session.update_context_window(cfg.resolve_context_window(&session.provider, &session.model));
-}
-
 #[cfg_attr(
     feature = "multithread",
     tokio::main(flavor = "multi_thread", worker_threads = 4)
 )]
 #[cfg_attr(not(feature = "multithread"), tokio::main(flavor = "current_thread"))]
 async fn main() -> anyhow::Result<()> {
-    let cli = cli::Cli::parse();
-    logging::init(&cli);
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,rig=off")),
+        )
+        .init();
 
+    crate::startup_profile::mark("main:start");
+    let cli = cli::Cli::parse();
+    crate::startup_profile::mark("cli:parsed");
     let (mut cfg, is_first_startup) = config::load();
+    crate::startup_profile::mark("config:loaded");
 
     if cli.print_config {
         print_config(&cli, &cfg);
+        return Ok(());
+    }
+
+    if let Some(cli::Command::Config { command }) = &cli.command {
+        handle_config_command(&mut cfg, command)?;
+        return Ok(());
+    }
+
+    if let Some(cli::Command::Auth { command }) = &cli.command {
+        match command {
+            cli::AuthCommand::Login { provider, device } => {
+                auth::login_provider(provider, *device).await?;
+            }
+            cli::AuthCommand::Logout { provider } => {
+                auth::logout_provider(provider)?;
+            }
+            cli::AuthCommand::Status { provider } => {
+                auth::print_auth_status(provider.as_deref())?;
+            }
+            cli::AuthCommand::SetKey { provider, key } => {
+                auth::set_api_key(provider, key)?;
+            }
+            cli::AuthCommand::UnsetKey { provider } => {
+                auth::unset_api_key(provider)?;
+            }
+        }
+        return Ok(());
+    }
+
+    if cli.emacs_list {
+        extras::emacs::print_sessions()?;
+        return Ok(());
+    }
+
+    if cli.emacs_board {
+        extras::emacs_board::print_board()?;
+        return Ok(());
+    }
+
+    if let Some(session_id) = &cli.emacs_dismiss_attention {
+        extras::emacs_attention::dismiss(session_id)?;
         return Ok(());
     }
 
@@ -140,15 +163,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let version_changed = docs::ensure_global()?;
+    let emacs_mode = cli.emacs;
+    let allow_missing_startup_key = allow_missing_startup_key(&cli);
     #[cfg(feature = "acp")]
-    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode;
+    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode && !emacs_mode;
     #[cfg(not(feature = "acp"))]
-    let is_interactive = !cli.print && !cli.loop_mode;
+    let is_interactive = !cli.print && !cli.loop_mode && !emacs_mode;
 
     // Load context first so prompts/themes are available early.
     // (Version-change / ARCHITECTURE.md prompts are deferred to right before
     // the TUI to avoid blocking startup on stdin.)
     let mut context = context::load(cli.resolve_no_context_files(&cfg));
+    crate::startup_profile::mark("context:loaded");
 
     let mut provider = cli.resolve_provider(&cfg);
     let mut model = cli.resolve_model(&cfg);
@@ -185,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         && let Some(s) = sessions.into_iter().next()
     {
         session = s;
+        crate::startup_profile::mark("session:continued");
     }
 
     if let Some(session_id) = &cli.session {
@@ -193,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("no session matching '{}'", session_id);
         } else if sessions.len() == 1 {
             session = sessions.into_iter().next().unwrap();
+            crate::startup_profile::mark("session:loaded");
         } else {
             eprintln!("multiple sessions match '{}':", session_id);
             for s in &sessions {
@@ -218,6 +246,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    crate::agent::tools::goal::set_goal_state(session.goal.clone());
+
+    sync_runtime_target_from_session(&mut provider, &mut model, &session);
+
     // A resumed session persisted its context_window when first saved, which can
     // be stale if the model's catalog entry has changed since (e.g. a model that
     // grew from 128k to 1M). Re-derive it from the catalog for the session's own
@@ -231,12 +263,24 @@ async fn main() -> anyhow::Result<()> {
         session.update_context_window(cw);
     }
 
-    let mut client = provider::create_client(
-        &provider,
-        cli.api_key.as_deref(),
-        &cfg.custom_providers_map(),
-        cfg.api_keys.as_ref(),
-    )?;
+    let client = if allow_missing_startup_key {
+        provider::create_client_allow_missing_api_key(
+            &provider,
+            cli.api_key.as_deref(),
+            &cfg.custom_providers_map(),
+            cfg.api_keys.as_ref(),
+            Some(session.id.as_str()),
+        )?
+    } else {
+        provider::create_client(
+            &provider,
+            cli.api_key.as_deref(),
+            &cfg.custom_providers_map(),
+            cfg.api_keys.as_ref(),
+            Some(session.id.as_str()),
+        )?
+    };
+    crate::startup_profile::mark("client:created");
 
     #[cfg(feature = "subagents")]
     {
@@ -244,7 +288,7 @@ async fn main() -> anyhow::Result<()> {
         let qm = config::quick_models_map(&cfg);
 
         // Resolve subagent model: subagent_model config > subagent_provider + model > main model
-        let (sub_provider, mut sub_model) = if let Some(sa_model) = &cfg.subagent_model {
+        let (mut sub_provider, mut sub_model) = if let Some(sa_model) = &cfg.subagent_model {
             if let Some(q) = qm.get(sa_model.as_str()) {
                 (q.provider.clone(), q.model.clone())
             } else {
@@ -268,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.api_key.as_deref(),
                 &cfg.custom_providers_map(),
                 cfg.api_keys.as_ref(),
+                None,
             ) {
                 Ok(c) => c,
                 Err(e) => {
@@ -286,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
                         provider
                     );
                     sub_model = model.clone();
+                    sub_provider = provider.clone();
                     client.clone()
                 }
             }
@@ -293,31 +339,14 @@ async fn main() -> anyhow::Result<()> {
 
         crate::extras::subagents::init(
             sub_client,
+            sub_provider.to_string(),
             sub_model.to_string(),
             task_max_turns,
             cfg.clone(),
+            context.agents.clone(),
             #[cfg(feature = "archmd")]
             context.architecture.clone(),
         );
-    }
-
-    // Fetch OpenRouter pricing at startup so cost tracking works from the first turn
-    if provider == "openrouter"
-        && session.input_token_cost == 0.0
-        && session.output_token_cost == 0.0
-    {
-        if let Ok(prices) = provider::fetch_openrouter_pricing(
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        )
-        .await
-        {
-            if let Some((input, output)) = prices.get(model.as_str()) {
-                session.input_token_cost = *input;
-                session.output_token_cost = *output;
-            }
-        }
     }
 
     #[cfg(feature = "acp")]
@@ -363,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.api_key.as_deref(),
                 &cfg.custom_providers_map(),
                 cfg.api_keys.as_ref(),
+                None,
             ) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -503,7 +533,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ARCHITECTURE.md prompt: defer to here so all heavy setup completes first.
     #[cfg(feature = "archmd")]
-    let arch_created = if !cli.resolve_no_context_files(&cfg) {
+    let arch_created = if is_interactive && !cli.resolve_no_context_files(&cfg) {
         let cwd = std::env::current_dir().ok();
         if let Some(ref cwd) = cwd {
             crate::extras::archmd::ask_and_create(cwd).unwrap_or_else(|e| {
@@ -534,12 +564,12 @@ async fn main() -> anyhow::Result<()> {
                 content.clone()
             };
 
-            let caps: &[&str] = &[
-                #[cfg(feature = "memory")]
-                "- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)",
-                #[cfg(feature = "subagents")]
-                "- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool",
-            ];
+            #[allow(unused_mut)]
+            let mut caps: Vec<&str> = Vec::new();
+            #[cfg(feature = "memory")]
+            caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
+            #[cfg(feature = "subagents")]
+            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
 
             if !caps.is_empty() {
                 prompt_text.push_str("\n\n## Available Capabilities\n\n");
@@ -549,15 +579,6 @@ async fn main() -> anyhow::Result<()> {
 
             context.current_prompt = Some(prompt_text);
             context.current_prompt_name = Some(default_prompt.to_string());
-
-            // Apply prompt-to-model mapping
-            apply_startup_prompt_model(
-                default_prompt,
-                &cfg,
-                &mut provider,
-                &mut model,
-                &mut session,
-            );
         }
     }
 
@@ -571,12 +592,12 @@ async fn main() -> anyhow::Result<()> {
                 content.clone()
             };
 
-            let caps: &[&str] = &[
-                #[cfg(feature = "memory")]
-                "- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)",
-                #[cfg(feature = "subagents")]
-                "- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool",
-            ];
+            #[allow(unused_mut)]
+            let mut caps: Vec<&str> = Vec::new();
+            #[cfg(feature = "memory")]
+            caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
+            #[cfg(feature = "subagents")]
+            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
 
             if !caps.is_empty() {
                 prompt_text.push_str("\n\n## Available Capabilities\n\n");
@@ -586,9 +607,6 @@ async fn main() -> anyhow::Result<()> {
 
             context.current_prompt = Some(prompt_text);
             context.current_prompt_name = Some(name.clone());
-
-            // Apply prompt-to-model mapping
-            apply_startup_prompt_model(name, &cfg, &mut provider, &mut model, &mut session);
         } else {
             let mut sorted: Vec<&String> = context.prompts.keys().collect();
             sorted.sort();
@@ -601,27 +619,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Rebuild client if the provider changed due to prompt-to-model mapping
-    if client.provider_name() != provider.as_str() {
-        match provider::create_client(
-            &provider,
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        ) {
-            Ok(new_client) => {
-                client = new_client;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to rebuild client for prompt-mapped provider '{}': {}",
-                    provider,
-                    e
-                );
-            }
-        }
-    }
-
     // Apply mode from prompt %%mode= directive (if any)
     if let Some(perm) = &permission {
         let allowlist: Vec<(String, String)> = session
@@ -630,6 +627,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|e| (e.tool.to_string(), e.pattern.to_string()))
             .collect();
         let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
+        guard.allow_session_tool_outputs(&session.id);
         guard.load_session_allowlist(&allowlist);
         if let Some(current_prompt) = &context.current_prompt {
             let (mode_directive, _) = crate::permission::parse_prompt_mode(current_prompt);
@@ -642,21 +640,37 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if cli.emacs {
+        return extras::emacs::serve(
+            client,
+            cli,
+            cfg,
+            context,
+            session,
+            permission,
+            ask_tx,
+            ask_rx,
+            sandbox,
+            status_signals,
+        )
+        .await;
+    }
+
     // Build the auto-trigger message for ARCHITECTURE.md creation
     #[cfg(feature = "archmd")]
     let arch_msg: Option<String> = if arch_created {
         Some(
             "I've just created an empty ARCHITECTURE.md template at the project root. \
-            Explore the codebase thoroughly using the `task` tool (delegating parallel exploration to subagents) \
-            and fill ARCHITECTURE.md with a high-level architecture document covering:\n\
-            - Directory layout and module responsibilities\n\
-            - Key types, traits, and their relationships\n\
-            - Control flow (how requests/events flow through the system)\n\
-            - Data flow (how data is transformed from input to output)\n\
-            - Design decisions and rationale\n\
-            - External dependencies and how they are used\n\
-            - Entry points for different execution modes\n\n\
-            Keep the document under ~300 lines of code total. Keep entries concise and reference specific source files."
+             Explore the codebase thoroughly using the `task` tool (delegating parallel exploration to subagents) \
+             and fill ARCHITECTURE.md with a high-level architecture document covering:\n\
+             - Directory layout and module responsibilities\n\
+             - Key types, traits, and their relationships\n\
+             - Control flow (how requests/events flow through the system)\n\
+             - Data flow (how data is transformed from input to output)\n\
+             - Design decisions and rationale\n\
+             - External dependencies and how they are used\n\
+             - Entry points for different execution modes\n\n\
+             Keep the document under ~300 lines of code total. Keep entries concise and reference specific source files."
                 .to_string(),
         )
     } else {
@@ -703,6 +717,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             let temperature = config::resolve_temperature(&cli, &cfg, &model);
             let extra_body = config::resolve_extra_body(&cfg, &model);
+            let reasoning_effort = config::resolve_reasoning_effort(&cli, &cfg, &provider, &model);
             let agent = provider::build_agent(
                 completion_model,
                 &cli,
@@ -712,6 +727,7 @@ async fn main() -> anyhow::Result<()> {
                 ask_tx,
                 sandbox.clone(),
                 true,
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -725,6 +741,10 @@ async fn main() -> anyhow::Result<()> {
                     role: MessageRole::User,
                     content: CompactString::new(&msg),
                     estimated_tokens: Session::estimate_tokens(&msg),
+                    provider_reasoning: Vec::new(),
+                    provider_usage: None,
+                    tool_call: None,
+                    tool_result: None,
                 });
                 crate::extras::advisor::set_session_messages(msgs);
             }
@@ -732,20 +752,29 @@ async fn main() -> anyhow::Result<()> {
                 ss.send_start();
             }
             let response_result = agent
-                .run_print(
-                    &msg,
-                    cli.resolve_max_agent_turns(&cfg),
-                    cli.pure_stdout,
-                    &cfg.retry,
-                )
+                .run_print(&msg, cli.resolve_max_agent_turns(&cfg), cli.pure_stdout)
                 .await;
             if let Some(ss) = status_signals.as_ref() {
                 ss.send_stop();
             }
-            let response = response_result?;
+            let print_result = response_result?;
             if !cli.no_session {
                 session.add_message(MessageRole::User, &msg);
-                session.add_message(MessageRole::Assistant, &response);
+                session.add_message_with_reasoning_and_usage(
+                    MessageRole::Assistant,
+                    &print_result.response,
+                    print_result.reasoning,
+                    Some(print_result.context_usage.into()),
+                );
+                session.total_input_tokens = session
+                    .total_input_tokens
+                    .saturating_add(print_result.usage.input_tokens);
+                session.total_cached_input_tokens = session
+                    .total_cached_input_tokens
+                    .saturating_add(print_result.usage.cached_input_tokens);
+                session.total_output_tokens = session
+                    .total_output_tokens
+                    .saturating_add(print_result.usage.output_tokens);
                 session::storage::save_session(&session)?;
                 let _ =
                     session::chat_history::append_entry(&session::chat_history::ChatHistoryEntry {
@@ -760,6 +789,7 @@ async fn main() -> anyhow::Result<()> {
             let model_completion = client.completion_model(model.to_string());
             let temperature = config::resolve_temperature(&cli, &cfg, &model);
             let extra_body = config::resolve_extra_body(&cfg, &model);
+            let reasoning_effort = config::resolve_reasoning_effort(&cli, &cfg, &provider, &model);
             let agent = provider::build_agent(
                 model_completion,
                 &cli,
@@ -769,6 +799,7 @@ async fn main() -> anyhow::Result<()> {
                 ask_tx,
                 sandbox.clone(),
                 true,
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -791,6 +822,7 @@ async fn main() -> anyhow::Result<()> {
         if !initial_msg.is_empty() {
             session.add_message(MessageRole::User, &initial_msg);
         }
+        crate::startup_profile::mark("ui:enter");
         ui::run_interactive(
             client,
             None,
@@ -810,6 +842,56 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
+    Ok(())
+}
+
+fn handle_config_command(
+    cfg: &mut config::Config,
+    command: &cli::ConfigCommand,
+) -> anyhow::Result<()> {
+    match command {
+        cli::ConfigCommand::Providers => {
+            for provider in config::commands::provider_names(cfg) {
+                println!("{provider}");
+            }
+        }
+        cli::ConfigCommand::Models { provider } => {
+            let provider = provider
+                .as_deref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| config::commands::default_provider_name(cfg));
+            config::commands::validate_provider(cfg, &provider)?;
+            for model in config::commands::model_ids_for_provider(&provider) {
+                println!("{model}");
+            }
+        }
+        cli::ConfigCommand::SetProvider { provider } => {
+            let (provider, model) = config::commands::set_default_provider(cfg, provider)?;
+            config::save_config(cfg)?;
+            println!("provider {provider}");
+            println!("model {model}");
+        }
+        cli::ConfigCommand::SetModel { model } => {
+            let (provider, model) = config::commands::set_default_model(cfg, model)?;
+            config::save_config(cfg)?;
+            println!("provider {provider}");
+            println!("model {model}");
+        }
+        #[cfg(feature = "subagents")]
+        cli::ConfigCommand::SetSubagentProvider { provider } => {
+            let (provider, model) = config::commands::set_subagent_provider(cfg, provider)?;
+            config::save_config(cfg)?;
+            println!("subagent_provider {provider}");
+            println!("subagent_model {model}");
+        }
+        #[cfg(feature = "subagents")]
+        cli::ConfigCommand::SetSubagentModel { model } => {
+            let (provider, model) = config::commands::set_subagent_model(cfg, model)?;
+            config::save_config(cfg)?;
+            println!("subagent_provider {provider}");
+            println!("subagent_model {model}");
+        }
+    }
     Ok(())
 }
 
@@ -856,6 +938,19 @@ fn print_sessions() {
         println!();
         println!("Use --session <id> to load a session by its ID prefix.");
     }
+}
+
+pub(crate) fn allow_missing_startup_key(cli: &cli::Cli) -> bool {
+    !cli.print && !cli.loop_mode
+}
+
+pub(crate) fn sync_runtime_target_from_session(
+    provider: &mut compact_str::CompactString,
+    model: &mut compact_str::CompactString,
+    session: &session::Session,
+) {
+    *provider = session.provider.clone();
+    *model = session.model.clone();
 }
 
 fn print_config(cli: &cli::Cli, cfg: &config::Config) {
@@ -1067,19 +1162,14 @@ async fn run_headless_loop(
             ss.send_start();
         }
         let response = match agent
-            .run_print(
-                &iteration_prompt,
-                cli.resolve_max_agent_turns(cfg),
-                false,
-                &cfg.retry,
-            )
+            .run_print(&iteration_prompt, cli.resolve_max_agent_turns(cfg), false)
             .await
         {
             Ok(r) => {
                 if let Some(ss) = status_signals.as_ref() {
                     ss.send_stop();
                 }
-                r
+                r.response
             }
             Err(e) => {
                 if let Some(ss) = status_signals.as_ref() {

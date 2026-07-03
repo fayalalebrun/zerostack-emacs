@@ -1,13 +1,58 @@
 use crate::auth::ProviderKind;
+use crate::cli::Cli;
 use crate::config::{ApiStyle, CustomProviderConfig};
 use crate::provider::ModelEntry;
+use crate::provider::{AnyClient, OpenAiClient};
 use crate::provider::{
-    expand_env, is_agent_model, merge_extra_body, openrouter_anthropic_routing, resolve_api_style,
-    resolve_provider_config, serialize_conversation,
+    create_client, create_client_allow_missing_api_key, expand_env, is_agent_model,
+    merge_extra_body, openrouter_anthropic_routing, resolve_api_style, resolve_provider_config,
+    serialize_conversation,
 };
-use crate::session::{MessageRole, SessionMessage};
+use crate::session::{MessageRole, SessionMessage, SessionToolCall, SessionToolResult};
 use compact_str::CompactString;
 use std::collections::HashMap;
+
+#[test]
+fn explicit_provider_gets_provider_default_model_over_config_default() {
+    let cfg = crate::config::Config {
+        provider: Some(CompactString::new("openrouter")),
+        model: Some(CompactString::new("deepseek/deepseek-v4-pro")),
+        ..Default::default()
+    };
+    let cli = Cli {
+        provider: Some("openai-codex".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(cli.resolve_provider(&cfg), "openai-codex");
+    assert_eq!(cli.resolve_model(&cfg), "gpt-5.5");
+}
+
+#[test]
+fn explicit_model_still_overrides_explicit_provider_default() {
+    let cfg = crate::config::Config {
+        provider: Some(CompactString::new("openrouter")),
+        model: Some(CompactString::new("deepseek/deepseek-v4-pro")),
+        ..Default::default()
+    };
+    let cli = Cli {
+        provider: Some("openai-codex".to_string()),
+        model: Some("gpt-5.3-codex-spark".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(cli.resolve_model(&cfg), "gpt-5.3-codex-spark");
+}
+
+#[test]
+fn allow_missing_api_key_builds_placeholder_client() {
+    let custom = HashMap::new();
+    let client = create_client_allow_missing_api_key("openai", None, &custom, None, None).unwrap();
+    assert!(matches!(
+        client,
+        AnyClient::OpenAI(OpenAiClient::Responses(_))
+    ));
+}
 
 fn cfg(api_style: Option<ApiStyle>) -> CustomProviderConfig {
     CustomProviderConfig {
@@ -75,8 +120,6 @@ fn model(id: &str, kind: Option<&str>) -> ModelEntry {
         display: id.to_string(),
         context_length: None,
         kind: kind.map(|s| s.to_string()),
-        input_price: None,
-        output_price: None,
     }
 }
 
@@ -135,6 +178,10 @@ fn serialize_single_user_message() {
         role: MessageRole::User,
         content: CompactString::new("hello"),
         estimated_tokens: 1,
+        provider_reasoning: Vec::new(),
+        provider_usage: None,
+        tool_call: None,
+        tool_result: None,
     }];
     let result = serialize_conversation(&msgs);
     assert!(result.contains("[User]: hello"));
@@ -147,22 +194,102 @@ fn serialize_multiple_roles() {
             role: MessageRole::User,
             content: CompactString::new("hi"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
         SessionMessage {
             role: MessageRole::Assistant,
             content: CompactString::new("hey"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         },
         SessionMessage {
             role: MessageRole::System,
             content: CompactString::new("note"),
             estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+        SessionMessage {
+            role: MessageRole::ToolCall,
+            content: CompactString::new("read {path}"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: Some(SessionToolCall {
+                id: CompactString::new("call_1"),
+                call_id: None,
+                name: CompactString::new("read"),
+                arguments: serde_json::json!({ "path": "file" }),
+            }),
+            tool_result: None,
+        },
+        SessionMessage {
+            role: MessageRole::ToolResult,
+            content: CompactString::new("read:\ncontents"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: Some(SessionToolResult {
+                id: CompactString::new("call_1"),
+                call_id: None,
+                name: CompactString::new("read"),
+                loaded_context: Vec::new(),
+            }),
         },
     ];
     let result = serialize_conversation(&msgs);
     assert!(result.contains("[User]: hi"));
     assert!(result.contains("[Assistant]: hey"));
     assert!(result.contains("[System]: note"));
+    assert!(result.contains("[ToolCall]: read {path}"));
+    assert!(result.contains("[ToolResult]: read:\ncontents"));
+}
+
+#[test]
+fn serialize_skips_legacy_text_only_tool_events() {
+    let msgs = vec![
+        SessionMessage {
+            role: MessageRole::User,
+            content: CompactString::new("keep me"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+        SessionMessage {
+            role: MessageRole::ToolCall,
+            content: CompactString::new("legacy call"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+        SessionMessage {
+            role: MessageRole::ToolResult,
+            content: CompactString::new("legacy result"),
+            estimated_tokens: 1,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+        },
+    ];
+
+    let result = serialize_conversation(&msgs);
+    assert!(result.contains("[User]: keep me"));
+    assert!(!result.contains("legacy call"));
+    assert!(!result.contains("legacy result"));
 }
 
 // --- resolve_provider_config tests ---
@@ -202,6 +329,68 @@ fn resolve_builtin_ollama() {
 fn resolve_builtin_openrouter() {
     let cfg = resolve_provider_config("openrouter", &HashMap::new()).unwrap();
     assert_eq!(cfg.kind, ProviderKind::OpenRouter);
+}
+
+#[test]
+fn resolve_builtin_deepseek() {
+    let cfg = resolve_provider_config("deepseek", &HashMap::new()).unwrap();
+    assert_eq!(cfg.kind, ProviderKind::DeepSeek);
+    assert!(cfg.base_url.is_none());
+}
+
+#[test]
+fn deepseek_client_builds_as_openai_compatible() {
+    let client = create_client("deepseek", Some("sk-test"), &HashMap::new(), None, None).unwrap();
+    assert_eq!(client.provider_name(), "deepseek");
+    assert!(matches!(
+        client,
+        AnyClient::OpenAI(OpenAiClient::DeepSeek(_))
+    ));
+}
+
+#[tokio::test]
+async fn deepseek_lists_static_zerostack_defaults() {
+    let client = create_client("deepseek", Some("sk-test"), &HashMap::new(), None, None).unwrap();
+    let models = client.list_models().await.unwrap();
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
+    let flash = models.iter().find(|m| m.id == "deepseek-v4-flash").unwrap();
+    assert_eq!(flash.display, "DeepSeek V4 Flash");
+    assert_eq!(flash.context_length, Some(1_000_000));
+    let pro = models.iter().find(|m| m.id == "deepseek-v4-pro").unwrap();
+    assert_eq!(pro.context_length, Some(1_000_000));
+}
+
+#[test]
+fn resolve_builtin_openai_codex() {
+    let cfg = resolve_provider_config("openai-codex", &HashMap::new()).unwrap();
+    assert_eq!(cfg.kind, ProviderKind::OpenAICodex);
+    assert!(cfg.base_url.is_none());
+}
+
+#[test]
+fn openai_codex_client_builds_without_static_api_key() {
+    let client = create_client("openai-codex", None, &HashMap::new(), None, None).unwrap();
+    assert_eq!(client.provider_name(), "openai-codex");
+    assert!(matches!(client, AnyClient::OpenAI(OpenAiClient::Codex(_))));
+}
+
+#[tokio::test]
+async fn openai_codex_lists_static_zerostack_defaults() {
+    let client = create_client("openai-codex", None, &HashMap::new(), None, None).unwrap();
+    let models = client.list_models().await.unwrap();
+    let openai_catalog = crate::models_catalog::catalog_entries("openai").unwrap();
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    let openai_ids: Vec<_> = openai_catalog.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, openai_ids);
+    let gpt55 = models.iter().find(|m| m.id == "gpt-5.5").unwrap();
+    assert_eq!(gpt55.display, "GPT-5.5");
+    assert_eq!(gpt55.context_length, Some(1_050_000));
+    let spark = models
+        .iter()
+        .find(|m| m.id == "gpt-5.3-codex-spark")
+        .unwrap();
+    assert_eq!(spark.context_length, Some(128_000));
 }
 
 #[test]

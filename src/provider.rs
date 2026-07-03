@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use compact_str::CompactString;
@@ -6,6 +8,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rig::agent::Agent;
 use rig::client::{CompletionClient, ModelListingClient};
 use rig::completion::{CompletionModel, Message};
+use rig::http_client;
+use rig::http_client::{HttpClientExt, MultipartForm};
 use rig::providers::{anthropic, gemini, ollama, openai, openrouter};
 use rig::streaming::StreamingChat;
 use tokio::sync::mpsc;
@@ -22,9 +26,11 @@ use crate::event::AgentEvent;
 use crate::extras::mcp::McpClientManager;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
-use crate::retry::{self, RetryConfig};
 use crate::sandbox::Sandbox;
 use crate::session::SessionMessage;
+
+const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 pub struct ProviderConfig {
     pub kind: ProviderKind,
@@ -49,7 +55,7 @@ pub fn resolve_provider_config(
     }
     let kind = ProviderKind::from_name(name).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: '{}'. Supported: openrouter, openai, anthropic, gemini, ollama",
+            "Unknown provider: '{}'. Supported: openrouter, openai, openai-codex, deepseek, anthropic, gemini, ollama",
             name
         )
     })?;
@@ -99,6 +105,8 @@ pub(crate) fn default_model_for_provider(
     let m = match provider {
         "anthropic" => "claude-sonnet-4-6",
         "openai" => "gpt-5.1",
+        "openai-codex" | "codex" => "gpt-5.5",
+        "deepseek" => "deepseek-v4-pro",
         "gemini" | "google" => "gemini-2.5-pro",
         "openrouter" => "openrouter/auto", // OpenRouter's always-valid auto-router
         "ollama" => "llama3.1",
@@ -125,6 +133,8 @@ fn resolve_base_url(config: &ProviderConfig) -> Option<String> {
 pub enum OpenAiClient {
     Responses(openai::Client),
     Completions(openai::CompletionsClient),
+    DeepSeek(openai::CompletionsClient),
+    Codex(openai::Client<CodexHttpClient>),
 }
 
 impl OpenAiClient {
@@ -132,6 +142,8 @@ impl OpenAiClient {
         match self {
             OpenAiClient::Responses(c) => OpenAiModel::Responses(c.completion_model(name)),
             OpenAiClient::Completions(c) => OpenAiModel::Completions(c.completion_model(name)),
+            OpenAiClient::DeepSeek(c) => OpenAiModel::Completions(c.completion_model(name)),
+            OpenAiClient::Codex(c) => OpenAiModel::Codex(c.completion_model(name)),
         }
     }
 }
@@ -139,12 +151,291 @@ impl OpenAiClient {
 pub enum OpenAiModel {
     Responses(openai::responses_api::ResponsesCompletionModel),
     Completions(openai::completion::CompletionModel),
+    Codex(openai::responses_api::ResponsesCompletionModel<CodexHttpClient>),
 }
 
 #[derive(Clone)]
 pub enum OpenAiAgent {
     Responses(Agent<openai::responses_api::ResponsesCompletionModel>),
     Completions(Agent<openai::completion::CompletionModel>),
+    Codex(Agent<openai::responses_api::ResponsesCompletionModel<CodexHttpClient>>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CodexHttpClient {
+    inner: reqwest::Client,
+    prompt_cache_key: Option<String>,
+}
+
+impl CodexHttpClient {
+    fn new(inner: reqwest::Client, prompt_cache_key: Option<String>) -> Self {
+        Self {
+            inner,
+            prompt_cache_key,
+        }
+    }
+
+    async fn authorize_headers(&self, headers: &mut HeaderMap) -> http_client::Result<()> {
+        let auth = crate::auth::codex_request_auth()
+            .await
+            .map_err(to_http_error)?;
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", auth.access_token))?,
+        );
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            HeaderValue::from_str(&format!(
+                "zerostack/{} ({}; {})",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ))?,
+        );
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            HeaderValue::from_str(&auth.account_id)?,
+        );
+        headers.insert(
+            HeaderName::from_static("originator"),
+            HeaderValue::from_static("zerostack"),
+        );
+        if let Some(key) = self
+            .prompt_cache_key
+            .as_deref()
+            .filter(|key| !key.is_empty())
+        {
+            headers.insert(
+                HeaderName::from_static("session_id"),
+                HeaderValue::from_str(key)?,
+            );
+        }
+        headers.insert(
+            HeaderName::from_static("openai-beta"),
+            HeaderValue::from_static("responses=experimental"),
+        );
+        Ok(())
+    }
+
+    async fn prepare_request_body(
+        &self,
+        headers: &mut HeaderMap,
+        body: bytes::Bytes,
+    ) -> http_client::Result<bytes::Bytes> {
+        self.authorize_headers(headers).await?;
+        let patched = ensure_codex_instructions(body, self.prompt_cache_key.as_deref())?;
+        headers.remove(reqwest::header::CONTENT_LENGTH);
+        Ok(patched)
+    }
+}
+
+fn ensure_codex_instructions(
+    body: bytes::Bytes,
+    prompt_cache_key: Option<&str>,
+) -> http_client::Result<bytes::Bytes> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Ok(body);
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(body);
+    };
+    let needs_instructions = object
+        .get("instructions")
+        .is_none_or(serde_json::Value::is_null);
+    object.insert("store".to_string(), serde_json::Value::Bool(false));
+    if let Some(key) = prompt_cache_key.filter(|key| !key.is_empty()) {
+        object.insert(
+            "prompt_cache_key".to_string(),
+            serde_json::Value::String(key.to_string()),
+        );
+    }
+    ensure_codex_reasoning_include(object);
+    object.remove("max_output_tokens");
+    if needs_instructions {
+        let instructions = take_system_instructions(object.get_mut("input"))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+        object.insert(
+            "instructions".to_string(),
+            serde_json::Value::String(instructions),
+        );
+    }
+    if let Some(reasoning) = object.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
+        reasoning.remove("summary");
+    }
+    normalize_codex_input_content(object.get_mut("input"));
+    serde_json::to_vec(&value)
+        .map(bytes::Bytes::from)
+        .map_err(|e| http_client::Error::Instance(Box::new(e)))
+}
+
+fn ensure_codex_reasoning_include(object: &mut serde_json::Map<String, serde_json::Value>) {
+    const REASONING_INCLUDE: &str = "reasoning.encrypted_content";
+
+    match object.get_mut("include") {
+        Some(serde_json::Value::Array(items)) => {
+            let already_present = items
+                .iter()
+                .any(|item| item.as_str() == Some(REASONING_INCLUDE));
+            if !already_present {
+                items.push(serde_json::Value::String(REASONING_INCLUDE.to_string()));
+            }
+        }
+        Some(_) | None => {
+            object.insert(
+                "include".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::String(
+                    REASONING_INCLUDE.to_string(),
+                )]),
+            );
+        }
+    }
+}
+
+fn normalize_codex_input_content(input: Option<&mut serde_json::Value>) {
+    let Some(items) = input.and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        let role = item.get("role").and_then(|role| role.as_str());
+        let expected_text_type = match role {
+            Some("assistant") => "output_text",
+            Some("user") | Some("developer") | Some("system") => "input_text",
+            _ => continue,
+        };
+        let Some(content_items) = item
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for content in content_items {
+            let Some(kind) = content.get_mut("type") else {
+                continue;
+            };
+            if matches!(kind.as_str(), Some("input_text" | "output_text")) {
+                *kind = serde_json::Value::String(expected_text_type.to_string());
+            }
+        }
+    }
+}
+
+fn take_system_instructions(input: Option<&mut serde_json::Value>) -> Option<String> {
+    let input = input?;
+    let items = input.as_array_mut()?;
+    let index = items
+        .iter()
+        .position(|item| item.get("role").and_then(|role| role.as_str()) == Some("system"))?;
+    let text = input_item_text(&items[index])?;
+    items.remove(index);
+    Some(text)
+}
+
+fn input_item_text(item: &serde_json::Value) -> Option<String> {
+    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+        return Some(text.to_string());
+    }
+    let content = item.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(items) = content.as_array() {
+        let parts: Vec<&str> = items
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| part.get("content").and_then(|v| v.as_str()))
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("\n"));
+        }
+    }
+    None
+}
+
+#[derive(Debug)]
+struct CodexHttpError(String);
+
+impl std::fmt::Display for CodexHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CodexHttpError {}
+
+fn to_http_error(error: anyhow::Error) -> http_client::Error {
+    http_client::Error::Instance(Box::new(CodexHttpError(format!("{error:#}"))))
+}
+
+impl HttpClientExt for CodexHttpClient {
+    fn send<T, U>(
+        &self,
+        req: http_client::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + Send
+    + 'static
+    where
+        T: Into<bytes::Bytes> + Send,
+        U: From<bytes::Bytes> + Send + 'static,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        let body = body.into();
+        async move {
+            let body = this.prepare_request_body(&mut parts.headers, body).await?;
+            let req = http_client::Request::from_parts(parts, body);
+            this.inner.send(req).await
+        }
+    }
+
+    fn send_multipart<U>(
+        &self,
+        req: http_client::Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + Send
+    + 'static
+    where
+        U: From<bytes::Bytes> + Send + 'static,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        async move {
+            this.authorize_headers(&mut parts.headers).await?;
+            let req = http_client::Request::from_parts(parts, body);
+            this.inner.send_multipart(req).await
+        }
+    }
+
+    fn send_streaming<T>(
+        &self,
+        req: http_client::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>> + Send
+    where
+        T: Into<bytes::Bytes> + Send,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        let body = body.into();
+        async move {
+            let body = this.prepare_request_body(&mut parts.headers, body).await?;
+            let req = http_client::Request::from_parts(parts, body);
+            let mut response = this.inner.send_streaming(req).await?;
+            response.headers_mut().insert(
+                reqwest::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            Ok(response)
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TestClient {
+    pub(crate) prompts: Arc<StdMutex<Vec<String>>>,
 }
 
 #[derive(Clone)]
@@ -154,6 +445,8 @@ pub enum AnyClient {
     Anthropic(anthropic::Client),
     Gemini(gemini::Client),
     Ollama(ollama::Client),
+    #[cfg(test)]
+    Test(TestClient),
 }
 
 /// Extra OpenRouter request body params that pin a Claude model to the
@@ -178,10 +471,6 @@ pub(crate) fn openrouter_anthropic_routing(model_id: &str) -> Option<serde_json:
     })
 }
 
-/// Shallow-merges user-configured `extra_body` into provider-internal routing
-/// params (e.g. OpenRouter's `provider.order`). Top-level keys from `extra_body`
-/// win on collision. Returns `None` when both are absent so callers can avoid an
-/// empty `additional_params` call.
 pub(crate) fn merge_extra_body(
     base: Option<serde_json::Value>,
     extra: Option<serde_json::Value>,
@@ -193,8 +482,68 @@ pub(crate) fn merge_extra_body(
         }
         (base, None) => base,
         (None, extra) => extra,
-        // Non-object base (shouldn't happen for routing) — user value takes over.
         (Some(_), extra) => extra,
+    }
+}
+
+pub fn supports_reasoning_effort(provider: &str, model: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider == "openai-codex" || provider == "codex" {
+        return true;
+    }
+    let model = model.trim().to_ascii_lowercase();
+    if provider == "demo-openai" && model == "zerostack-demo-random" {
+        return true;
+    }
+    if provider != "openai" {
+        return false;
+    }
+    model.starts_with('o') || model.starts_with("gpt-5")
+}
+
+pub(crate) fn valid_reasoning_effort(effort: &str) -> bool {
+    matches!(
+        effort,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+pub(crate) fn supports_reasoning_effort_value(provider: &str, model: &str, effort: &str) -> bool {
+    let Some(effort) = canonical_reasoning_effort(effort) else {
+        return false;
+    };
+    if !supports_reasoning_effort(provider, model) {
+        return false;
+    }
+    let provider = provider.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+    if provider == "openai-codex" || provider == "codex" {
+        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh");
+    }
+    if provider == "openai" && model.starts_with("gpt-5") {
+        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh");
+    }
+    matches!(effort, "minimal" | "low" | "medium" | "high")
+}
+
+pub(crate) fn normalize_reasoning_effort_value(
+    provider: &str,
+    model: &str,
+    effort: &str,
+) -> Option<&'static str> {
+    let effort = canonical_reasoning_effort(effort)?;
+    supports_reasoning_effort_value(provider, model, effort).then_some(effort)
+}
+
+fn canonical_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort {
+        "off" | "none" => Some("none"),
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" | "max" => Some("xhigh"),
+        _ => None,
     }
 }
 
@@ -203,10 +552,14 @@ impl AnyClient {
     pub fn provider_name(&self) -> &'static str {
         match self {
             AnyClient::OpenRouter(_) => "openrouter",
+            AnyClient::OpenAI(OpenAiClient::Codex(_)) => "openai-codex",
+            AnyClient::OpenAI(OpenAiClient::DeepSeek(_)) => "deepseek",
             AnyClient::OpenAI(_) => "openai",
             AnyClient::Anthropic(_) => "anthropic",
             AnyClient::Gemini(_) => "gemini",
             AnyClient::Ollama(_) => "ollama",
+            #[cfg(test)]
+            AnyClient::Test(_) => "test",
         }
     }
 
@@ -223,6 +576,8 @@ impl AnyClient {
             }
             AnyClient::Gemini(c) => AnyModel::Gemini(c.completion_model(name)),
             AnyClient::Ollama(c) => AnyModel::Ollama(c.completion_model(name)),
+            #[cfg(test)]
+            AnyClient::Test(c) => AnyModel::Test(c.clone()),
         }
     }
 
@@ -251,9 +606,7 @@ pub struct ModelEntry {
     pub id: String,
     pub display: String,
     pub context_length: Option<u32>,
-    pub kind: Option<String>,
-    pub input_price: Option<f64>,
-    pub output_price: Option<f64>,
+    pub kind: Option<String>, // rig Model.r#type (often None)
 }
 
 impl ModelEntry {
@@ -263,8 +616,6 @@ impl ModelEntry {
             display: m.display_name().to_string(),
             context_length: m.context_length,
             kind: m.r#type.clone(),
-            input_price: None,
-            output_price: None,
         }
     }
 }
@@ -330,9 +681,25 @@ impl AnyClient {
             AnyClient::OpenAI(OpenAiClient::Completions(_)) => {
                 anyhow::bail!("rig model listing unavailable for this client")
             }
+            AnyClient::OpenAI(OpenAiClient::DeepSeek(_)) => {
+                return Ok(catalog_model_entries("deepseek"));
+            }
+            AnyClient::OpenAI(OpenAiClient::Codex(_)) => return Ok(codex_model_entries()),
+            #[cfg(test)]
+            AnyClient::Test(_) => return Ok(Vec::new()),
         };
         Ok(list.iter().map(ModelEntry::from_rig).collect())
     }
+}
+
+fn codex_model_entries() -> Vec<ModelEntry> {
+    catalog_model_entries("openai-codex")
+}
+
+fn catalog_model_entries(provider: &str) -> Vec<ModelEntry> {
+    crate::models_catalog::catalog_entries(provider)
+        .unwrap_or(&[])
+        .to_vec()
 }
 
 /// Custom / OpenAI-compatible gateway: best-effort GET {base}/models.
@@ -347,9 +714,11 @@ pub async fn list_models_manual(
         .base_url
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no base_url"))?;
+    let auth_api_keys = crate::auth::stored_api_keys().ok();
     let key = AuthResolver::new(config.kind)
         .with_cli_key(cli_key)
         .with_env_override(config.api_key_env.as_deref())
+        .with_auth_keys(auth_api_keys.as_ref())
         .with_config_keys(config_api_keys)
         .with_custom_provider_name(Some(provider_name))
         .resolve()
@@ -378,58 +747,8 @@ pub async fn list_models_manual(
             id: i.id,
             context_length: None,
             kind: None,
-            input_price: None,
-            output_price: None,
         })
         .collect())
-}
-
-pub async fn fetch_openrouter_pricing(
-    api_key: Option<&str>,
-    custom_providers: &HashMap<String, CustomProviderConfig>,
-    config_api_keys: Option<&HashMap<String, String>>,
-) -> anyhow::Result<HashMap<String, (f64, f64)>> {
-    let config = resolve_provider_config("openrouter", custom_providers)?;
-    let key = AuthResolver::new(config.kind)
-        .with_cli_key(api_key)
-        .with_env_override(config.api_key_env.as_deref())
-        .with_config_keys(config_api_keys)
-        .with_custom_provider_name(Some("openrouter"))
-        .resolve()
-        .ok();
-    let custom = custom_providers.get("openrouter");
-    let http = build_http_client("openrouter", config.danger_accept_invalid_certs, custom)?;
-    let url = "https://openrouter.ai/api/v1/models";
-    let mut req = http.get(url);
-    if let Some(k) = key.as_deref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(k);
-    }
-    #[derive(serde::Deserialize)]
-    struct PricingResp {
-        prompt: String,
-        completion: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct PricingEntry {
-        id: String,
-        pricing: Option<PricingResp>,
-    }
-    #[derive(serde::Deserialize)]
-    struct PricingList {
-        data: Vec<PricingEntry>,
-    }
-    let resp: PricingList = req.send().await?.error_for_status()?.json().await?;
-    let mut map = HashMap::new();
-    for entry in resp.data {
-        if let Some(p) = entry.pricing {
-            let input: f64 = p.prompt.parse().unwrap_or(0.0);
-            let output: f64 = p.completion.parse().unwrap_or(0.0);
-            if input > 0.0 || output > 0.0 {
-                map.insert(entry.id, (input * 1_000_000.0, output * 1_000_000.0));
-            }
-        }
-    }
-    Ok(map)
 }
 
 async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result<String> {
@@ -438,10 +757,13 @@ async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result
         AnyModel::OpenAI(m) => match m {
             OpenAiModel::Responses(m) => run_summarizer(m, prompt).await,
             OpenAiModel::Completions(m) => run_summarizer(m, prompt).await,
+            OpenAiModel::Codex(m) => run_summarizer(m, prompt).await,
         },
         AnyModel::Anthropic(m) => run_summarizer(m, prompt).await,
         AnyModel::Gemini(m) => run_summarizer(m, prompt).await,
         AnyModel::Ollama(m) => run_summarizer(m, prompt).await,
+        #[cfg(test)]
+        AnyModel::Test(_) => Ok(prompt),
     }
 }
 
@@ -460,18 +782,10 @@ where
         .preamble(&preamble)
         .build();
 
-    let agent_ref = &agent;
-    let mut stream = retry::retry_stream_chat(&RetryConfig::default(), move || {
-        let p = prompt.clone();
-        async move {
-            agent_ref
-                .stream_chat(p, Vec::<Message>::new())
-                .multi_turn(1)
-                .await
-        }
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Compression failed: {}", e))?;
+    let mut stream = agent
+        .stream_chat(prompt, Vec::<Message>::new())
+        .multi_turn(1)
+        .await;
 
     let mut response = String::new();
     use futures::StreamExt;
@@ -503,8 +817,18 @@ pub(crate) fn serialize_conversation(messages: &[SessionMessage]) -> String {
             crate::session::MessageRole::User => "User",
             crate::session::MessageRole::Assistant => "Assistant",
             crate::session::MessageRole::System => "System",
-            crate::session::MessageRole::ToolCall => "ToolCall",
-            crate::session::MessageRole::ToolResult => "ToolResult",
+            crate::session::MessageRole::ToolCall => {
+                if msg.tool_call.is_none() {
+                    continue;
+                }
+                "ToolCall"
+            }
+            crate::session::MessageRole::ToolResult => {
+                if msg.tool_result.is_none() {
+                    continue;
+                }
+                "ToolResult"
+            }
             crate::session::MessageRole::SubagentToolCall => "SubagentToolCall",
         };
         result.push_str(&format!("[{}]: {}\n\n", role_tag, msg.content));
@@ -526,6 +850,8 @@ pub enum AnyModel {
     Anthropic(anthropic::completion::CompletionModel),
     Gemini(gemini::completion::CompletionModel),
     Ollama(ollama::CompletionModel),
+    #[cfg(test)]
+    Test(TestClient),
 }
 
 #[derive(Clone)]
@@ -535,6 +861,15 @@ pub enum AnyAgent {
     Anthropic(Agent<anthropic::completion::CompletionModel>),
     Gemini(Agent<gemini::completion::CompletionModel>),
     Ollama(Agent<ollama::CompletionModel>),
+    #[cfg(test)]
+    Test(TestAgent),
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestAgent {
+    pub(crate) prompts: Arc<StdMutex<Vec<String>>>,
+    pub(crate) sandbox: Sandbox,
 }
 
 impl AnyAgent {
@@ -543,29 +878,28 @@ impl AnyAgent {
         prompt: &str,
         max_turns: usize,
         pure_stdout: bool,
-        retry_config: &RetryConfig,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<runner::PrintRunResult> {
         match self {
-            AnyAgent::OpenRouter(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
-            }
+            AnyAgent::OpenRouter(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => {
-                    runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                    runner::run_print(a, prompt, max_turns, pure_stdout).await
                 }
                 OpenAiAgent::Completions(a) => {
-                    runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                    runner::run_print(a, prompt, max_turns, pure_stdout).await
                 }
+                OpenAiAgent::Codex(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             },
-            AnyAgent::Anthropic(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
-            }
-            AnyAgent::Gemini(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
-            }
-            AnyAgent::Ollama(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
-            }
+            AnyAgent::Anthropic(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
+            AnyAgent::Gemini(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
+            AnyAgent::Ollama(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
+            #[cfg(test)]
+            AnyAgent::Test(_) => Ok(runner::PrintRunResult {
+                response: prompt.to_string(),
+                reasoning: Vec::new(),
+                usage: crate::event::TokenUsage::default(),
+                context_usage: crate::event::TokenUsage::default(),
+            }),
         }
     }
 
@@ -575,49 +909,50 @@ impl AnyAgent {
         prompt: &str,
         max_turns: usize,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
-        retry_config: &RetryConfig,
+        limits: Option<runner::SubagentLimits>,
     ) -> anyhow::Result<String> {
         match self {
             AnyAgent::OpenRouter(a) => {
-                runner::run_subagent(a, prompt, max_turns, event_tx, retry_config).await
+                runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
             }
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => {
-                    runner::run_subagent(a, prompt, max_turns, event_tx, retry_config).await
+                    runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
                 }
                 OpenAiAgent::Completions(a) => {
-                    runner::run_subagent(a, prompt, max_turns, event_tx, retry_config).await
+                    runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
+                }
+                OpenAiAgent::Codex(a) => {
+                    runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
                 }
             },
             AnyAgent::Anthropic(a) => {
-                runner::run_subagent(a, prompt, max_turns, event_tx, retry_config).await
+                runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
             }
             AnyAgent::Gemini(a) => {
-                runner::run_subagent(a, prompt, max_turns, event_tx, retry_config).await
+                runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
             }
             AnyAgent::Ollama(a) => {
-                runner::run_subagent(a, prompt, max_turns, event_tx, retry_config).await
+                runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
             }
+            #[cfg(test)]
+            AnyAgent::Test(_) => Ok(prompt.to_string()),
         }
     }
 
-    pub fn spawn_runner(
-        self,
-        prompt: String,
-        history: Vec<Message>,
-        retry_config: RetryConfig,
-    ) -> AgentRunner {
+    pub fn spawn_runner(self, prompt: String, history: Vec<Message>) -> AgentRunner {
         match self {
-            AnyAgent::OpenRouter(a) => runner::spawn_agent(a, prompt, history, retry_config),
+            AnyAgent::OpenRouter(a) => runner::spawn_agent(a, prompt, history),
             AnyAgent::OpenAI(a) => match a {
-                OpenAiAgent::Responses(a) => runner::spawn_agent(a, prompt, history, retry_config),
-                OpenAiAgent::Completions(a) => {
-                    runner::spawn_agent(a, prompt, history, retry_config)
-                }
+                OpenAiAgent::Responses(a) => runner::spawn_agent(a, prompt, history),
+                OpenAiAgent::Completions(a) => runner::spawn_agent(a, prompt, history),
+                OpenAiAgent::Codex(a) => runner::spawn_agent(a, prompt, history),
             },
-            AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history, retry_config),
-            AnyAgent::Gemini(a) => runner::spawn_agent(a, prompt, history, retry_config),
-            AnyAgent::Ollama(a) => runner::spawn_agent(a, prompt, history, retry_config),
+            AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history),
+            AnyAgent::Gemini(a) => runner::spawn_agent(a, prompt, history),
+            AnyAgent::Ollama(a) => runner::spawn_agent(a, prompt, history),
+            #[cfg(test)]
+            AnyAgent::Test(a) => a.spawn_runner(prompt),
         }
     }
 
@@ -627,28 +962,35 @@ impl AnyAgent {
         history: Vec<Message>,
         event_tx: mpsc::Sender<crate::event::BtwEvent>,
         id: u32,
-        retry_config: RetryConfig,
     ) -> crate::agent::runner::BtwRunner {
         match self {
-            AnyAgent::OpenRouter(a) => {
-                runner::spawn_btw(a, prompt, history, event_tx, id, retry_config)
-            }
+            AnyAgent::OpenRouter(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             AnyAgent::OpenAI(a) => match a {
-                OpenAiAgent::Responses(a) => {
-                    runner::spawn_btw(a, prompt, history, event_tx, id, retry_config)
-                }
-                OpenAiAgent::Completions(a) => {
-                    runner::spawn_btw(a, prompt, history, event_tx, id, retry_config)
-                }
+                OpenAiAgent::Responses(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+                OpenAiAgent::Completions(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+                OpenAiAgent::Codex(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             },
-            AnyAgent::Anthropic(a) => {
-                runner::spawn_btw(a, prompt, history, event_tx, id, retry_config)
-            }
-            AnyAgent::Gemini(a) => {
-                runner::spawn_btw(a, prompt, history, event_tx, id, retry_config)
-            }
-            AnyAgent::Ollama(a) => {
-                runner::spawn_btw(a, prompt, history, event_tx, id, retry_config)
+            AnyAgent::Anthropic(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+            AnyAgent::Gemini(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+            AnyAgent::Ollama(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+            #[cfg(test)]
+            AnyAgent::Test(_) => {
+                let join = tokio::spawn(async move {
+                    let _ = event_tx
+                        .send(crate::event::BtwEvent::Done {
+                            id,
+                            response: CompactString::new(prompt),
+                            usage: crate::event::TokenUsage {
+                                input_tokens: 1,
+                                output_tokens: 1,
+                                ..Default::default()
+                            },
+                        })
+                        .await;
+                });
+                crate::agent::runner::BtwRunner {
+                    abort_handle: join.abort_handle(),
+                }
             }
         }
     }
@@ -785,16 +1127,75 @@ pub fn create_client(
     api_key: Option<&str>,
     custom_providers: &HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&HashMap<String, String>>,
+    codex_prompt_cache_key: Option<&str>,
+) -> anyhow::Result<AnyClient> {
+    create_client_inner(
+        provider_name,
+        api_key,
+        custom_providers,
+        config_api_keys,
+        codex_prompt_cache_key,
+        false,
+    )
+}
+
+pub fn create_client_allow_missing_api_key(
+    provider_name: &str,
+    api_key: Option<&str>,
+    custom_providers: &HashMap<String, CustomProviderConfig>,
+    config_api_keys: Option<&HashMap<String, String>>,
+    codex_prompt_cache_key: Option<&str>,
+) -> anyhow::Result<AnyClient> {
+    create_client_inner(
+        provider_name,
+        api_key,
+        custom_providers,
+        config_api_keys,
+        codex_prompt_cache_key,
+        true,
+    )
+}
+
+fn create_client_inner(
+    provider_name: &str,
+    api_key: Option<&str>,
+    custom_providers: &HashMap<String, CustomProviderConfig>,
+    config_api_keys: Option<&HashMap<String, String>>,
+    codex_prompt_cache_key: Option<&str>,
+    allow_missing_api_key: bool,
 ) -> anyhow::Result<AnyClient> {
     let config = resolve_provider_config(provider_name, custom_providers)?;
     let base_url = resolve_base_url(&config);
 
+    if config.kind == ProviderKind::OpenAICodex {
+        let custom = custom_providers.get(provider_name);
+        let http_client =
+            build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+        return Ok(AnyClient::OpenAI(build_codex_client(
+            http_client,
+            codex_prompt_cache_key,
+        )?));
+    }
+
+    let auth_api_keys = crate::auth::stored_api_keys().ok();
     let resolver = AuthResolver::new(config.kind)
         .with_cli_key(api_key)
         .with_env_override(config.api_key_env.as_deref())
+        .with_auth_keys(auth_api_keys.as_ref())
         .with_config_keys(config_api_keys)
         .with_custom_provider_name(Some(provider_name));
-    let key = resolver.resolve()?;
+    let key = match resolver.resolve() {
+        Ok(key) => key,
+        Err(err) if allow_missing_api_key && err.to_string().starts_with("No API key found.") => {
+            tracing::warn!(
+                "starting without API key for provider '{}': {}",
+                provider_name,
+                err
+            );
+            "missing-api-key".to_string()
+        }
+        Err(err) => return Err(err),
+    };
 
     match config.kind {
         ProviderKind::OpenAI => {
@@ -808,11 +1209,38 @@ pub fn create_client(
                 http_client,
             )?))
         }
+        ProviderKind::DeepSeek => {
+            let custom = custom_providers.get(provider_name);
+            let http_client =
+                build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+            let client = openai::CompletionsClient::builder()
+                .api_key(&key)
+                .base_url(base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL))
+                .http_client(http_client)
+                .build()?;
+            Ok(AnyClient::OpenAI(OpenAiClient::DeepSeek(client)))
+        }
         ProviderKind::Anthropic => build_anthropic_client(&key, base_url.as_deref()),
         ProviderKind::Gemini => build_gemini_client(&key, base_url.as_deref()),
         ProviderKind::Ollama => build_ollama_client(&key, base_url.as_deref()),
         ProviderKind::OpenRouter => build_openrouter_client(&key, base_url.as_deref()),
+        ProviderKind::OpenAICodex => unreachable!("handled before static API-key resolution"),
     }
+}
+
+fn build_codex_client(
+    http_client: reqwest::Client,
+    prompt_cache_key: Option<&str>,
+) -> anyhow::Result<OpenAiClient> {
+    let client = openai::Client::builder()
+        .api_key("dynamic-codex-auth")
+        .base_url(OPENAI_CODEX_BASE_URL)
+        .http_client(CodexHttpClient::new(
+            http_client,
+            prompt_cache_key.map(ToOwned::to_owned),
+        ))
+        .build()?;
+    Ok(OpenAiClient::Codex(client))
 }
 
 macro_rules! build_provider_client {
@@ -858,6 +1286,12 @@ fn build_openrouter_client(key: &str, base_url: Option<&str>) -> anyhow::Result<
     Ok(AnyClient::OpenRouter(builder.build()?))
 }
 
+fn openai_reasoning_params(effort: Option<&str>) -> Option<serde_json::Value> {
+    effort
+        .filter(|effort| valid_reasoning_effort(effort))
+        .map(|effort| serde_json::json!({ "reasoning": { "effort": effort } }))
+}
+
 /// Builds an OpenAiModel (Responses / Completions) into the matching OpenAiAgent.
 #[allow(clippy::too_many_arguments)]
 async fn build_openai_agent(
@@ -869,6 +1303,7 @@ async fn build_openai_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
@@ -885,7 +1320,10 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                extra_body,
+                merge_extra_body(
+                    openai_reasoning_params(reasoning_effort),
+                    extra_body.clone(),
+                ),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -902,7 +1340,27 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                extra_body,
+                merge_extra_body(
+                    openai_reasoning_params(reasoning_effort),
+                    extra_body.clone(),
+                ),
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        OpenAiModel::Codex(m) => OpenAiAgent::Codex(
+            builder::build_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                sandbox,
+                reasoning_enabled,
+                temperature,
+                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -921,6 +1379,7 @@ pub async fn build_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
@@ -953,6 +1412,7 @@ pub async fn build_agent(
                 ask_tx,
                 sandbox.clone(),
                 reasoning_enabled,
+                reasoning_effort,
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -1002,7 +1462,7 @@ pub async fn build_agent(
                 context,
                 permission,
                 ask_tx,
-                sandbox,
+                sandbox.clone(),
                 reasoning_enabled,
                 temperature,
                 extra_body,
@@ -1011,6 +1471,56 @@ pub async fn build_agent(
             )
             .await,
         ),
+        #[cfg(test)]
+        AnyModel::Test(c) => AnyAgent::Test(TestAgent {
+            prompts: c.prompts,
+            sandbox,
+        }),
+    }
+}
+
+#[cfg(test)]
+impl TestAgent {
+    fn spawn_runner(self, prompt: String) -> AgentRunner {
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(32);
+        let join = tokio::spawn(async move {
+            self.prompts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(prompt.clone());
+            if prompt == "sleep" {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = event_tx
+                    .send(AgentEvent::ToolCall {
+                        id: CompactString::new("test-tool-call"),
+                        call_id: None,
+                        name: CompactString::new("bash"),
+                        args: serde_json::json!({ "command": "bash -c 'sleep 500'" }),
+                    })
+                    .await;
+                let _ = self.sandbox.output_command("bash -c 'sleep 500'").await;
+            }
+            let _ = event_tx
+                .send(AgentEvent::Done {
+                    response: CompactString::new(format!("received {prompt}")),
+                    usage: crate::event::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
+                    context_usage: crate::event::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        ..Default::default()
+                    },
+                    reasoning: Vec::new(),
+                })
+                .await;
+        });
+        AgentRunner {
+            event_rx,
+            abort_handle: join.abort_handle(),
+        }
     }
 }
 
@@ -1064,6 +1574,17 @@ pub fn build_btw_agent(
                     extra_body,
                 ))
             }
+            OpenAiModel::Codex(m) => OpenAiAgent::Codex(builder::build_btw_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                reasoning_enabled,
+                temperature,
+                None,
+            )),
         }),
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(builder::build_btw_agent_inner(
             m,
@@ -1087,6 +1608,11 @@ pub fn build_btw_agent(
             temperature,
             extra_body,
         )),
+        #[cfg(test)]
+        AnyModel::Test(c) => AnyAgent::Test(TestAgent {
+            prompts: c.prompts,
+            sandbox: Sandbox::new(false, "bwrap"),
+        }),
         AnyModel::Ollama(m) => AnyAgent::Ollama(builder::build_btw_agent_inner(
             m,
             cli,
@@ -1098,5 +1624,166 @@ pub fn build_btw_agent(
             temperature,
             extra_body,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ensure_codex_instructions, normalize_reasoning_effort_value, openrouter_anthropic_routing,
+        supports_reasoning_effort_value,
+    };
+    use bytes::Bytes;
+    use serde_json::json;
+
+    #[test]
+    fn pins_anthropic_namespaced_openrouter_models() {
+        for id in [
+            "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-opus-4.8",
+            "anthropic/claude-3.5-haiku",
+        ] {
+            let extra = openrouter_anthropic_routing(id).expect("should pin {id}");
+            assert_eq!(extra["provider"]["order"][0], "Anthropic");
+            assert_eq!(extra["provider"]["allow_fallbacks"], true);
+        }
+    }
+
+    #[test]
+    fn codex_reasoning_efforts_match_supported_api_values() {
+        for effort in ["none", "low", "medium", "high", "xhigh"] {
+            assert!(supports_reasoning_effort_value(
+                "openai-codex",
+                "gpt-5.5",
+                effort
+            ));
+        }
+        assert!(!supports_reasoning_effort_value(
+            "openai-codex",
+            "gpt-5.5",
+            "minimal"
+        ));
+        assert_eq!(
+            normalize_reasoning_effort_value("openai-codex", "gpt-5.5", "off"),
+            Some("none")
+        );
+        assert_eq!(
+            normalize_reasoning_effort_value("openai-codex", "gpt-5.5", "max"),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn pins_tilde_prefixed_latest_aliases() {
+        // OpenRouter floating aliases carry a leading `~` that is part of the
+        // real slug; they must still be pinned to the Anthropic route.
+        for id in [
+            "~anthropic/claude-sonnet-latest",
+            "~anthropic/claude-opus-latest",
+            "~anthropic/claude-haiku-latest",
+        ] {
+            assert!(
+                openrouter_anthropic_routing(id).is_some(),
+                "{id} should be pinned"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_non_anthropic_openrouter_models_untouched() {
+        for id in [
+            "openai/gpt-4o",
+            "deepseek/deepseek-chat",
+            "google/gemini-2.5-pro",
+            "openrouter/auto",
+            // A non-Anthropic model that merely mentions claude in its path
+            // is not in the anthropic namespace and must not be pinned.
+            "somegateway/not-claude",
+        ] {
+            assert!(
+                openrouter_anthropic_routing(id).is_none(),
+                "{id} should not be pinned"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_request_body_promotes_system_message_to_instructions() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "instructions": null,
+            "max_output_tokens": 128,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{ "type": "input_text", "text": "Follow project rules." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Hello" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "input_text", "text": "Hi there" }]
+                }
+            ]
+        });
+
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string()), None).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(value["instructions"], json!("Follow project rules."));
+        assert_eq!(value["store"], json!(false));
+        assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
+        assert!(value.get("max_output_tokens").is_none());
+        let input = value["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], json!("user"));
+        assert_eq!(input[0]["content"][0]["type"], json!("input_text"));
+        assert_eq!(input[1]["role"], json!("assistant"));
+        assert_eq!(input[1]["content"][0]["type"], json!("output_text"));
+    }
+
+    #[test]
+    fn codex_request_body_preserves_existing_include_items() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "instructions": "Use tools carefully.",
+            "include": ["web_search_call.action.sources"],
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello" }]
+            }]
+        });
+
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string()), None).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(
+            value["include"],
+            json!([
+                "web_search_call.action.sources",
+                "reasoning.encrypted_content"
+            ])
+        );
+    }
+
+    #[test]
+    fn codex_request_body_sets_prompt_cache_key() {
+        let body = json!({
+            "model": "gpt-5.5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Hello" }]
+            }]
+        });
+
+        let patched =
+            ensure_codex_instructions(Bytes::from(body.to_string()), Some("session-123")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(value["prompt_cache_key"], json!("session-123"));
     }
 }

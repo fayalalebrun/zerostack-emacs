@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use compact_str::CompactString;
 
 use crate::config;
@@ -21,6 +21,30 @@ pub struct Cli {
 
     #[arg(long = "print-config", help = "Print resolved configuration and exit")]
     pub print_config: bool,
+
+    #[arg(
+        long = "emacs",
+        help = "Run the native Emacs Unix socket protocol for this session"
+    )]
+    pub emacs: bool,
+
+    #[arg(
+        long = "emacs-list",
+        help = "List running native Emacs protocol sessions"
+    )]
+    pub emacs_list: bool,
+
+    #[arg(
+        long = "emacs-board",
+        help = "Print an Emacs-readable project/worktree/session board snapshot"
+    )]
+    pub emacs_board: bool,
+
+    #[arg(
+        long = "emacs-dismiss-attention",
+        help = "Dismiss a session from the Emacs board Needs attention section"
+    )]
+    pub emacs_dismiss_attention: Option<String>,
 
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
@@ -57,6 +81,13 @@ pub struct Cli {
 
     #[arg(long = "temperature", help = "Model temperature (0.0 to 2.0)")]
     pub temperature: Option<f64>,
+
+    #[arg(
+        long = "reasoning-effort",
+        value_parser = ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        help = "OpenAI reasoning effort for supported models (off/none, low, medium, high, max/xhigh)"
+    )]
+    pub reasoning_effort: Option<String>,
 
     #[arg(short = 't', long = "tools", help = "Allowlist specific tools")]
     pub tools: Vec<String>,
@@ -242,24 +273,95 @@ pub struct Cli {
     )]
     pub status_socket: Option<String>,
 
-    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::SetTrue,
-          help = "Enable full logging (trace level) to a timestamped log file under the data directory")]
-    pub verbose: bool,
-
-    #[arg(
-        long = "log-file",
-        help = "Write logs to this file (overrides verbose default path)"
-    )]
-    pub log_file: Option<std::path::PathBuf>,
-
-    #[arg(
-        long = "log-level",
-        help = "Set stderr log level (trace, debug, info, warn, error)"
-    )]
-    pub log_level: Option<String>,
-
     #[arg(help = "Prompt message(s)")]
     pub message: Vec<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    #[command(about = "Manage stored provider authentication")]
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    #[command(about = "Inspect or update configuration defaults")]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigCommand {
+    #[command(about = "List configured provider names")]
+    Providers,
+    #[command(about = "List known model ids for a provider")]
+    Models {
+        #[arg(help = "Provider name; defaults to the configured provider")]
+        provider: Option<String>,
+    },
+    #[command(about = "Persist the default provider and reset model to its default")]
+    SetProvider {
+        #[arg(help = "Provider name")]
+        provider: String,
+    },
+    #[command(about = "Persist the default model for the current default provider")]
+    SetModel {
+        #[arg(help = "Model id")]
+        model: String,
+    },
+    #[cfg(feature = "subagents")]
+    #[command(about = "Persist the default subagent provider and reset model to its default")]
+    SetSubagentProvider {
+        #[arg(help = "Provider name")]
+        provider: String,
+    },
+    #[cfg(feature = "subagents")]
+    #[command(about = "Persist the default subagent model for the current subagent provider")]
+    SetSubagentModel {
+        #[arg(help = "Model id")]
+        model: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthCommand {
+    #[command(about = "Log in to a provider")]
+    Login {
+        #[arg(help = "Provider to log in to: codex or openai-codex")]
+        provider: String,
+        #[arg(long = "device", help = "Use the device-code login flow")]
+        device: bool,
+    },
+    #[command(about = "Log out from a provider")]
+    Logout {
+        #[arg(help = "Provider to log out from: codex or openai-codex")]
+        provider: String,
+    },
+    #[command(about = "Show stored authentication status")]
+    Status {
+        #[arg(help = "Optional provider to show: codex or openai-codex")]
+        provider: Option<String>,
+    },
+    #[command(about = "Store an API key for a provider")]
+    SetKey {
+        #[arg(
+            help = "Provider name, for example openai, anthropic, openrouter, or a custom provider"
+        )]
+        provider: String,
+        #[arg(help = "API key to store")]
+        key: String,
+    },
+    #[command(about = "Remove a stored API key for a provider")]
+    UnsetKey {
+        #[arg(
+            help = "Provider name, for example openai, anthropic, openrouter, or a custom provider"
+        )]
+        provider: String,
+    },
 }
 
 impl Cli {
@@ -272,16 +374,16 @@ impl Cli {
     }
 
     pub fn resolve_model(&self, cfg: &config::Config) -> CompactString {
-        // CLI --model takes a raw model string.
         if let Some(m) = self.model.as_deref() {
             return CompactString::new(m);
         }
-        // Config model field references a quick model name; resolve it.
+        if self.provider.is_some()
+            && let Some((model, _)) =
+                crate::provider::default_model_for_provider(&self.resolve_provider(cfg), cfg)
+        {
+            return CompactString::new(model);
+        }
         if let Some(m) = cfg.model.as_deref() {
-            let qm = config::quick_models_map(cfg);
-            if let Some(q) = qm.get(m) {
-                return q.model.clone();
-            }
             return CompactString::new(m);
         }
         // No explicit model. If a provider was chosen explicitly, default to a

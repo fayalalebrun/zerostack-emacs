@@ -1,52 +1,51 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use compact_str::CompactString;
 
 use std::io;
 
-use crate::config::{
-    Config, EditSystem, QuickModelConfig, StatusLineConfig, StatusLineLine, StatusLineSegment,
-};
+use crate::config::{Config, EditSystem, QuickModelConfig};
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::config::McpServerConfig;
 use crate::session::storage;
 
-/// Candidate config filenames, in priority order within each search dir.
-///
-/// * `config.toml` — preferred format, especially for permission rules.
-/// * `config.yaml` / `config.yml` — the documented non-TOML format.
-/// * `config.json` — legacy fallback. YAML is a strict superset of JSON, so
-///   existing JSON configs parse transparently through the YAML reader. This
-///   entry exists purely so upgrades do not silently drop a user's config.
-const CONFIG_CANDIDATES: [&str; 4] = ["config.toml", "config.yaml", "config.yml", "config.json"];
-
-/// Pick the first existing candidate in `dir`, falling back to the preferred
-/// `config.toml` path when none exist (so a fresh install seeds a TOML file).
-pub(crate) fn pick_existing(dir: &Path) -> PathBuf {
-    for name in CONFIG_CANDIDATES {
-        let p = dir.join(name);
-        if p.exists() {
-            return p;
-        }
-    }
-    dir.join(CONFIG_CANDIDATES[0])
-}
-
 fn resolve_config_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("ZS_CONFIG_DIR") {
-        return pick_existing(&PathBuf::from(dir));
+        let dir = PathBuf::from(dir);
+        let toml = dir.join("config.toml");
+        let json = dir.join("config.json");
+        if toml.exists() {
+            return toml;
+        }
+        if json.exists() {
+            return json;
+        }
+        return toml;
     }
 
     if let Some(config_dir) = dirs::config_dir() {
         let dir = config_dir.join("zerostack");
-        let picked = pick_existing(&dir);
-        if picked.exists() {
-            return picked;
+        let toml = dir.join("config.toml");
+        let json = dir.join("config.json");
+        if toml.exists() {
+            return toml;
+        }
+        if json.exists() {
+            return json;
         }
     }
 
-    pick_existing(&storage::data_dir())
+    let dir = storage::data_dir();
+    let toml = dir.join("config.toml");
+    let json = dir.join("config.json");
+    if toml.exists() {
+        toml
+    } else if json.exists() {
+        json
+    } else {
+        toml
+    }
 }
 
 pub fn config_file_path() -> PathBuf {
@@ -65,6 +64,7 @@ fn default_quick_models() -> HashMap<String, QuickModelConfig> {
             reserve_tokens: None,
             temperature: None,
             extra_body: None,
+            reasoning_effort: None,
         },
     );
     map.insert(
@@ -77,6 +77,7 @@ fn default_quick_models() -> HashMap<String, QuickModelConfig> {
             reserve_tokens: None,
             temperature: None,
             extra_body: None,
+            reasoning_effort: None,
         },
     );
     map
@@ -98,9 +99,7 @@ pub fn save_quick_model(
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         match path.extension().and_then(|e| e.to_str()) {
             Some("toml") => toml::from_str(&content).unwrap_or_default(),
-            // YAML is a superset of JSON, so this also accepts legacy
-            // `config.json` files transparently.
-            _ => serde_yaml_ng::from_str(&content).unwrap_or_default(),
+            _ => serde_json::from_str(&content).unwrap_or_default(),
         }
     } else {
         Config::default()
@@ -117,6 +116,7 @@ pub fn save_quick_model(
             reserve_tokens: None,
             temperature: None,
             extra_body: None,
+            reasoning_effort: None,
         },
     );
 
@@ -129,10 +129,7 @@ pub fn save_quick_model(
             let content = toml::to_string(&cfg).map_err(std::io::Error::other)?;
             std::fs::write(&path, content)?;
         }
-        _ => std::fs::write(
-            &path,
-            serde_yaml_ng::to_string(&cfg).map_err(std::io::Error::other)?,
-        )?,
+        _ => std::fs::write(&path, serde_json::to_string_pretty(&cfg)?)?,
     }
     Ok(())
 }
@@ -141,9 +138,9 @@ fn rich_default_config() -> Config {
     Config {
         quick_models: Some(default_quick_models()),
         provider: Some(CompactString::new("openrouter")),
-        model: Some(CompactString::new("deepseek-v4-pro")),
+        model: Some(CompactString::new("deepseek/deepseek-v4-pro")),
         max_tokens: Some(16384),
-        compact_enabled: Some(false),
+        compact_enabled: Some(true),
         max_text_file_size: Some(1_048_576),
         edit_system: Some(EditSystem::Similarity),
         default_permission_mode: Some("standard".to_string()),
@@ -158,138 +155,6 @@ fn rich_default_config() -> Config {
         subagent_max_find_results: Some(200),
         #[cfg(feature = "advisor")]
         advisor: Some(crate::config::types::AdvisorConfig::default()),
-        statusline: Some(StatusLineConfig {
-            lines: vec![StatusLineLine {
-                segments: vec![
-                    StatusLineSegment {
-                        item: "cwd".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some("  ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "git_branch".into(),
-                        color: Some("grey".into()),
-                        left: Some("(".into()),
-                        right: Some(")".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" | ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "model".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some("  |  ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "context_used".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some("/".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "context_max".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "context_percentage".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some("  \u{21d1}".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "tokens_input".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" \u{21d3}".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "tokens_output".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "flex_separator".into(),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "loop".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "mode".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "cost".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "btw".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "separator".into(),
-                        text: Some(" ".into()),
-                        ..Default::default()
-                    },
-                    StatusLineSegment {
-                        item: "prompt".into(),
-                        color: Some("grey".into()),
-                        ..Default::default()
-                    },
-                ],
-            }],
-        }),
         ..Default::default()
     }
 }
@@ -299,10 +164,6 @@ pub fn load() -> (Config, bool) {
     let is_first_startup = !path.exists();
     #[allow(unused_mut)]
     let mut cfg: Config = if is_first_startup {
-        tracing::info!(
-            "first startup, writing default config to {}",
-            path.display()
-        );
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -333,7 +194,7 @@ pub fn load() -> (Config, bool) {
                 );
                 std::process::exit(1);
             }),
-            _ => serde_yaml_ng::from_str(&content).unwrap_or_else(|e| {
+            _ => serde_json::from_str(&content).unwrap_or_else(|e| {
                 eprintln!(
                     "error: {} is not a valid config: {}\n\
                       Fix the file or remove it to use defaults.",
@@ -344,13 +205,6 @@ pub fn load() -> (Config, bool) {
             }),
         }
     };
-
-    tracing::debug!(
-        "config loaded from {}: {} quick_models, {} custom_providers",
-        path.display(),
-        cfg.quick_models.as_ref().map(|m| m.len()).unwrap_or(0),
-        cfg.custom_providers.as_ref().map(|m| m.len()).unwrap_or(0),
-    );
 
     #[cfg(feature = "mcp")]
     inject_mcp_defaults(&mut cfg);
@@ -433,11 +287,7 @@ pub fn save_config(cfg: &Config) -> io::Result<()> {
             let content = toml::to_string(&cfg).map_err(io::Error::other)?;
             std::fs::write(&path, content)?;
         }
-        _ => std::fs::write(
-            &path,
-            serde_yaml_ng::to_string(&cfg).map_err(io::Error::other)?,
-        )?,
+        _ => std::fs::write(&path, serde_json::to_string_pretty(&cfg)?)?,
     }
-    tracing::debug!("config saved to {}", path.display());
     Ok(())
 }
