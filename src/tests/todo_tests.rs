@@ -3,6 +3,14 @@ use crate::agent::tools::todo::{TODO_LIST, TodoItem, TodoWriteArgs};
 use compact_str::CompactString;
 use rig::tool::Tool;
 
+fn item(content: &str, status: &str, priority: &str) -> TodoItem {
+    TodoItem {
+        content: content.to_string(),
+        status: CompactString::new(status),
+        priority: CompactString::new(priority),
+    }
+}
+
 fn reset_todo_list() {
     let mut list = TODO_LIST
         .lock()
@@ -51,31 +59,11 @@ async fn call_formats_todo_items_with_icons() {
     let tool = WriteTodoList::new(None, None);
     let args = TodoWriteArgs {
         todos: vec![
-            TodoItem {
-                content: "High priority task".to_string(),
-                status: CompactString::new("high"),
-                priority: CompactString::new("high"),
-            },
-            TodoItem {
-                content: "Completed task".to_string(),
-                status: CompactString::new("completed"),
-                priority: CompactString::new("medium"),
-            },
-            TodoItem {
-                content: "In progress task".to_string(),
-                status: CompactString::new("in_progress"),
-                priority: CompactString::new("medium"),
-            },
-            TodoItem {
-                content: "Cancelled task".to_string(),
-                status: CompactString::new("cancelled"),
-                priority: CompactString::new("low"),
-            },
-            TodoItem {
-                content: "Low priority task".to_string(),
-                status: CompactString::new("low"),
-                priority: CompactString::new("low"),
-            },
+            item("High priority task", "high", "high"),
+            item("Completed task", "completed", "medium"),
+            item("In progress task", "in_progress", "medium"),
+            item("Cancelled task", "cancelled", "low"),
+            item("Low priority task", "low", "low"),
         ],
     };
     let result = tool.call(args).await;
@@ -99,16 +87,8 @@ async fn call_updates_global_todo_list() {
     let tool = WriteTodoList::new(None, None);
     let args = TodoWriteArgs {
         todos: vec![
-            TodoItem {
-                content: "Task 1".to_string(),
-                status: CompactString::new("pending"),
-                priority: CompactString::new("high"),
-            },
-            TodoItem {
-                content: "Task 2".to_string(),
-                status: CompactString::new("pending"),
-                priority: CompactString::new("medium"),
-            },
+            item("Task 1", "pending", "high"),
+            item("Task 2", "pending", "medium"),
         ],
     };
     let _ = tool.call(args).await;
@@ -127,20 +107,12 @@ async fn call_overwrites_previous_list() {
     let tool = WriteTodoList::new(None, None);
 
     let args1 = TodoWriteArgs {
-        todos: vec![TodoItem {
-            content: "First".to_string(),
-            status: CompactString::new("pending"),
-            priority: CompactString::new("high"),
-        }],
+        todos: vec![item("First", "pending", "high")],
     };
     let _ = tool.call(args1).await;
 
     let args2 = TodoWriteArgs {
-        todos: vec![TodoItem {
-            content: "Second".to_string(),
-            status: CompactString::new("completed"),
-            priority: CompactString::new("low"),
-        }],
+        todos: vec![item("Second", "completed", "low")],
     };
     let _ = tool.call(args2).await;
 

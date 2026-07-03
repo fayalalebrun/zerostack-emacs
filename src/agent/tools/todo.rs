@@ -64,7 +64,6 @@ impl Tool for WriteTodoList {
     }
 
     async fn call(&self, args: TodoWriteArgs) -> Result<String, ToolError> {
-        tracing::debug!("tool todo_write start: items={}", args.todos.len());
         let coaching = check_perm(&self.permission, &self.ask_tx, "todo_write", "").await?;
 
         let mut list = TODO_LIST.lock().unwrap_or_else(|e| e.into_inner());
@@ -103,13 +102,6 @@ impl Tool for WriteTodoList {
             completed,
             list.iter().filter(|t| t.status == "cancelled").count()
         ));
-        tracing::debug!(
-            "tool todo_write done: total={}, pending={}, in_progress={}, completed={}",
-            total,
-            pending,
-            in_progress,
-            completed,
-        );
         if let Some(msg) = coaching {
             result = format!("{}\n\n{}", msg, result);
         }

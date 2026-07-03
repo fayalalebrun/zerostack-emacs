@@ -4,13 +4,14 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{
-    AskSender, FindFilesArgs, PermCheck, ToolError, check_perm, is_skip_dir,
+    AskSender, ContextTracker, FindFilesArgs, PermCheck, ToolError, check_perm, is_skip_dir,
 };
 
 pub struct FindFilesTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub max_results: u64,
+    pub context_tracker: Option<ContextTracker>,
 }
 
 impl FindFilesTool {
@@ -19,7 +20,13 @@ impl FindFilesTool {
             permission,
             ask_tx,
             max_results,
+            context_tracker: None,
         }
+    }
+
+    pub fn with_context_tracker(mut self, tracker: ContextTracker) -> Self {
+        self.context_tracker = Some(tracker);
+        self
     }
 }
 
@@ -52,11 +59,6 @@ impl Tool for FindFilesTool {
     }
 
     async fn call(&self, args: FindFilesArgs) -> Result<String, ToolError> {
-        tracing::debug!(
-            "tool find_files start: pattern={}, path={}",
-            args.pattern,
-            args.path.as_deref().unwrap_or("."),
-        );
         let coaching =
             check_perm(&self.permission, &self.ask_tx, "find_files", &args.pattern).await?;
 
@@ -64,6 +66,13 @@ impl Tool for FindFilesTool {
             .map_err(|e| ToolError::Msg(format!("Invalid regex: {}", e)))?;
 
         let search_path = args.path.as_deref().unwrap_or(".");
+        let loaded = crate::context::nested_agents_for_dir(
+            std::path::Path::new(search_path),
+            &crate::agent::tools::loaded_context_from(&self.context_tracker),
+        );
+        let loaded_paths: Vec<std::path::PathBuf> =
+            loaded.iter().map(|(path, _)| path.clone()).collect();
+        crate::agent::tools::mark_context_loaded_in(&self.context_tracker, &loaded_paths);
 
         let walker = WalkBuilder::new(search_path)
             .git_ignore(true)
@@ -96,7 +105,11 @@ impl Tool for FindFilesTool {
         }
 
         if results.is_empty() {
-            let msg = "No files found matching the pattern.".to_string();
+            let mut msg = "No files found matching the pattern.".to_string();
+            if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+                msg.push_str("\n\n");
+                msg.push_str(&reminder);
+            }
             return Ok(match coaching {
                 Some(c) => format!("{}\n\n{}", c, msg),
                 None => msg,
@@ -119,15 +132,19 @@ impl Tool for FindFilesTool {
         } else {
             format!("{} files found:\n{}", total, results.join("\n"))
         };
+        let result = if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+            format!("{}\n\n{}", result, reminder)
+        } else {
+            result
+        };
 
-        tracing::debug!(
-            "tool find_files done: results={}, truncated={}",
-            total,
-            total >= max_results,
-        );
-        Ok(match coaching {
+        let result = match coaching {
             Some(c) => format!("{}\n\n{}", c, result),
             None => result,
-        })
+        };
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

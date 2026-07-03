@@ -1,4 +1,4 @@
-use crate::session::{MessageRole, Session};
+use crate::session::{MessageRole, Session, SessionTokenUsage};
 
 #[test]
 fn estimate_tokens_empty() {
@@ -63,16 +63,75 @@ fn effective_context_falls_back_without_calibration() {
 }
 
 #[test]
-fn effective_context_uses_calibration_anchor_plus_delta() {
+fn effective_context_ignores_stale_calibration_anchor() {
     let mut s = Session::new("openai", "gpt-4", 128000);
     s.add_message(MessageRole::User, "first user message");
     s.add_message(MessageRole::Assistant, "assistant reply");
-    s.set_calibration(5000, 200); // anchor = 5200, covers 2 messages
+    let estimated = s.messages.iter().map(|m| m.estimated_tokens).sum::<u64>();
+    s.set_calibration(5000, 200);
     assert_eq!(s.calibrated_msg_count, 2);
 
     s.add_message(MessageRole::User, "a follow up question");
     let delta = Session::estimate_tokens("a follow up question");
-    assert_eq!(s.effective_context_tokens(), 5200 + delta);
+    assert_eq!(s.effective_context_tokens(), estimated + delta);
+}
+
+#[test]
+fn effective_context_uses_latest_assistant_provider_usage() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, "first user message");
+    s.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        "assistant reply",
+        Vec::new(),
+        Some(SessionTokenUsage {
+            input_tokens: 5000,
+            output_tokens: 200,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(s.latest_provider_context_tokens(), Some(5200));
+    assert_eq!(s.effective_context_tokens(), 5200);
+}
+
+#[test]
+fn effective_context_uses_provider_total_tokens_when_available() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        "assistant reply",
+        Vec::new(),
+        Some(SessionTokenUsage {
+            input_tokens: 5000,
+            output_tokens: 200,
+            total_tokens: 5200,
+            cached_input_tokens: 300,
+            cache_creation_input_tokens: 400,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(s.effective_context_tokens(), 5200);
+}
+
+#[test]
+fn effective_context_includes_provider_cache_usage_without_total_tokens() {
+    let mut s = Session::new("anthropic", "claude", 128000);
+    s.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        "assistant reply",
+        Vec::new(),
+        Some(SessionTokenUsage {
+            input_tokens: 5000,
+            output_tokens: 200,
+            cached_input_tokens: 300,
+            cache_creation_input_tokens: 400,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(s.effective_context_tokens(), 5900);
 }
 
 #[test]
@@ -86,9 +145,6 @@ fn calibration_ignores_zero_usage() {
 
 #[test]
 fn real_input_tokens_native_route_adds_cache_fields() {
-    // The Anthropic-native route reports input_tokens excluding cached/
-    // cache-creation tokens, so the real prompt size is the sum of all three.
-    // A cache hit (input ~0, cached large) must NOT collapse the measured context.
     assert_eq!(Session::real_input_tokens(true, 10, 7000, 0), 7010);
     assert_eq!(Session::real_input_tokens(true, 0, 7000, 0), 7000);
     assert_eq!(Session::real_input_tokens(true, 50, 0, 6000), 6050);
@@ -96,9 +152,33 @@ fn real_input_tokens_native_route_adds_cache_fields() {
 
 #[test]
 fn real_input_tokens_non_native_uses_input_only() {
-    // OpenAI/Gemini/OpenRouter fold the cached subset into input_tokens and
-    // report no cache-creation; adding the cache fields would double-count.
     assert_eq!(Session::real_input_tokens(false, 7000, 5600, 0), 7000);
+}
+
+#[test]
+fn compaction_invalidates_pre_compaction_provider_usage() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, &"x".repeat(400));
+    s.add_message_with_reasoning_and_usage(
+        MessageRole::Assistant,
+        "reply",
+        Vec::new(),
+        Some(SessionTokenUsage {
+            input_tokens: 80_000,
+            output_tokens: 1_000,
+            ..Default::default()
+        }),
+    );
+    s.add_message(MessageRole::User, "tail");
+
+    s.compress("summary".to_string(), 1, 10_000);
+
+    assert_eq!(s.latest_provider_context_tokens(), None);
+    assert_eq!(
+        s.effective_context_tokens(),
+        s.messages.iter().map(|m| m.estimated_tokens).sum::<u64>()
+    );
+    assert_eq!(s.total_estimated_tokens, s.effective_context_tokens());
 }
 
 // Helper: a session with `n` ASCII messages of `len` chars each, so every
@@ -209,6 +289,18 @@ fn add_message_updates_updated_at() {
     std::thread::sleep(std::time::Duration::from_millis(1));
     s.add_message(MessageRole::User, "hi");
     assert!(s.updated_at != before);
+}
+
+#[test]
+fn session_title_uses_latest_user_message_or_name() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    assert_eq!(s.title(), "untitled");
+    s.add_message(MessageRole::User, "first");
+    s.add_message(MessageRole::Assistant, "reply");
+    s.add_message(MessageRole::User, "second");
+    assert_eq!(s.title(), "second");
+    s.name = "named".into();
+    assert_eq!(s.title(), "named");
 }
 
 #[test]
@@ -338,71 +430,4 @@ fn parse_porcelain_counts_changes_and_sync() {
     assert_eq!(g.ahead, 2);
     assert_eq!(g.behind, 1);
     assert!(g.is_dirty());
-}
-
-#[test]
-fn rewind_to_truncates_and_records_restore_point() {
-    let mut s = Session::new("openai", "gpt-4", 128000);
-    s.add_message(MessageRole::User, "first");
-    s.add_message(MessageRole::Assistant, "reply");
-    s.add_message(MessageRole::User, "second");
-    s.add_message(MessageRole::Assistant, "reply2");
-
-    let removed = s.rewind_to(2);
-
-    assert_eq!(removed, 2);
-    assert_eq!(s.messages.len(), 2);
-    assert_eq!(s.messages[0].content, "first");
-    assert_eq!(s.messages[1].content, "reply");
-    assert!(s.rewind_undo.is_some());
-    assert_eq!(
-        s.total_estimated_tokens,
-        s.messages.iter().map(|m| m.estimated_tokens).sum::<u64>()
-    );
-}
-
-#[test]
-fn rewind_to_at_or_past_end_is_a_noop() {
-    let mut s = Session::new("openai", "gpt-4", 128000);
-    s.add_message(MessageRole::User, "only");
-
-    assert_eq!(s.rewind_to(1), 0);
-    assert_eq!(s.rewind_to(5), 0);
-    assert_eq!(s.messages.len(), 1);
-    assert!(s.rewind_undo.is_none());
-}
-
-#[test]
-fn redo_restores_the_messages_a_rewind_removed() {
-    let mut s = Session::new("openai", "gpt-4", 128000);
-    s.add_message(MessageRole::User, "first");
-    s.add_message(MessageRole::Assistant, "reply");
-    s.add_message(MessageRole::User, "second");
-    let before: Vec<_> = s.messages.iter().map(|m| m.content.clone()).collect();
-    let est_before = s.total_estimated_tokens;
-
-    s.rewind_to(1);
-    assert_eq!(s.messages.len(), 1);
-
-    assert!(s.redo());
-    let after: Vec<_> = s.messages.iter().map(|m| m.content.clone()).collect();
-    assert_eq!(before, after);
-    assert_eq!(s.total_estimated_tokens, est_before);
-    // The restore point is consumed, so a second redo finds nothing.
-    assert!(!s.redo());
-}
-
-#[test]
-fn adding_a_message_invalidates_the_redo_point() {
-    let mut s = Session::new("openai", "gpt-4", 128000);
-    s.add_message(MessageRole::User, "first");
-    s.add_message(MessageRole::Assistant, "reply");
-    s.add_message(MessageRole::User, "second");
-
-    s.rewind_to(1);
-    assert!(s.rewind_undo.is_some());
-    // Moving the conversation forward must drop the stale restore point.
-    s.add_message(MessageRole::User, "a fresh direction");
-    assert!(s.rewind_undo.is_none());
-    assert!(!s.redo());
 }

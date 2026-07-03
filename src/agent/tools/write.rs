@@ -51,16 +51,10 @@ impl Tool for WriteTool {
 
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
         let expanded = crate::fs::expand_tilde(&args.path);
-        tracing::debug!(
-            "tool write start: path={}, content_len={}",
-            expanded,
-            args.content.len(),
-        );
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "write", &expanded).await?;
 
         let path = Path::new(&expanded);
         if path.exists() {
-            tracing::warn!("tool write file exists: path={}", expanded);
             return Err(ToolError::Msg(format!(
                 "File '{}' already exists. Use edit for targeted changes, or delete and recreate if a full rewrite is needed.",
                 expanded
@@ -71,12 +65,6 @@ impl Tool for WriteTool {
         }
         let bytes = args.content.len();
         if bytes as u64 > self.max_text_file_size {
-            tracing::warn!(
-                "tool write file too large: path={}, size={}, max={}",
-                expanded,
-                bytes,
-                self.max_text_file_size,
-            );
             return Err(ToolError::Msg(format!(
                 "File too large ({} bytes). Maximum allowed file size is {} bytes.",
                 bytes, self.max_text_file_size
@@ -84,7 +72,6 @@ impl Tool for WriteTool {
         }
         crate::fs::atomic_write(path, &args.content).await?;
         crate::agent::tools::untrack_read_path(&expanded);
-        tracing::debug!("tool write done: path={}, bytes={}", expanded, bytes);
         let mut result = format!("Written {} bytes to {}", bytes, expanded);
         if let Some(msg) = coaching {
             result = format!("{}\n\n{}", msg, result);

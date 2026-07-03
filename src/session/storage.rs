@@ -43,15 +43,10 @@ pub fn save_session(session: &Session) -> anyhow::Result<()> {
     let dir = session_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", session.id));
-    let json = serde_json::to_string(session)?;
-    let json_len = json.len();
+    let mut session = session.clone();
+    session.goal = crate::agent::tools::goal::current_goal_state();
+    let json = serde_json::to_string(&session)?;
     std::fs::write(path, json)?;
-    tracing::debug!(
-        "session saved: id={}, msgs={}, size={}",
-        session.id,
-        session.messages.len(),
-        json_len,
-    );
     Ok(())
 }
 
@@ -95,10 +90,7 @@ pub fn delete_session(id: &str) -> anyhow::Result<()> {
     let dir = session_dir();
     let path = dir.join(format!("{}.json", id));
     if path.exists() {
-        std::fs::remove_file(&path)?;
-        tracing::debug!("session deleted: id={}", id);
-    } else {
-        tracing::debug!("session delete skipped (not found): id={}", id);
+        std::fs::remove_file(path)?;
     }
     Ok(())
 }
@@ -122,11 +114,6 @@ pub fn find_sessions_by_prefix(prefix: &str) -> anyhow::Result<Vec<Session>> {
         }
     }
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    tracing::debug!(
-        "find_sessions_by_prefix('{}'): {} results",
-        prefix,
-        sessions.len(),
-    );
     Ok(sessions)
 }
 
@@ -157,11 +144,27 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
             sessions.push(session);
         }
     }
-    tracing::debug!(
-        "find_recent_sessions(limit={}): {} results",
-        limit,
-        sessions.len(),
-    );
+    Ok(sessions)
+}
+
+pub fn find_all_sessions() -> anyhow::Result<Vec<Session>> {
+    let dir = session_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json")
+            && let Ok(json) = std::fs::read_to_string(&path)
+            && let Ok(session) = serde_json::from_str::<Session>(&json)
+        {
+            sessions.push(session);
+        }
+    }
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(sessions)
 }
 

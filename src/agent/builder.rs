@@ -26,6 +26,8 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     };
     let suffix = crate::session::storage::load_suffix();
     let context_agents = context.agents.as_deref().unwrap_or("");
+    let skills_prompt = crate::context::skills::format_for_prompt(&context.skills);
+    let context_skills = skills_prompt.as_deref().unwrap_or("");
     #[cfg(feature = "archmd")]
     let context_architecture = context.architecture.as_deref().unwrap_or("");
     let context_prompt = context.current_prompt.as_deref().unwrap_or("");
@@ -40,6 +42,11 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         + TODO_TOOLS_PROMPT.len()
         + if context.agents.is_some() {
             2 + context_agents.len()
+        } else {
+            0
+        }
+        + if skills_prompt.is_some() {
+            2 + context_skills.len()
         } else {
             0
         }
@@ -86,6 +93,10 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     if !context_agents.is_empty() {
         preamble.push_str("\n\n");
         preamble.push_str(context_agents);
+    }
+    if !context_skills.is_empty() {
+        preamble.push_str("\n\n");
+        preamble.push_str(context_skills);
     }
     #[cfg(feature = "archmd")]
     if !context_architecture.is_empty() {
@@ -168,7 +179,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         let max_grep_results = cfg.resolve_max_grep_results();
         let max_find_results = cfg.resolve_max_find_results();
         let max_list_dir_entries = cfg.resolve_max_list_dir_entries();
-        let base_tools: SmallVec<[Box<dyn rig::tool::ToolDyn>; 8]> = SmallVec::from_buf([
+        let base_tools: SmallVec<[Box<dyn rig::tool::ToolDyn>; 9]> = SmallVec::from_buf([
             Box::new(tools::ReadTool::new(
                 permission.clone(),
                 ask_tx.clone(),
@@ -206,6 +217,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 permission.clone(),
                 ask_tx.clone(),
             )),
+            Box::new(tools::UpdateGoal::new(permission.clone(), ask_tx.clone())),
         ]);
 
         let mut builder = builder.tools(base_tools.into_vec());
@@ -320,6 +332,12 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
     {
         preamble.push('\n');
         preamble.push_str(agents);
+    }
+    if !cli.resolve_no_tools(cfg)
+        && let Some(skills) = crate::context::skills::format_for_prompt(&context.skills)
+    {
+        preamble.push_str("\n\n");
+        preamble.push_str(&skills);
     }
     #[cfg(feature = "archmd")]
     if let Some(arch) = context.architecture.as_deref()

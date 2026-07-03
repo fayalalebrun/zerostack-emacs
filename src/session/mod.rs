@@ -1,10 +1,14 @@
 pub mod chat_history;
 pub mod storage;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use compact_str::CompactString;
+use rig::OneOrMany;
+use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent, Text};
 use serde::{Deserialize, Serialize};
+
+use crate::agent::tools::goal::GoalState;
 use uuid::Uuid;
 
 pub const TOOL_RESULT_SAVE_THRESHOLD: usize = 12_000;
@@ -27,19 +31,150 @@ pub struct SessionMessage {
     pub role: MessageRole,
     pub content: CompactString,
     pub estimated_tokens: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_reasoning: Vec<ProviderReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage: Option<SessionTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<SessionToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<SessionToolResult>,
 }
 
-/// A single-step restore point captured before a conversation rewind, so the
-/// destructive truncation can be undone with `/unrewind`. Holds the full
-/// message list and the calibration/estimate fields that `truncate_to` mutates,
-/// which is everything needed to put the session back exactly as it was. Not
-/// persisted: a rewind is only undoable within the session that made it.
-#[derive(Debug, Clone)]
-pub struct RewindUndo {
-    messages: Vec<SessionMessage>,
-    total_estimated_tokens: u64,
-    calibrated_tokens: u64,
-    calibrated_msg_count: usize,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionToolCall {
+    pub id: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<CompactString>,
+    pub name: CompactString,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionToolResult {
+    pub id: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<CompactString>,
+    pub name: CompactString,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loaded_context: Vec<CompactString>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+}
+
+impl SessionTokenUsage {
+    pub fn context_tokens(self) -> u64 {
+        if self.total_tokens > 0 {
+            return self.total_tokens;
+        }
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cached_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+    }
+}
+
+impl From<crate::event::TokenUsage> for SessionTokenUsage {
+    fn from(usage: crate::event::TokenUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ProviderReasoningContent {
+    Summary(String),
+    Encrypted(String),
+    Redacted(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderReasoning {
+    pub id: String,
+    pub content: Vec<ProviderReasoningContent>,
+}
+
+impl ProviderReasoning {
+    pub fn from_rig(reasoning: &Reasoning) -> Option<Self> {
+        let id = reasoning.id.clone()?;
+        let content = reasoning
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                ReasoningContent::Summary(text) => {
+                    Some(ProviderReasoningContent::Summary(text.clone()))
+                }
+                ReasoningContent::Encrypted(data) => {
+                    Some(ProviderReasoningContent::Encrypted(data.clone()))
+                }
+                ReasoningContent::Redacted { data } => {
+                    Some(ProviderReasoningContent::Redacted(data.clone()))
+                }
+                ReasoningContent::Text { .. } => None,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!content.is_empty()).then_some(Self { id, content })
+    }
+
+    fn to_rig(&self) -> Reasoning {
+        let mut reasoning = Reasoning::summaries(Vec::new()).with_id(self.id.clone());
+        reasoning.content = self
+            .content
+            .iter()
+            .map(|item| match item {
+                ProviderReasoningContent::Summary(text) => ReasoningContent::Summary(text.clone()),
+                ProviderReasoningContent::Encrypted(data) => {
+                    ReasoningContent::Encrypted(data.clone())
+                }
+                ProviderReasoningContent::Redacted(data) => {
+                    ReasoningContent::Redacted { data: data.clone() }
+                }
+            })
+            .collect();
+        reasoning
+    }
+}
+
+pub fn assistant_message_with_reasoning(
+    content: &str,
+    reasoning: &[ProviderReasoning],
+) -> rig::completion::Message {
+    if reasoning.is_empty() {
+        return rig::completion::Message::assistant(content.to_string());
+    }
+
+    let mut items = reasoning
+        .iter()
+        .map(|item| AssistantContent::Reasoning(item.to_rig()))
+        .collect::<Vec<_>>();
+    if !content.is_empty() {
+        items.push(AssistantContent::Text(Text::new(content.to_string())));
+    }
+
+    rig::completion::Message::Assistant {
+        id: None,
+        content: OneOrMany::many(items).expect("assistant reasoning message is non-empty"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +184,14 @@ pub struct Compaction {
     pub summarized_count: usize,
     pub token_savings: u64,
     pub created_at: CompactString,
+}
+
+#[derive(Debug, Clone)]
+pub struct RewindUndo {
+    messages: Vec<SessionMessage>,
+    total_estimated_tokens: u64,
+    calibrated_tokens: u64,
+    calibrated_msg_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +206,16 @@ pub struct Session {
     pub name: CompactString,
     pub messages: Vec<SessionMessage>,
     pub compactions: Vec<Compaction>,
+    #[serde(skip)]
+    pub rewind_undo: Option<RewindUndo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalState>,
     pub created_at: CompactString,
     pub updated_at: CompactString,
     #[serde(default)]
     pub total_input_tokens: u64,
+    #[serde(default)]
+    pub total_cached_input_tokens: u64,
     #[serde(default)]
     pub total_output_tokens: u64,
     pub total_cost: f64,
@@ -113,10 +262,6 @@ pub struct Session {
     /// persisted.
     #[serde(skip)]
     pub overhead_tokens: u64,
-    /// Restore point for the most recent `/unrewind`-able rewind, captured by
-    /// [`rewind_to`](Self::rewind_to). Runtime only, not persisted.
-    #[serde(skip)]
-    pub rewind_undo: Option<RewindUndo>,
 }
 
 /// Working-tree summary parsed from `git status --porcelain=v2 --branch`.
@@ -170,9 +315,12 @@ impl Session {
             name: CompactString::new(""),
             messages: Vec::new(),
             compactions: Vec::new(),
+            rewind_undo: None,
+            goal: None,
             created_at: now.clone(),
             updated_at: now,
             total_input_tokens: 0,
+            total_cached_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
             total_estimated_tokens: 0,
@@ -194,7 +342,6 @@ impl Session {
             git_status: None,
             reasoning_enabled: false,
             overhead_tokens: 0,
-            rewind_undo: None,
         }
     }
 
@@ -295,29 +442,126 @@ impl Session {
     }
 
     pub fn add_message(&mut self, role: MessageRole, content: &str) {
+        self.add_message_with_reasoning(role, content, Vec::new());
+    }
+
+    pub fn add_message_with_reasoning(
+        &mut self,
+        role: MessageRole,
+        content: &str,
+        provider_reasoning: Vec<ProviderReasoning>,
+    ) {
+        self.add_message_with_reasoning_and_usage(role, content, provider_reasoning, None);
+    }
+
+    pub fn add_message_with_reasoning_and_usage(
+        &mut self,
+        role: MessageRole,
+        content: &str,
+        provider_reasoning: Vec<ProviderReasoning>,
+        provider_usage: Option<SessionTokenUsage>,
+    ) {
+        self.rewind_undo = None;
         let tokens = Self::estimate_tokens(content);
         self.messages.push(SessionMessage {
             role,
             content: CompactString::new(content),
             estimated_tokens: tokens,
+            provider_reasoning,
+            provider_usage,
+            tool_call: None,
+            tool_result: None,
         });
         self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
         self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
-        // The conversation has moved forward, so the last rewind's restore point
-        // no longer lines up — drop it so /redo can't splice in a stale tail.
-        self.rewind_undo = None;
     }
 
+    #[allow(dead_code)]
     pub fn add_tool_call(&mut self, name: &str, args: &serde_json::Value) {
-        self.add_message(
-            MessageRole::ToolCall,
-            &crate::ui::utils::format_tool_call_summary(name, args),
-        );
+        let id = format!("session-tool-{}", self.messages.len());
+        self.add_tool_call_structured(name, args, &id, None);
     }
 
+    pub fn add_tool_call_structured(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+        id: &str,
+        call_id: Option<&str>,
+    ) {
+        let content = crate::ui::utils::format_tool_call_summary(name, args);
+        let tokens = Self::estimate_tokens(&content);
+        self.messages.push(SessionMessage {
+            role: MessageRole::ToolCall,
+            content: CompactString::new(content),
+            estimated_tokens: tokens,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: Some(SessionToolCall {
+                id: CompactString::new(id),
+                call_id: call_id.map(CompactString::new),
+                name: CompactString::new(name),
+                arguments: args.clone(),
+            }),
+            tool_result: None,
+        });
+        self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
+        self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
+    }
+
+    #[allow(dead_code)]
     pub fn add_tool_result(&mut self, name: &str, output: &str) -> String {
+        let (id, call_id) = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|msg| msg.tool_call.as_ref())
+            .map(|call| {
+                (
+                    call.id.to_string(),
+                    call.call_id.as_ref().map(ToString::to_string),
+                )
+            })
+            .unwrap_or_else(|| (format!("session-tool-result-{}", self.messages.len()), None));
+        self.add_tool_result_structured(name, output, &id, call_id.as_deref())
+    }
+
+    pub fn add_tool_result_structured(
+        &mut self,
+        name: &str,
+        output: &str,
+        id: &str,
+        call_id: Option<&str>,
+    ) -> String {
+        self.add_tool_result_structured_with_context(name, output, id, call_id, Vec::new())
+    }
+
+    pub fn add_tool_result_structured_with_context(
+        &mut self,
+        name: &str,
+        output: &str,
+        id: &str,
+        call_id: Option<&str>,
+        loaded_context: Vec<String>,
+    ) -> String {
         let content = self.tool_result_content(name, output);
-        self.add_message(MessageRole::ToolResult, &content);
+        let tokens = Self::estimate_tokens(&content);
+        self.messages.push(SessionMessage {
+            role: MessageRole::ToolResult,
+            content: CompactString::new(&content),
+            estimated_tokens: tokens,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: Some(SessionToolResult {
+                id: CompactString::new(id),
+                call_id: call_id.map(CompactString::new),
+                name: CompactString::new(name),
+                loaded_context: loaded_context.into_iter().map(CompactString::new).collect(),
+            }),
+        });
+        self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
+        self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
         content
     }
 
@@ -340,6 +584,28 @@ impl Session {
             MessageRole::SubagentToolCall,
             &crate::ui::utils::format_tool_call_summary(name, args),
         );
+    }
+
+    pub fn loaded_read_context_paths(&self) -> Vec<PathBuf> {
+        self.messages
+            .iter()
+            .filter_map(|msg| msg.tool_result.as_ref())
+            .filter(|result| result.name == "read")
+            .flat_map(|result| result.loaded_context.iter())
+            .map(|path| PathBuf::from(path.as_str()))
+            .collect()
+    }
+
+    pub fn title(&self) -> String {
+        if !self.name.is_empty() {
+            return self.name.to_string();
+        }
+        self.messages
+            .iter()
+            .rev()
+            .find(|msg| msg.role == MessageRole::User)
+            .map(|msg| msg.content.chars().take(80).collect())
+            .unwrap_or_else(|| "untitled".to_string())
     }
 
     #[cfg(feature = "multimodal")]
@@ -391,16 +657,32 @@ impl Session {
         self.calibrated_msg_count = 0;
     }
 
-    /// Truncate the conversation to `new_len` messages while keeping the context
-    /// figure accurate (used by `/undo` and the failed-send rollback).
-    ///
-    /// If any removed message was part of the calibration anchor, subtract its
-    /// estimated tokens from the anchor rather than discarding the whole
-    /// calibration. Resetting to a cold estimate would undercount (the estimate
-    /// omits tool schemas), and leaving the anchor untouched would overcount by
-    /// the removed turn — subtracting keeps the figure ≈ the real remaining
-    /// size. Messages beyond the anchor were never in it, so removing them only
-    /// shrinks the estimated tail.
+    pub fn rewind_to(&mut self, new_len: usize) -> usize {
+        if new_len >= self.messages.len() {
+            return 0;
+        }
+        self.rewind_undo = Some(RewindUndo {
+            messages: self.messages.clone(),
+            total_estimated_tokens: self.total_estimated_tokens,
+            calibrated_tokens: self.calibrated_tokens,
+            calibrated_msg_count: self.calibrated_msg_count,
+        });
+        let removed = self.messages.len() - new_len;
+        self.truncate_to(new_len);
+        removed
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(undo) = self.rewind_undo.take() else {
+            return false;
+        };
+        self.messages = undo.messages;
+        self.total_estimated_tokens = undo.total_estimated_tokens;
+        self.calibrated_tokens = undo.calibrated_tokens;
+        self.calibrated_msg_count = undo.calibrated_msg_count;
+        true
+    }
+
     pub fn truncate_to(&mut self, new_len: usize) {
         if new_len >= self.messages.len() {
             return;
@@ -415,93 +697,37 @@ impl Session {
             self.calibrated_msg_count = new_len;
         }
         self.messages.truncate(new_len);
-        self.total_estimated_tokens = self.messages.iter().map(|m| m.estimated_tokens).sum();
+        self.total_estimated_tokens = self.estimated_message_tokens();
     }
 
-    /// Rewind the conversation to `new_len` messages, capturing a single-step
-    /// restore point first so the cut can be undone with [`redo`](Self::redo).
-    ///
-    /// This is the shared primitive behind both `/undo` (rewind by one turn) and
-    /// the double-Esc rewind picker (rewind to a chosen earlier point): the only
-    /// difference between them is which `new_len` they pass. Returns the number
-    /// of messages removed (0 if `new_len` is already at or past the end, in
-    /// which case no restore point is recorded).
-    pub fn rewind_to(&mut self, new_len: usize) -> usize {
-        if new_len >= self.messages.len() {
-            return 0;
-        }
-        let removed = self.messages.len() - new_len;
-        self.rewind_undo = Some(RewindUndo {
-            messages: self.messages.clone(),
-            total_estimated_tokens: self.total_estimated_tokens,
-            calibrated_tokens: self.calibrated_tokens,
-            calibrated_msg_count: self.calibrated_msg_count,
-        });
-        self.truncate_to(new_len);
-        removed
-    }
-
-    /// Restore the messages removed by the most recent [`rewind_to`](Self::rewind_to)
-    /// (i.e. the last `/undo` or rewind). Returns false when there is nothing to
-    /// restore. The restore point is consumed, and is also invalidated as soon
-    /// as the conversation moves forward again (see [`add_message`](Self::add_message)),
-    /// so `/redo` only ever reaches back to the cut it directly reverses.
-    pub fn redo(&mut self) -> bool {
-        match self.rewind_undo.take() {
-            Some(u) => {
-                self.messages = u.messages;
-                self.total_estimated_tokens = u.total_estimated_tokens;
-                self.calibrated_tokens = u.calibrated_tokens;
-                self.calibrated_msg_count = u.calibrated_msg_count;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// True while the context figure is still an estimate — no provider usage
-    /// has been reported yet (or it was reset by `/clear`). The status bar marks
-    /// the estimated value so the snap to the real number on the first response
-    /// reads as a refinement rather than a surprise.
     pub fn ctx_is_estimated(&self) -> bool {
-        self.calibrated_tokens == 0
+        self.latest_provider_context_tokens().is_none() && self.calibrated_tokens == 0
+    }
+
+    fn estimated_message_tokens(&self) -> u64 {
+        self.messages.iter().map(|m| m.estimated_tokens).sum()
+    }
+
+    pub fn latest_provider_context_tokens(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .rev()
+            .filter(|msg| msg.role == MessageRole::Assistant)
+            .filter_map(|msg| msg.provider_usage.map(SessionTokenUsage::context_tokens))
+            .find(|tokens| *tokens > 0)
     }
 
     pub fn effective_context_tokens(&self) -> u64 {
-        if self.calibrated_tokens == 0 {
-            // No real usage yet: per-message estimates cover only `messages`, so
-            // add the fixed overhead (system prompt, tools, context files) that
-            // every request also carries. After calibration this overhead is
-            // already inside the anchor, so it is not added in that branch.
-            return self
-                .overhead_tokens
-                .saturating_add(self.total_estimated_tokens);
+        if let Some(tokens) = self.latest_provider_context_tokens() {
+            return tokens;
         }
-        let start = self.calibrated_msg_count.min(self.messages.len());
-        let delta: u64 = self.messages[start..]
-            .iter()
-            .map(|m| m.estimated_tokens)
-            .sum();
-        self.calibrated_tokens.saturating_add(delta)
+        if self.calibrated_tokens > 0 && self.calibrated_msg_count == self.messages.len() {
+            return self.calibrated_tokens;
+        }
+        self.overhead_tokens
+            .saturating_add(self.total_estimated_tokens)
     }
 
-    /// Pick the compaction boundary: `messages[..cut]` get summarized and
-    /// `messages[cut..]` are kept as recent context. Walks backward summing
-    /// per-message `estimated_tokens` until `keep_recent` is covered.
-    ///
-    /// This deliberately stays in the per-message estimate scale rather than
-    /// the calibrated total: it is a *relative* comparison among messages (how
-    /// far back does `keep_recent` reach), so any uniform estimator bias
-    /// cancels out. Calibration only matters for the absolute total in
-    /// `effective_context_tokens`.
-    ///
-    /// Returns 0 ("nothing old enough to summarize") when every message fits
-    /// within `keep_recent`. The initial value is 0, not `messages.len()`, so
-    /// an oversized `keep_recent` keeps the recent messages instead of
-    /// summarizing the entire history, a case made reachable now that the
-    /// compaction gate measures context against real usage (system prompt and
-    /// context files can push the real total over budget while the messages
-    /// themselves stay small).
     pub fn select_compaction_cut(messages: &[SessionMessage], keep_recent: u64) -> usize {
         let mut accumulated = 0u64;
         let mut cut_idx = 0;
@@ -550,11 +776,18 @@ impl Session {
             role: MessageRole::System,
             content: CompactString::from(summary.clone()),
             estimated_tokens: summary_tokens,
+            provider_reasoning: Vec::new(),
+            provider_usage: None,
+            tool_call: None,
+            tool_result: None,
         };
 
         // Remove summarized messages and insert summary
         self.messages.drain(..first_kept_index);
         self.messages.insert(0, summary_msg);
+        for msg in &mut self.messages {
+            msg.provider_usage = None;
+        }
 
         // Recompute total from remaining messages so the count is always
         // consistent — no underflow risk when token_savings is stale.
@@ -572,6 +805,82 @@ impl Session {
         // lines up. Drop it; the next completed turn re-anchors.
         self.reset_calibration();
         self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use compact_str::CompactString;
+
+    use super::Session;
+    use crate::agent::tools::goal::GoalState;
+
+    #[test]
+    fn tool_result_loaded_context_round_trips() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_tool_result_structured_with_context(
+            "read",
+            "output",
+            "call_1",
+            None,
+            vec!["/repo/src/AGENTS.md".to_string()],
+        );
+
+        let json = serde_json::to_string(&session).unwrap();
+        let loaded: Session = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            loaded.loaded_read_context_paths(),
+            vec![std::path::PathBuf::from("/repo/src/AGENTS.md")]
+        );
+    }
+
+    #[test]
+    fn goal_round_trips_and_survives_compaction() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.goal = Some(GoalState {
+            content: "Ship feature".to_string(),
+            status: CompactString::new("in_progress"),
+            priority: CompactString::new("high"),
+            evidence: Some("cargo test goal_tests passed".to_string()),
+            evaluator_status: None,
+            evaluator_summary: None,
+        });
+        session.add_message(super::MessageRole::User, "old context");
+        session.add_message(super::MessageRole::Assistant, "new context");
+
+        let json = serde_json::to_string(&session).unwrap();
+        let mut loaded: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.goal, session.goal);
+
+        loaded.compress("summary".to_string(), 1, 10);
+        assert_eq!(loaded.goal, session.goal);
+    }
+
+    #[test]
+    fn compaction_drops_summarized_loaded_context_metadata() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_tool_result_structured_with_context(
+            "read",
+            "old",
+            "call_1",
+            None,
+            vec!["/repo/old/AGENTS.md".to_string()],
+        );
+        session.add_tool_result_structured_with_context(
+            "read",
+            "kept",
+            "call_2",
+            None,
+            vec!["/repo/kept/AGENTS.md".to_string()],
+        );
+
+        session.compress("summary".to_string(), 1, 10);
+
+        assert_eq!(
+            session.loaded_read_context_paths(),
+            vec![std::path::PathBuf::from("/repo/kept/AGENTS.md")]
+        );
     }
 }
 

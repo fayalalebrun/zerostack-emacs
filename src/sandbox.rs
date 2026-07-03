@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::process::{Output, Stdio};
+use std::path::Path;
+use std::process::{ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::io::AsyncReadExt;
@@ -146,16 +147,16 @@ impl Sandbox {
             }
         }
         // must bind /etc/resolv.conf before /.
-        cmd.args(["--ro-bind", "/", "/", "--bind"]);
-        cmd.arg(cwd.as_os_str());
-        cmd.arg(cwd.as_os_str());
-        // Bind ~/.cache (or $XDG_CACHE_HOME) as writable after "/" bind
+        // Bind ~/.cache (or $XDG_CACHE_HOME) as writable
         if let Some(cache_dir) = dirs::cache_dir() {
             let _ = std::fs::create_dir_all(&cache_dir);
             cmd.arg("--bind");
             cmd.arg(cache_dir.as_os_str());
             cmd.arg(cache_dir.as_os_str());
         }
+        cmd.args(["--ro-bind", "/", "/", "--bind"]);
+        cmd.arg(cwd.as_os_str());
+        cmd.arg(cwd.as_os_str());
         cmd.args([
             "--ro-bind",
             "/sys",
@@ -208,6 +209,22 @@ impl Sandbox {
             stdout,
             stderr,
         })
+    }
+
+    pub async fn output_command_to_file(
+        &self,
+        command: &str,
+        path: &Path,
+    ) -> std::io::Result<ExitStatus> {
+        let file = std::fs::File::create(path)?;
+        let stderr = file.try_clone()?;
+        let mut cmd = self.wrap_command(command);
+        cmd.stdout(Stdio::from(file)).stderr(Stdio::from(stderr));
+        let mut child = cmd.spawn()?;
+        let mut guard = ProcessGroupGuard::new(child.id(), self.active_groups.clone());
+        let status = child.wait().await?;
+        guard.disarm();
+        Ok(status)
     }
 
     pub fn kill_active(&self) {

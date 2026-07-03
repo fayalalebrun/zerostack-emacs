@@ -201,7 +201,7 @@ impl PermissionChecker {
     }
 
     fn is_read_tool(&self, tool: &str) -> bool {
-        matches!(tool, "read" | "grep" | "find_files" | "list_dir" | "task")
+        matches!(tool, "read" | "grep" | "find_files" | "list_dir")
     }
 
     fn resolve_check_action(&self, tool: &str, matched: &SmallVec<[Action; 4]>) -> Action {
@@ -295,15 +295,11 @@ impl PermissionChecker {
                 }
                 match self.doom_loop_action {
                     Action::Deny => {
-                        tracing::info!("perm doom-loop blocked: tool={}", tool);
                         return CheckResult::Denied(
                             "Doom loop: repeated identical tool call".to_string(),
                         );
                     }
-                    Action::Ask => {
-                        tracing::info!("perm doom-loop ask: tool={}", tool);
-                        return CheckResult::Ask;
-                    }
+                    Action::Ask => return CheckResult::Ask,
                     Action::Allow => {}
                 }
             }
@@ -316,8 +312,7 @@ impl PermissionChecker {
     }
 
     pub fn check(&mut self, tool: &str, input: &str) -> CheckResult {
-        tracing::debug!("perm check: tool={}, input_len={}", tool, input.len());
-        if tool == "todo_write" {
+        if tool == "todo_write" || tool == "goal_update" {
             return CheckResult::Allowed;
         }
         if self.allow_all_mcp_calls && tool == "mcp_tool" {
@@ -349,8 +344,7 @@ impl PermissionChecker {
     }
 
     pub fn check_path(&mut self, tool: &str, path: &str) -> CheckResult {
-        tracing::debug!("perm check path: tool={}, path={}", tool, path);
-        if tool == "todo_write" {
+        if tool == "todo_write" || tool == "goal_update" {
             return CheckResult::Allowed;
         }
 
@@ -412,8 +406,16 @@ impl PermissionChecker {
         }
     }
 
+    pub fn allow_session_tool_outputs(&mut self, session_id: &str) {
+        let dir = crate::session::storage::tool_output_dir(session_id)
+            .to_string_lossy()
+            .to_string();
+        self.add_session_allowlist("list_dir".to_string(), &dir);
+        self.add_session_allowlist("list_dir".to_string(), &format!("{dir}/"));
+        self.add_session_allowlist("read".to_string(), &format!("{dir}/*"));
+    }
+
     pub fn set_mode(&mut self, mode: SecurityMode) {
-        tracing::debug!("perm mode changed: {:?} -> {:?}", self.mode, mode);
         self.mode = mode;
         self.user_mode = mode;
     }

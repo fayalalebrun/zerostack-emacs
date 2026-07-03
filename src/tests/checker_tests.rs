@@ -621,6 +621,29 @@ fn session_allowlist_matches_relative_path_when_stored_as_absolute() {
     );
 }
 
+#[test]
+fn session_tool_output_access_allows_reading_current_session_sidecars() {
+    let mut checker = make_checker(SecurityMode::Standard);
+    checker.allow_session_tool_outputs("session-id");
+
+    let dir = crate::session::storage::tool_output_dir("session-id");
+    let file = dir.join("saved-bash.txt");
+
+    let read_result = checker.check_path("read", &file.to_string_lossy());
+    assert!(
+        matches!(read_result, CheckResult::Allowed),
+        "expected Allowed for current-session tool output file, got {:?}",
+        read_result,
+    );
+
+    let list_result = checker.check_path("list_dir", &dir.to_string_lossy());
+    assert!(
+        matches!(list_result, CheckResult::Allowed),
+        "expected Allowed for current-session tool output dir, got {:?}",
+        list_result,
+    );
+}
+
 // --- MCP tool config ---
 
 #[test]
@@ -956,6 +979,24 @@ fn todo_write_path_check_always_allowed() {
     ));
 }
 
+#[test]
+fn goal_update_always_allowed_in_restrictive() {
+    let mut checker = make_checker(SecurityMode::Restrictive);
+    assert!(matches!(
+        checker.check("goal_update", ""),
+        CheckResult::Allowed
+    ));
+}
+
+#[test]
+fn goal_update_path_check_always_allowed() {
+    let mut checker = make_checker(SecurityMode::Restrictive);
+    assert!(matches!(
+        checker.check_path("goal_update", "/any/path"),
+        CheckResult::Allowed
+    ));
+}
+
 // --- Empty permission_modes (all modes skip config rules) ---
 
 #[test]
@@ -986,10 +1027,8 @@ fn empty_permission_modes_skips_rules_for_all_modes() {
 
 #[test]
 fn standard_external_dir_allow_rule_overrides_default_ask() {
-    let config = PermissionConfig {
-        external_directory: Some([("/tmp/work/**".to_string(), Action::Allow)].into()),
-        ..Default::default()
-    };
+    let mut config = PermissionConfig::default();
+    config.external_directory = Some([("/tmp/work/**".to_string(), Action::Allow)].into());
     let configs = configs_from(config);
     let mut checker = PermissionChecker::new(
         &configs,
@@ -1008,10 +1047,8 @@ fn standard_external_dir_allow_rule_overrides_default_ask() {
 
 #[test]
 fn standard_external_dir_deny_rule_overrides_default_ask() {
-    let config = PermissionConfig {
-        external_directory: Some([("/etc/**".to_string(), Action::Deny)].into()),
-        ..Default::default()
-    };
+    let mut config = PermissionConfig::default();
+    config.external_directory = Some([("/etc/**".to_string(), Action::Deny)].into());
     let configs = configs_from(config);
     let mut checker = PermissionChecker::new(
         &configs,

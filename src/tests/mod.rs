@@ -25,15 +25,17 @@ mod crc_tests;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
+mod goal_tests;
+#[cfg(test)]
 mod grep_tests;
 #[cfg(test)]
 mod input_tests;
 #[cfg(test)]
 mod list_dir_tests;
-#[cfg(test)]
-mod logging_tests;
 #[cfg(all(test, feature = "loop"))]
 mod loop_tests;
+#[cfg(test)]
+mod main_tests;
 #[cfg(test)]
 mod markdown_tests;
 #[cfg(all(test, feature = "mcp"))]

@@ -1,8 +1,9 @@
-use crate::session::MessageRole;
 use crate::session::Session;
 use crate::session::storage::{
-    delete_session, find_sessions_by_prefix, load_suffix, save_session, suffix_path,
+    delete_session, find_all_sessions, find_sessions_by_prefix, load_suffix, save_session,
+    suffix_path,
 };
+use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
 use std::env;
 use std::path::Path;
@@ -44,7 +45,7 @@ fn save_and_find_session_by_prefix() {
     s.add_message(MessageRole::User, "hello");
     save_session(&s).unwrap();
 
-    let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert_eq!(found.len(), 1, "id prefix: {}", &s.id[..8]);
     assert_eq!(found[0].id, s.id);
     assert_eq!(found[0].model.as_str(), "gpt-4");
@@ -66,7 +67,7 @@ fn delete_session_removes_file() {
     save_session(&s).unwrap();
 
     delete_session(&s.id).unwrap();
-    let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert!(found.is_empty());
     drop(env);
 }
@@ -79,11 +80,39 @@ fn save_session_preserves_messages() {
     s.add_message(MessageRole::Assistant, "answer");
     save_session(&s).unwrap();
 
-    let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].messages.len(), 2);
     assert_eq!(found[0].messages[0].content, "question");
     assert_eq!(found[0].messages[1].content, "answer");
+    drop(env);
+}
+
+#[test]
+fn save_session_preserves_provider_reasoning() {
+    let env = setup_test_env();
+    let mut s = Session::new("openai-codex", "gpt-5.5", 400000);
+    s.add_message_with_reasoning(
+        MessageRole::Assistant,
+        "answer",
+        vec![ProviderReasoning {
+            id: "rs_123".to_string(),
+            content: vec![
+                ProviderReasoningContent::Summary("summary".to_string()),
+                ProviderReasoningContent::Encrypted("encrypted_blob".to_string()),
+            ],
+        }],
+    );
+    save_session(&s).unwrap();
+
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].messages[0].provider_reasoning.len(), 1);
+    assert_eq!(found[0].messages[0].provider_reasoning[0].id, "rs_123");
+    assert_eq!(
+        found[0].messages[0].provider_reasoning[0].content[1],
+        ProviderReasoningContent::Encrypted("encrypted_blob".to_string())
+    );
     drop(env);
 }
 
@@ -98,13 +127,19 @@ fn save_session_preserves_tool_messages() {
     s.add_message(MessageRole::Assistant, "answer");
     save_session(&s).unwrap();
 
-    let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].messages.len(), 5);
     assert_eq!(found[0].messages[1].role, MessageRole::ToolCall);
     assert!(found[0].messages[1].content.contains("read"));
+    let call = found[0].messages[1].tool_call.as_ref().unwrap();
+    assert_eq!(call.name, "read");
+    assert_eq!(call.arguments, serde_json::json!({ "path": "src/main.rs" }));
     assert_eq!(found[0].messages[2].role, MessageRole::ToolResult);
     assert_eq!(found[0].messages[2].content, "read:\nfile contents");
+    let result = found[0].messages[2].tool_result.as_ref().unwrap();
+    assert_eq!(result.name, "read");
+    assert_eq!(result.id, call.id);
     assert_eq!(found[0].messages[3].role, MessageRole::SubagentToolCall);
     drop(env);
 }
@@ -177,7 +212,7 @@ fn find_all_sessions_returns_saved_sessions_newest_first() {
     newer.updated_at = "2026-01-02T00:00:00Z".into();
     save_session(&newer).unwrap();
 
-    let found = find_sessions_by_prefix("").unwrap();
+    let found = find_all_sessions().unwrap();
     assert_eq!(found.len(), 2);
     assert_eq!(found[0].id, newer.id);
     assert_eq!(found[1].id, older.id);
@@ -195,7 +230,7 @@ fn save_session_preserves_cost_fields() {
     s.output_token_cost = 0.00003;
     save_session(&s).unwrap();
 
-    let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert_eq!(
         found.len(),
         1,
@@ -230,7 +265,7 @@ fn save_session_creates_parent_dirs() {
     std::fs::remove_dir_all(&sessions_dir).unwrap();
     let s = Session::new("openai", "gpt-4", 128000);
     save_session(&s).unwrap();
-    let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert_eq!(found.len(), 1);
     drop(env);
 }

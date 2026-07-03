@@ -54,6 +54,42 @@ async fn test_output_command_returns_output_when_descendant_holds_pipe() {
 }
 
 #[tokio::test]
+async fn test_output_command_to_file_writes_while_running() {
+    let path =
+        std::env::temp_dir().join(format!("zerostack-live-output-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    let sandbox = Sandbox::new(false, "bwrap");
+    let handle = tokio::spawn({
+        let sandbox = sandbox.clone();
+        let path = path.clone();
+        async move {
+            sandbox
+                .output_command_to_file("printf first; sleep 0.2; printf second >&2", &path)
+                .await
+        }
+    });
+
+    zerostack_test_wait_until(|| {
+        std::fs::read_to_string(&path)
+            .map(|content| content.contains("first"))
+            .unwrap_or(false)
+    })
+    .await;
+
+    let status = timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("first"));
+    assert!(content.contains("second"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
 async fn test_shell_mode_timeout_kills_descendants() {
     let marker =
         std::env::temp_dir().join(format!("zerostack-abort-descendant-{}", std::process::id()));

@@ -3,12 +3,15 @@ use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
-use crate::agent::tools::{AskSender, GrepArgs, PermCheck, ToolError, check_perm, is_skip_dir};
+use crate::agent::tools::{
+    AskSender, ContextTracker, GrepArgs, PermCheck, ToolError, check_perm, is_skip_dir,
+};
 
 pub struct GrepTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
     pub max_results: u64,
+    pub context_tracker: Option<ContextTracker>,
 }
 
 impl GrepTool {
@@ -17,7 +20,13 @@ impl GrepTool {
             permission,
             ask_tx,
             max_results,
+            context_tracker: None,
         }
+    }
+
+    pub fn with_context_tracker(mut self, tracker: ContextTracker) -> Self {
+        self.context_tracker = Some(tracker);
+        self
     }
 
     pub(crate) fn glob_to_regex(glob: &str) -> String {
@@ -78,18 +87,19 @@ impl Tool for GrepTool {
     }
 
     async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
-        tracing::debug!(
-            "tool grep start: pattern={}, path={}, include={:?}",
-            args.pattern,
-            args.path.as_deref().unwrap_or("."),
-            args.include,
-        );
         let coaching = check_perm(&self.permission, &self.ask_tx, "grep", &args.pattern).await?;
 
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex pattern: {}", e)))?;
 
         let search_path = crate::fs::expand_tilde(args.path.as_deref().unwrap_or("."));
+        let loaded = crate::context::nested_agents_for_dir(
+            std::path::Path::new(&search_path),
+            &crate::agent::tools::loaded_context_from(&self.context_tracker),
+        );
+        let loaded_paths: Vec<std::path::PathBuf> =
+            loaded.iter().map(|(path, _)| path.clone()).collect();
+        crate::agent::tools::mark_context_loaded_in(&self.context_tracker, &loaded_paths);
         let context = args.context_lines.unwrap_or(0);
 
         let include_re = args.include.as_ref().map(|g| {
@@ -210,7 +220,11 @@ impl Tool for GrepTool {
         }
 
         if all_results.is_empty() {
-            let msg = "No matches found.".to_string();
+            let mut msg = "No matches found.".to_string();
+            if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+                msg.push_str("\n\n");
+                msg.push_str(&reminder);
+            }
             return Ok(match coaching {
                 Some(c) => format!("{}\n\n{}", c, msg),
                 None => msg,
@@ -252,17 +266,19 @@ impl Tool for GrepTool {
             result
         };
 
-        tracing::debug!(
-            "tool grep done: files_searched={}, files_with_matches={}, total_matches={}, truncated={}",
-            file_count,
-            files_with_matches,
-            total,
-            truncated,
-        );
+        let result = if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+            format!("{}\n\n{}", result, reminder)
+        } else {
+            result
+        };
 
-        Ok(match coaching {
+        let result = match coaching {
             Some(c) => format!("{}\n\n{}", c, result),
             None => result,
-        })
+        };
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

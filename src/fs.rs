@@ -41,11 +41,6 @@ pub async fn atomic_write(
     // link with a regular file. A non-symlink path is returned unchanged.
     let resolved = resolve_symlink_target(path.as_ref()).await;
     let path = resolved.as_path();
-    tracing::debug!(
-        "atomic_write: {} ({} bytes)",
-        path.display(),
-        contents.as_ref().len(),
-    );
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -65,7 +60,6 @@ pub async fn atomic_write(
     let write_result = async {
         let mut f = tokio::fs::File::create(&tmp_path).await?;
         f.write_all(contents.as_ref()).await?;
-        f.flush().await?;
         Ok::<(), std::io::Error>(())
     }
     .await;

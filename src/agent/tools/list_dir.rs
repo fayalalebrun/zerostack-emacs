@@ -5,7 +5,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{
-    AskSender, ListDirArgs, PermCheck, ToolError, check_perm_path, is_skip_dir,
+    AskSender, ContextTracker, ListDirArgs, PermCheck, ToolError, check_perm_path, is_skip_dir,
 };
 
 pub(crate) fn format_size(bytes: u64) -> String {
@@ -35,6 +35,7 @@ pub struct ListDirTool {
     /// `None` = no truncation (matches the historical behaviour).
     /// `Some(n)` = show the first `n` entries with a recovery hint.
     pub max_entries: Option<u64>,
+    pub context_tracker: Option<ContextTracker>,
 }
 
 impl ListDirTool {
@@ -47,7 +48,13 @@ impl ListDirTool {
             permission,
             ask_tx,
             max_entries,
+            context_tracker: None,
         }
+    }
+
+    pub fn with_context_tracker(mut self, tracker: ContextTracker) -> Self {
+        self.context_tracker = Some(tracker);
+        self
     }
 }
 
@@ -77,8 +84,14 @@ impl Tool for ListDirTool {
 
     async fn call(&self, args: ListDirArgs) -> Result<String, ToolError> {
         let path = crate::fs::expand_tilde(args.path.as_deref().unwrap_or("."));
-        tracing::debug!("tool list_dir start: path={}", path);
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "list_dir", &path).await?;
+        let loaded = crate::context::nested_agents_for_dir(
+            Path::new(&path),
+            &crate::agent::tools::loaded_context_from(&self.context_tracker),
+        );
+        let loaded_paths: Vec<std::path::PathBuf> =
+            loaded.iter().map(|(path, _)| path.clone()).collect();
+        crate::agent::tools::mark_context_loaded_in(&self.context_tracker, &loaded_paths);
 
         let walker = WalkBuilder::new(&path)
             .git_ignore(true)
@@ -144,7 +157,11 @@ impl Tool for ListDirTool {
         });
 
         if entries.is_empty() {
-            let msg = format!("Listing {}:\n(empty directory)", path);
+            let mut msg = format!("Listing {}:\n(empty directory)", path);
+            if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+                msg.push_str("\n\n");
+                msg.push_str(&reminder);
+            }
             return Ok(match coaching {
                 Some(c) => format!("{}\n\n{}", c, msg),
                 None => msg,
@@ -178,14 +195,16 @@ impl Tool for ListDirTool {
                 total_entries - cap,
             ));
         }
-        tracing::debug!(
-            "tool list_dir done: path={}, entries={}",
-            path,
-            total_entries,
-        );
+        if let Some(reminder) = crate::agent::tools::format_context_reminder(&loaded) {
+            result.push('\n');
+            result.push_str(&reminder);
+        }
         if let Some(msg) = coaching {
             result = format!("{}\n\n{}", msg, result);
         }
-        Ok(result)
+        Ok(crate::agent::tools::truncate_live_tool_output(
+            Self::NAME,
+            &result,
+        ))
     }
 }

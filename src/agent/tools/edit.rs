@@ -544,14 +544,6 @@ impl Tool for EditTool {
 
     async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
         let path = crate::fs::expand_tilde(&args.path);
-        let es = edit_system();
-        tracing::debug!(
-            "tool edit start: path={}, mode={:?}, has_block={}, has_edits={}",
-            path,
-            es,
-            args.block.is_some(),
-            args.edits.as_ref().map(|e| e.len()).unwrap_or(0),
-        );
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "edit", &path).await?;
 
         let bytes = tokio::fs::read(&path).await?;
@@ -599,12 +591,6 @@ impl Tool for EditTool {
         crate::fs::atomic_write(&path, &output).await?;
         crate::agent::tools::untrack_read_path(&path);
 
-        tracing::debug!(
-            "tool edit done: path={}, edit_count={}, notes={}",
-            path,
-            edit_count,
-            notes.len(),
-        );
         let mut result = format!("Applied {} edit(s) to {}", edit_count, path);
         for note in &notes {
             result.push_str(&format!("\n  Note: {}", note));

@@ -3,7 +3,7 @@ use rig::tool::Tool;
 
 use crate::agent::tools::crc::crc32_hex;
 use crate::agent::tools::{
-    AskSender, PermCheck, ReadArgs, ToolError, check_perm_path, edit_system,
+    AskSender, ContextTracker, PermCheck, ReadArgs, ToolError, check_perm_path, edit_system,
 };
 use crate::config::types::EditSystem;
 
@@ -14,6 +14,7 @@ pub struct ReadTool {
     pub ask_tx: Option<AskSender>,
     pub max_text_file_size: u64,
     pub max_lines: u64,
+    pub context_tracker: Option<ContextTracker>,
 }
 
 impl ReadTool {
@@ -28,7 +29,13 @@ impl ReadTool {
             ask_tx,
             max_text_file_size: max_text_file_size.unwrap_or(DEFAULT_MAX_TEXT_SIZE),
             max_lines,
+            context_tracker: None,
         }
+    }
+
+    pub fn with_context_tracker(mut self, tracker: ContextTracker) -> Self {
+        self.context_tracker = Some(tracker);
+        self
     }
 }
 
@@ -82,30 +89,18 @@ impl Tool for ReadTool {
 
     async fn call(&self, args: ReadArgs) -> Result<String, ToolError> {
         let path = crate::fs::expand_tilde(&args.path);
-        let offset = args.offset.unwrap_or(1).saturating_sub(1);
-        let limit = args.limit.unwrap_or(self.max_lines as usize);
-        tracing::debug!(
-            "tool read start: path={}, offset={}, limit={}",
-            path,
-            offset,
-            limit,
-        );
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "read", &path).await?;
 
+        let offset = args.offset.unwrap_or(1).saturating_sub(1);
+        let limit = args.limit.unwrap_or(self.max_lines as usize);
+
         if let Some(msg) = crate::agent::tools::track_read(&path, offset, limit) {
-            tracing::debug!("tool read blocked (repeated): path={}", path);
             return Err(ToolError::Msg(msg));
         }
 
         let metadata = tokio::fs::metadata(&path).await?;
         let file_size = metadata.len();
         if file_size > self.max_text_file_size {
-            tracing::warn!(
-                "tool read file too large: path={}, size={}, max={}",
-                path,
-                file_size,
-                self.max_text_file_size,
-            );
             return Err(ToolError::Msg(format!(
                 "File too large ({} bytes). Maximum allowed file size is {} bytes.",
                 file_size, self.max_text_file_size
@@ -191,17 +186,36 @@ impl Tool for ReadTool {
             info
         };
 
+        let loaded = crate::context::nested_agents_for_read(
+            std::path::Path::new(&path),
+            &crate::agent::tools::loaded_context_from(&self.context_tracker),
+        );
+        let loaded_paths: Vec<std::path::PathBuf> =
+            loaded.iter().map(|(path, _)| path.clone()).collect();
+        crate::agent::tools::mark_context_loaded_in(&self.context_tracker, &loaded_paths);
+
+        let info = if loaded.is_empty() {
+            info
+        } else {
+            format!(
+                "{}\n\n{}",
+                info,
+                crate::agent::tools::format_context_reminder(&loaded).unwrap_or_default()
+            )
+        };
+
+        let loaded_paths = loaded_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
         let info = match coaching {
             Some(msg) => format!("{}\n\n{}", msg, info),
             None => info,
         };
+        let info = crate::agent::tools::truncate_live_tool_output(Self::NAME, &info);
+        crate::agent::tools::register_read_context_metadata(&info, loaded_paths);
 
-        tracing::debug!(
-            "tool read done: path={}, total_lines={}, returned_lines={}",
-            path,
-            total_lines,
-            end - start,
-        );
         Ok(info)
     }
 }
