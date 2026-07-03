@@ -15,7 +15,13 @@ rustPlatform.buildRustPackage {
 
   # TODO: upgrade to lib.fileset as cleanSource is including many irrelevent
   # files for the build (many *.md files, .git* files, & so on).
-  src = lib.cleanSource ../..;
+  src = lib.cleanSourceWith {
+    src = ../..;
+    filter = path: type:
+      !(type == "directory" && baseNameOf path == "target")
+      && !(type == "directory" && baseNameOf path == ".git")
+      && lib.cleanSourceFilter path type;
+  };
 
   cargoLock.lockFile = ../../Cargo.lock;
 

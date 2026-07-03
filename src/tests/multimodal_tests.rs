@@ -103,6 +103,7 @@ fn media_attachment_path_returns_stored_path() {
 fn media_to_messages_produces_user_messages() {
     use crate::agent::runner::media_to_messages;
     use rig::completion::Message;
+    use rig::completion::message::{DocumentSourceKind, UserContent};
 
     let media = vec![
         MediaAttachment::Image {
@@ -126,6 +127,22 @@ fn media_to_messages_produces_user_messages() {
             "expected User message, got {msg:?}"
         );
     }
+
+    let Message::User { content } = &messages[0] else {
+        unreachable!()
+    };
+    let UserContent::Image(image) = content.first_ref() else {
+        panic!("expected image content")
+    };
+    assert!(matches!(image.data, DocumentSourceKind::Base64(_)));
+
+    let Message::User { content } = &messages[1] else {
+        unreachable!()
+    };
+    let UserContent::Document(document) = content.first_ref() else {
+        panic!("expected document content")
+    };
+    assert!(matches!(document.data, DocumentSourceKind::Base64(_)));
 }
 
 #[cfg(feature = "multimodal")]
