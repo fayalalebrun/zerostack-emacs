@@ -21,7 +21,6 @@ pub struct McpClientManager {
 
 impl McpClientManager {
     pub async fn connect_all(configs: &HashMap<String, config::McpServerConfig>) -> Self {
-        tracing::debug!("MCP connecting to {} servers", configs.len());
         let mut handles = Vec::new();
         let mut notices = Vec::new();
         for (name, cfg) in configs {
@@ -51,14 +50,12 @@ impl McpClientManager {
         permission: Option<PermCheck>,
         ask_tx: Option<AskSender>,
     ) -> Vec<McpTool> {
-        tracing::debug!("MCP collecting tools from {} handles", self.handles.len());
         let mut all_tools = Vec::new();
         for handle in &self.handles {
             let peer = handle.peer();
             let server_name = handle.server_name.clone();
             match handle.list_tools().await {
                 Ok(tools) => {
-                    tracing::debug!("MCP server '{}': {} tools listed", server_name, tools.len(),);
                     for definition in tools {
                         all_tools.push(McpTool {
                             server_name: server_name.clone(),
@@ -88,7 +85,6 @@ impl McpClientManager {
         name: &str,
         cfg: &config::McpServerConfig,
     ) -> anyhow::Result<()> {
-        tracing::info!("MCP reconnecting server '{}'", name);
         let handle = client::McpClientHandle::connect(CompactString::new(name), cfg).await?;
         self.handles.retain(|h| h.server_name != name);
         self.handles.push(handle);
@@ -96,7 +92,6 @@ impl McpClientManager {
     }
 
     pub async fn shutdown(self) {
-        tracing::debug!("MCP shutting down {} connections", self.handles.len());
         for handle in self.handles {
             let name = handle.server_name.clone();
             drop(handle);

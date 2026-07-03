@@ -75,13 +75,6 @@ impl<Counterpart: Role> ConnectTo<Counterpart> for TcpTransport {
 // --- Server Entry Point ---
 
 pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Result<()> {
-    let transport_mode = if cli.acp_host.is_some() {
-        "tcp"
-    } else {
-        "stdio"
-    };
-    tracing::info!("ACP server starting: transport={}", transport_mode);
-
     // Extract transport config before moving cli into Arc
     let acp_host = cli.acp_host.clone();
     let acp_port = cli.acp_port;
@@ -244,13 +237,6 @@ async fn run_prompt(
     let provider_str = state.cli.resolve_provider(&state.cfg);
     let mut model_str = state.cli.resolve_model(&state.cfg);
 
-    tracing::debug!(
-        "ACP run_prompt: provider={}, model={}, prompt_len={}",
-        provider_str,
-        model_str,
-        prompt_text.len(),
-    );
-
     // Custom provider model override (if no explicit model set)
     if (model_str.as_str() == "deepseek/deepseek-v4-pro" || state.cli.model.is_none())
         && let Some(custom) = state.cfg.custom_providers_map().get(provider_str.as_str())
@@ -259,11 +245,13 @@ async fn run_prompt(
         model_str = custom_model.clone();
     }
 
+    let codex_prompt_cache_key = session_id.to_string();
     let client = crate::provider::create_client(
         &provider_str,
         None,
         &state.cfg.custom_providers_map(),
         state.cfg.api_keys.as_ref(),
+        Some(codex_prompt_cache_key.as_str()),
     )
     .map_err(|e| agent_client_protocol::Error::new(-32603, e.to_string()))?;
 
@@ -296,6 +284,8 @@ async fn run_prompt(
         ask_tx,
         sandbox,
         false,
+        crate::config::resolve_reasoning_effort(&state.cli, &state.cfg, &provider, &model_str)
+            .as_deref(),
         temperature,
         extra_body,
         #[cfg(feature = "mcp")]
@@ -303,11 +293,7 @@ async fn run_prompt(
     )
     .await;
 
-    let runner = agent.spawn_runner(
-        prompt_text.to_string(),
-        vec![],
-        crate::retry::RetryConfig::default(),
-    );
+    let runner = agent.spawn_runner(prompt_text.to_string(), vec![]);
     let mut rx = runner.event_rx;
 
     let mut tool_call_id: Option<ToolCallId> = None;
@@ -338,7 +324,7 @@ async fn run_prompt(
                     tracing::warn!("ACP failed to send reasoning notification: {}", e);
                 }
             }
-            AgentEvent::ToolCall { name, args } => {
+            AgentEvent::ToolCall { name, args, .. } => {
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
                 tool_call_id = Some(id.clone());
                 let args_str = args.to_string();
@@ -384,20 +370,6 @@ async fn run_prompt(
                     tracing::warn!("ACP failed to send tool result notification: {}", e);
                 }
             }
-            AgentEvent::Retrying { attempt, max } => {
-                // ACP has no status bar, so surface the retry as an agent
-                // thought. This keeps the client from going silent during the
-                // backoff delay and mirrors how `Reasoning` is forwarded.
-                let text = format!("retrying... ({}/{})", attempt, max);
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentThoughtChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send retry notification: {}", e);
-                }
-            }
             AgentEvent::CompletionCall { .. } => {
                 // Mid-stream provider usage; ACP has no status bar to update, so
                 // there is nothing to surface for this event.
@@ -405,7 +377,7 @@ async fn run_prompt(
             AgentEvent::Done { .. } => {
                 break;
             }
-            AgentEvent::Error(_) => {
+            AgentEvent::Error { .. } => {
                 break;
             }
         }

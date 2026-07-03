@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_zerostack_overrides_prompts_dir() {
         let _td = TestDir::new();
-        let prompts_dir = PathBuf::from("data/prompts");
+        let prompts_dir = PathBuf::from("prompts");
         let zs_dir = zerostack_dir();
         write_prompt(&prompts_dir, "code", "from prompts/");
         write_prompt(&zs_dir, "code", "from .zerostack/prompts/");
@@ -139,7 +139,7 @@ mod tests {
     fn test_prompts_dir_overrides_global() {
         let _td = TestDir::new();
         let global = global_dir();
-        let prompts_dir = PathBuf::from("data/prompts");
+        let prompts_dir = PathBuf::from("prompts");
         write_prompt(&global, "custom", "from global/");
         write_prompt(&prompts_dir, "custom", "from prompts/");
 
@@ -151,7 +151,7 @@ mod tests {
     fn test_full_priority_chain() {
         let _td = TestDir::new();
         let global = global_dir();
-        let prompts_dir = PathBuf::from("data/prompts");
+        let prompts_dir = PathBuf::from("prompts");
         let zs_dir = zerostack_dir();
 
         write_prompt(&global, "code", "from global/");

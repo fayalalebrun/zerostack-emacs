@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use include_dir::Dir;
@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use crate::session::storage;
 
 pub mod prompts;
+pub mod skills;
 pub mod themes;
 
 pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, String)> {
@@ -60,6 +61,7 @@ pub struct ContextFiles {
     pub current_prompt: Option<String>,
     pub current_prompt_name: Option<String>,
     pub themes: HashMap<String, String>,
+    pub skills: Vec<skills::Skill>,
     pub current_theme_name: Option<String>,
     pub extra_files: Vec<std::path::PathBuf>,
     pub one_shot_restore: Option<String>,
@@ -82,6 +84,7 @@ impl ContextFiles {
             self.current_prompt = self.prompts.get(name).cloned();
         }
         self.themes = themes::load();
+        self.skills = skills::load();
         self.current_theme_name = crate::session::storage::load_theme_name();
         #[cfg(feature = "memory")]
         {
@@ -104,6 +107,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let _ = arch_candidate;
     let prompt_map = prompts::load();
     let theme_map = themes::load();
+    let skills = skills::load();
     let theme_name = crate::session::storage::load_theme_name();
     #[cfg(feature = "memory")]
     let memory = crate::extras::memory::Mem::open().context_block();
@@ -113,6 +117,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
         current_prompt: None,
         current_prompt_name: None,
         themes: theme_map,
+        skills,
         current_theme_name: theme_name,
         extra_files: Vec::new(),
         one_shot_restore: None,
@@ -201,4 +206,125 @@ fn walk_context_files() -> (Option<String>, Option<String>) {
 #[cfg(feature = "archmd")]
 pub(crate) fn load_architecture() -> Option<String> {
     walk_context_files().1
+}
+
+pub(crate) fn nested_agents_for_read(
+    path: &Path,
+    already_loaded: &HashSet<PathBuf>,
+) -> Vec<(PathBuf, String)> {
+    nested_agents_for_path(path, already_loaded, false)
+}
+
+pub(crate) fn nested_agents_for_dir(
+    path: &Path,
+    already_loaded: &HashSet<PathBuf>,
+) -> Vec<(PathBuf, String)> {
+    nested_agents_for_path(path, already_loaded, true)
+}
+
+fn nested_agents_for_path(
+    path: &Path,
+    already_loaded: &HashSet<PathBuf>,
+    include_target_dir: bool,
+) -> Vec<(PathBuf, String)> {
+    let Ok(root) = std::env::current_dir().and_then(|p| p.canonicalize()) else {
+        return Vec::new();
+    };
+    let Ok(target) = path.canonicalize() else {
+        return Vec::new();
+    };
+    let mut current = if include_target_dir && target.is_dir() {
+        target
+    } else {
+        let Some(parent) = target.parent() else {
+            return Vec::new();
+        };
+        parent.to_path_buf()
+    };
+    if !current.starts_with(&root) {
+        return Vec::new();
+    }
+
+    let mut found = Vec::new();
+    while current.starts_with(&root) && current != root {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            let candidate = current.join(name);
+            if let Ok(real) = candidate.canonicalize()
+                && real.starts_with(&root)
+                && !already_loaded.contains(&real)
+                && let Ok(content) = std::fs::read_to_string(&real)
+                && !content.trim().is_empty()
+            {
+                found.push((
+                    real.clone(),
+                    format!("Instructions from: {}\n{}", real.display(), content),
+                ));
+                break;
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{nested_agents_for_dir, nested_agents_for_read};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::sync::Mutex;
+
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn nested_agents_for_read_walks_to_cwd_exclusive_and_dedupes() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("zerostack-nested-agents-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/components")).unwrap();
+        fs::write(root.join("AGENTS.md"), "root").unwrap();
+        fs::write(root.join("src/AGENTS.md"), "src").unwrap();
+        fs::write(root.join("src/components/CLAUDE.md"), "components").unwrap();
+        fs::write(root.join("src/components/button.rs"), "fn main() {}").unwrap();
+
+        std::env::set_current_dir(&root).unwrap();
+        let loaded = HashSet::from([root.join("src/AGENTS.md").canonicalize().unwrap()]);
+        let expected = root
+            .join("src/components/CLAUDE.md")
+            .canonicalize()
+            .unwrap();
+        let found = nested_agents_for_read(&root.join("src/components/button.rs"), &loaded);
+        std::env::set_current_dir(original).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, expected);
+        assert!(found[0].1.contains("components"));
+    }
+
+    #[test]
+    fn nested_agents_for_dir_includes_target_directory() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "zerostack-nested-dir-agents-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/components")).unwrap();
+        fs::write(root.join("src/components/AGENTS.md"), "components").unwrap();
+
+        std::env::set_current_dir(&root).unwrap();
+        let found = nested_agents_for_dir(&root.join("src/components"), &HashSet::new());
+        std::env::set_current_dir(original).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert!(found[0].1.contains("components"));
+    }
 }

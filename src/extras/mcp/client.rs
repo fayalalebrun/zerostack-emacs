@@ -19,12 +19,6 @@ impl McpClientHandle {
     ) -> anyhow::Result<Self> {
         match config {
             McpServerConfig::Command { command, args, env } => {
-                tracing::debug!(
-                    "MCP command transport: {} {:?} ({} env vars)",
-                    command,
-                    args,
-                    env.len(),
-                );
                 let mut cmd = Command::new(command);
                 cmd.args(args);
                 for (k, v) in env {
@@ -44,12 +38,6 @@ impl McpClientHandle {
                 headers,
                 oauth,
             } => {
-                tracing::debug!(
-                    "MCP HTTP transport: {} ({} headers, OAuth: {})",
-                    url,
-                    headers.len(),
-                    oauth.is_some(),
-                );
                 let custom_headers = parse_headers(headers)?;
                 let cfg = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.as_str())
                     .custom_headers(custom_headers);
