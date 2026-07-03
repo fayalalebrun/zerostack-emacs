@@ -1,13 +1,13 @@
 # Configuration
 
-zerostack reads an optional config file. It supports TOML, YAML and JSON
+zerostack reads an optional config file. It supports both JSON and TOML
 formats. The file is resolved by priority:
 
-- If `ZS_CONFIG_DIR` is set: `$ZS_CONFIG_DIR/config.toml` (preferred), `config.yaml`/`config.yml`, or `config.json`
-- Otherwise: `~/.config/zerostack/config.toml` (preferred), `config.yaml`/`.yml`, or `config.json`
-- Otherwise: `~/.local/share/zerostack/config.toml` (preferred), `config.yaml`/`.yml`, or `config.json`
+- If `ZS_CONFIG_DIR` is set: `$ZS_CONFIG_DIR/config.toml` or `$ZS_CONFIG_DIR/config.json`
+- Otherwise: `~/.config/zerostack/config.toml` or `~/.config/zerostack/config.json`
+- Otherwise: `~/.local/share/zerostack/config.toml` or `~/.local/share/zerostack/config.json`
 
-If a `config.toml` exists at a higher priority, it is used. If none exists
+If a `config.toml` exists at a higher priority, it is used. If neither exists
 at any priority, a default `config.toml` is created in the lowest-priority
 directory (`~/.local/share/zerostack/`). On macOS the XDG config path above
 resolves to `~/Library/Application Support/zerostack/`.
@@ -34,65 +34,76 @@ data files.
 All config keys are optional. CLI flags and their environment-backed values
 (such as `ZS_PROVIDER` and `ZS_MODEL`) take precedence where both exist.
 
-Example (YAML):
+Example (JSON):
 
-```yaml
-provider: openrouter
-model: deepseek/deepseek-v4-flash
-max_tokens: 16384
-temperature: 0.7
-context_window: 128000
-reserve_tokens: 8192
-keep_recent_tokens: 10000
-compact_enabled: true
-mid_turn_compact_threshold: 0.80
-deny_repeated_reads: false
-default_prompt: code
-default_permission_mode: standard
-permission-modes: ["guarded", "standard", "yolo"]
-show_tool_details: 3
-sandbox: false
-
-quick_models:
-  fast:
-    provider: openai
-    model: gpt-4o-mini
-custom_providers:
-  local-vllm:
-    provider_type: openai
-    base_url: http://localhost:8000/v1
-    api_key_env: VLLM_API_KEY
-    model: gemma4
-  company-gateway:
-    provider_type: openai
-    base_url: https://gateway.example.com/v1
-    api_key_env: GATEWAY_API_KEY
-    api_style: completions
-    headers:
-      cf-access-client-id: "${CF_ACCESS_CLIENT_ID}"
-      cf-access-client-secret: "${CF_ACCESS_CLIENT_SECRET}"
-    danger_accept_invalid_certs: false
-    timeout_secs: 60
-permission:
-  "*": ask
-  read: allow
-  write:
-    "**/*.rs": allow
-    "**": ask
-  bash:
-    "cargo test": allow
-    "rm **": deny
-  external_directory:
-    "/tmp/**": allow
-    "/**": ask
-  doom_loop: ask
+```json
+{
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v4-flash",
+  "max_tokens": 16384,
+  "temperature": 0.7,
+  "context_window": 128000,
+  "reserve_tokens": 8192,
+  "keep_recent_tokens": 10000,
+  "compact_enabled": true,
+  "mid_turn_compact_threshold": 0.80,
+  "deny_repeated_reads": false,
+  "default_prompt": "code",
+  "default_permission_mode": "standard",
+  "permission-modes": ["guarded", "standard", "yolo"],
+  "show_tool_details": 3,
+  "sandbox": false,
+  "quick_models": {
+    "fast": {
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    }
+  },
+  "custom_providers": {
+    "local-vllm": {
+      "provider_type": "openai",
+      "base_url": "http://localhost:8000/v1",
+      "api_key_env": "VLLM_API_KEY",
+      "model": "gemma4"
+    },
+    "company-gateway": {
+      "provider_type": "openai",
+      "base_url": "https://gateway.example.com/v1",
+      "api_key_env": "GATEWAY_API_KEY",
+      "api_style": "completions",
+      "headers": {
+        "cf-access-client-id": "${CF_ACCESS_CLIENT_ID}",
+        "cf-access-client-secret": "${CF_ACCESS_CLIENT_SECRET}"
+      },
+      "danger_accept_invalid_certs": false,
+      "timeout_secs": 60
+    }
+  },
+  "permission": {
+    "*": "ask",
+    "read": "allow",
+    "write": {
+      "**/*.rs": "allow",
+      "**": "ask"
+    },
+    "bash": {
+      "cargo test": "allow",
+      "rm **": "deny"
+    },
+    "external_directory": {
+      "/tmp/**": "allow",
+      "/**": "ask"
+    },
+    "doom_loop": "ask"
+  }
+}
 ```
 
 The same config in TOML:
 
 ```toml
 provider = "openrouter"
-model = "deepseek-v4-flash"
+model = "deepseek/deepseek-v4-flash"
 max_tokens = 16384
 temperature = 0.7
 context_window = 128000
@@ -142,6 +153,7 @@ Accepted top-level keys:
 | `model`                   | string  | Model name. Default: `deepseek/deepseek-v4-flash`.                                                                                                                          |
 | `max_tokens`              | integer | Maximum response tokens. Default: `16384`.                                                                                                                                  |
 | `max_agent_turns`         | integer | Maximum agent turns per response. Default: `200`.                                                                                                                           |
+| `goal_max_nudges`         | integer | Maximum automatic continuations when the active goal remains open at turn end. Default: `10`.                                                                               |
 | `temperature`             | number  | Model temperature value. Only configurable via the `--temperature` CLI flag (`0.0` to `2.0`). Config-file value is parsed but not currently applied.                        |
 | `extra_body`              | object  | Provider-specific JSON shallow-merged into every completion request body as a global default (e.g. OpenRouter `plugins` routing presets). A matching `quick_models` entry's `extra_body` overrides this. See Provider-specific request body parameters below. |
 | `no_tools`                | boolean | Disable all tools. Default: `false`.                                                                                                                                        |
@@ -178,7 +190,6 @@ Accepted top-level keys:
 | `editor`                  | string  | Editor command for `Ctrl+G` (default: `$EDITOR` env var, then `editor`, then `nano`).                                                                                        |
 | `api_keys`                | object  | Map of provider names to API keys (e.g. `"openai": "sk-..."`). Used as fallback when the corresponding env var is not set.                                                   |
 | `quick_models`            | object  | Map of quick-model names to `{ "provider", "model", "reserve_tokens"?, "input_token_cost"?, "output_token_cost"?, "temperature"?, "extra_body"? }`. Can be switched with `/models <name>` or `--quick-model=<name>`. See Provider-specific request body parameters below for `extra_body`. |
-| `prompt_to_model`         | object  | Map of prompt names to quick-model names (e.g. `plan = "glm-52"`). When switching to a prompt, zerostack automatically switches to the corresponding quick model. Empty-string values are treated as "no change". See Prompt-to-model switching below. |
 | `mcp_servers`             | object  | MCP server map when compiled with the `mcp` feature. When omitted, recommended MCPs are auto-configured (see below).                                                   |
 | `enable-exa-mcp`          | boolean | Auto-configure the Exa Web Search MCP server. Default: `true`.                                                                                                         |
 | `enable-context7-mcp`     | boolean | Auto-configure the Context7 MCP server. Default: `false`.                                                                                                              |
@@ -188,6 +199,13 @@ Accepted top-level keys:
 | `acp_host`                | string  | TCP bind host for ACP server mode (equivalent to `--acp-host`).                                                                                                              |
 | `acp_port`                | integer | TCP bind port for ACP server mode (equivalent to `--acp-port`, default: 7243).                                                                                               |
 | `colors`                  | object  | Background color overrides for the TUI. See the colors section below.                                                                                                       |
+
+RTK bash wrapping is controlled by the `rtk` Cargo feature, not by runtime
+configuration. Builds compiled with `--features rtk` execute every bash tool
+command as `rtk bash -lc <command>` while still checking permissions against the
+original command. Builds without the feature keep the historical bash execution
+path. When compiled with `rtk`, the bash tool exposes a per-call `disable_rtk`
+boolean so the agent can bypass RTK for commands that need raw output.
 
 ## Mid-turn compaction
 
@@ -300,19 +318,19 @@ model = "openrouter/fusion"
 extra_body = { plugins = { preset = "quality" } }
 ```
 
-In YAML:
+In JSON:
 
-```yaml
-extra_body:
-  plugins:
-    preset: general-budget
-quick_models:
-  quality:
-    provider: openrouter
-    model: openrouter/fusion
-    extra_body:
-      plugins:
-        preset: quality
+```json
+{
+  "extra_body": { "plugins": { "preset": "general-budget" } },
+  "quick_models": {
+    "quality": {
+      "provider": "openrouter",
+      "model": "openrouter/fusion",
+      "extra_body": { "plugins": { "preset": "quality" } }
+    }
+  }
+}
 ```
 
 Note that body parameters are **provider-specific**: a key one provider
@@ -500,27 +518,37 @@ permission-ask = { bash = ["rm **"] }
 permission-deny = { write = ["/etc/**", "/usr/**"] }
 ```
 
-In YAML:
-```yaml
-permission-allow:
-  read: ["src/**", "tests/**"]
-permission-ask:
-  bash: ["rm **"]
-permission-deny:
-  write: ["/etc/**", "/usr/**"]
+In JSON:
+```json
+{
+  "permission-allow": {
+    "read": ["src/**", "tests/**"]
+  },
+  "permission-ask": {
+    "bash": ["rm **"]
+  },
+  "permission-deny": {
+    "write": ["/etc/**", "/usr/**"]
+  }
+}
 ```
 
-A `permission-regex` example in YAML:
+A `permission-regex` example in JSON:
 
-```yaml
-permission-regex:
-  "*": ask
-  read:
-    "\\.md$": allow
-    "\\.rs$": ask
-  bash:
-    "^cargo (test|check|build)$": allow
-    "^rm ": deny
+```json
+{
+  "permission-regex": {
+    "*": "ask",
+    "read": {
+      "\\.md$": "allow",
+      "\\.rs$": "ask"
+    },
+    "bash": {
+      "^cargo (test|check|build)$": "allow",
+      "^rm ": "deny"
+    }
+  }
+}
 ```
 
 When compiled with MCP support, `mcp_servers` accepts command-based and URL-based
@@ -633,11 +661,8 @@ When `--acp` is passed without `--acp-host`, zerostack runs in stdio mode
 
 ## TOML configuration
 
-Within each search directory, zerostack picks the first existing file in
-this priority order: `config.toml`, `config.yaml`, `config.yml`, then
-`config.json`. `config.json` is kept for backwards compatibility — since YAML
-is a superset of JSON, legacy JSON configs parse transparently through the
-YAML reader. If none exists, a default `config.toml` is created automatically.
+zerostack prefers `config.toml` over `config.json` when both exist. If neither
+file exists, a default `config.toml` is created automatically.
 
 TOML is especially well suited for zerostack's permission rules and structured
 settings. Hyphenated keys such as `permission-regex`, `permission-allow`,
@@ -669,7 +694,7 @@ For more complex configurations, explicit TOML tables provide clear structure:
 
 All top-level keys use kebab-case when they contain hyphens (e.g.
 `permission-allow`, `allow-all-mcp-calls`). Simple keys use the same name as
-their YAML counterpart. Quoted keys (`"*"`, `"**"`) are required when the key
+their JSON counterpart. Quoted keys (`"*"`, `"**"`) are required when the key
 contains special characters like `*` or `/`.
 
 ## Edit System Modes
@@ -749,37 +774,6 @@ The mode change is applied when the prompt is activated and persists
 until changed again by `/mode`, another prompt directive, or a restart.
 The status bar shows `| mode:<name>` when the mode is not `standard`.
 
-## Prompt-to-model switching
-
-The `[prompt_to_model]` table maps prompt names to quick-model names. When
-you switch to a prompt (via `/prompt`, `.name`, `/review`, chain transitions,
-or `default_prompt` at startup), zerostack looks up the mapping and
-automatically switches the active model to the corresponding quick model.
-
-Values are quick-model names — the same names defined in `[quick_models]`.
-An empty string (`""`) means "no change", so the current model stays active.
-
-```toml
-[prompt_to_model]
-plan = "glm-52"
-code = "deepseek-v4-pro"
-review = "qwen37-plus"
-brainstorm = ""
-```
-
-With this config:
-- `/prompt plan` or `.plan` switches to the `glm-52` quick model.
-- `/prompt code` or `.code` switches to `deepseek-v4-pro`.
-- `/review` switches to `qwen37-plus`.
-- `/prompt brainstorm` or `.brainstorm` does **not** change the current model.
-
-When you run `/prompt default` (clearing the active prompt), the model
-reverts to the session's default model (from `model` / `provider` config
-or `--quick-model`).
-
-The model switch writes a line to chat:
-`switched to model: glm-52 (from prompt 'plan')`
-
 ## Chain-of-Prompts
 
 When enabled, after the agent finishes responding with a `brainstorm`, `plan`,
@@ -811,13 +805,16 @@ plan-to-code = true
 code-to-review = false
 ```
 
-### YAML
+### JSON
 
-```yaml
-chain:
-  brainstorm-to-plan: true
-  plan-to-code: true
-  code-to-review: false
+```json
+{
+  "chain": {
+    "brainstorm-to-plan": true,
+    "plan-to-code": true,
+    "code-to-review": false
+  }
+}
 ```
 
 ## Advisor
@@ -833,22 +830,25 @@ model only when needed.
 ```toml
 [advisor]
 enabled = true
-model = "deepseek-v4-pro"
+model = "deepseek/deepseek-v4-pro"
 # provider = "openrouter"         # defaults to main provider
 # max_uses = 3                    # max advisor calls per request (nil = unlimited)
 # human_handoff = false           # route advisor calls to the user instead
 # advisor_kilobytes_limit = 256   # max KB of conversation context (split half head / half tail)
 ```
 
-### YAML
+### JSON
 
-```yaml
-advisor:
-  enabled: true
-  model: deepseek-v4-pro
-  max_uses: 3
-  human_handoff: false
-  advisor_kilobytes_limit: 256
+```json
+{
+  "advisor": {
+    "enabled": true,
+    "model": "deepseek/deepseek-v4-pro",
+    "max_uses": 3,
+    "human_handoff": false,
+    "advisor_kilobytes_limit": 256
+  }
+}
 ```
 
 ### CLI flags
@@ -884,72 +884,3 @@ The `/advisor` slash command provides runtime control:
 /advisor max-uses <n>       Set max advisor calls per request (0 = unlimited)
 /advisor context-limit <n>  Set max kilobytes of conversation context
 ```
-
-## Logging
-
-zerostack uses the `tracing` framework for structured logging. By default, only
-warnings and errors are printed to stderr at the `warn` level (with the `rig`
-crate silenced). Full debug and trace output is available via CLI flags.
-
-### Verbose mode (`-v` / `--verbose`)
-
-```bash
-zerostack -v
-```
-
-Enables full trace-level logging to a timestamped log file under
-`~/.local/share/zerostack/logs/` (or `$ZS_DATA_DIR/logs/`). The log file is
-named `zerostack-YYYY-MM-DD_HH-MM-SS_<pid>.log`. A new file is created per
-instance — previous runs are never overwritten.
-
-With `-v`, stderr output stays at the default `warn` level so the TUI remains
-clean. The log file captures everything at `trace` level for all zerostack
-modules.
-
-### Custom log file (`--log-file`)
-
-```bash
-zerostack --log-file /tmp/debug.log
-```
-
-Writes full trace-level logs to the specified path instead of the default
-location. Implies `-v` for the file output. Can be combined with `-v` (no
-effect on the path, since `--log-file` takes precedence).
-
-### Custom stderr log level (`--log-level`)
-
-```bash
-zerostack --log-level debug
-```
-
-Sets the minimum level for stderr output. Accepted values: `trace`, `debug`,
-`info`, `warn`, `error`. This overrides the `RUST_LOG` environment variable.
-
-### Environment variable (`RUST_LOG`)
-
-The standard `RUST_LOG` environment variable is still supported for backward
-compatibility:
-
-```bash
-RUST_LOG=zerostack=debug zerostack          # debug level for zerostack
-RUST_LOG=debug,rig=off zerostack             # debug for everything except rig
-RUST_LOG=zerostack::agent::tools=trace zerostack  # trace only tool execution
-```
-
-Priority (highest wins): `--log-level` > `RUST_LOG` env > default `warn,rig=off`.
-
-### Logged subsystems
-
-With `-v`, the following subsystems produce debug/trace output:
-
-- **Agent lifecycle**: prompt sizes, retry events, token usage, tool call dispatch
-- **LLM-exposed tools**: every tool invocation with start/end, arguments, and results (bash, read, write, edit, grep, find_files, list_dir, todo_write)
-- **Config loading**: first startup detection, config file path, quick model and provider counts
-- **Session management**: save, delete, and find operations with message counts
-- **Permission checker**: every permission check result, doom-loop detection, mode changes
-- **MCP**: connection attempts, transport details, per-server tool counts, reconnects
-- **ACP**: server start, session creation, prompt execution with provider/model info
-- **Memory**: store open, write operations (target/bytes), searches, tool entry points
-- **Advisor**: initialization (model, enabled, max uses), tool call prompts
-- **Filesystem**: atomic write paths and byte counts
-
