@@ -9,10 +9,10 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
         "/clear" | "/new" => handle_clear(ctx).await,
         "/undo" => handle_undo(ctx).await,
         "/redo" => handle_redo(ctx).await,
-        "/rewind" => handle_rewind(ctx).await,
         "/retry" => handle_retry(ctx).await,
         "/quit" | "/exit" => handle_quit(ctx).await,
         "/history" => handle_history(ctx).await,
+        "/rewind" => handle_rewind(parts, ctx).await,
         _ => Ok(()),
     }
 }
@@ -135,6 +135,81 @@ async fn handle_sessions(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
     Ok(())
 }
 
+pub fn rewind_target_items(session: &crate::session::Session) -> Vec<String> {
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, msg)| {
+            (msg.role == crate::session::MessageRole::User).then(|| {
+                let preview: String = msg.content.chars().take(80).collect();
+                format!("{}  {}", idx, preview.replace('\n', " "))
+            })
+        })
+        .collect()
+}
+
+async fn handle_rewind(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
+    let target = if parts.len() >= 2 {
+        match parts[1].parse::<usize>() {
+            Ok(idx) if idx <= ctx.session.messages.len() => Some(idx),
+            Ok(_) => {
+                write_error(ctx.renderer, "message index out of range");
+                return Ok(());
+            }
+            Err(_) => {
+                write_error(ctx.renderer, "usage: /rewind <message-index>");
+                return Ok(());
+            }
+        }
+    } else {
+        ctx.renderer
+            .selected_session_message_indices()
+            .into_iter()
+            .find(|&idx| {
+                ctx.session
+                    .messages
+                    .get(idx)
+                    .is_some_and(|m| m.role == crate::session::MessageRole::User)
+            })
+    };
+
+    let Some(message_index) = target else {
+        write_ok(
+            ctx.renderer,
+            "usage: select a prior user message, then /rewind; or /rewind <index>",
+        );
+        for item in rewind_target_items(ctx.session) {
+            write_result(ctx.renderer, format!("  {item}"));
+        }
+        return Ok(());
+    };
+
+    let text = ctx.session.messages[message_index].content.clone();
+    ctx.session.rewind_to(message_index);
+    if !ctx.cli.no_session {
+        crate::session::storage::save_session(ctx.session)?;
+    }
+    render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
+    ctx.input.buffer = text.clone();
+    ctx.input.cursor = text.len();
+    write_ok(ctx.renderer, format!("rewound to message {message_index}"));
+    Ok(())
+}
+
+async fn handle_redo(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
+    if !ctx.session.redo() {
+        write_ok(ctx.renderer, "nothing to redo");
+        return Ok(());
+    }
+    if !ctx.cli.no_session {
+        crate::session::storage::save_session(ctx.session)?;
+    }
+    render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
+    write_ok(ctx.renderer, "restored the last rewind");
+    Ok(())
+}
+
 async fn handle_clear(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     ctx.session.messages.clear();
     ctx.session.total_estimated_tokens = 0;
@@ -176,28 +251,6 @@ async fn handle_undo(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
         }
     }
 
-    Ok(())
-}
-
-async fn handle_redo(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
-    if !ctx.session.redo() {
-        write_ok(ctx.renderer, "nothing to redo");
-        return Ok(());
-    }
-    render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
-    write_ok(ctx.renderer, "restored the last rewind");
-    Ok(())
-}
-
-async fn handle_rewind(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
-    let targets = crate::ui::rewind_targets(ctx.session);
-    if targets.is_empty() {
-        write_ok(ctx.renderer, "nothing to rewind to");
-        return Ok(());
-    }
-    // Opens the two-level rewind picker; the event loop performs the rewind once
-    // the user confirms a turn.
-    ctx.input.start_rewind_picker(targets);
     Ok(())
 }
 
@@ -251,4 +304,24 @@ async fn handle_history(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewind_target_items;
+    use crate::session::{MessageRole, Session};
+
+    #[test]
+    fn rewind_target_items_include_only_user_messages() {
+        let mut session = Session::new("openai", "gpt-4", 128_000);
+        session.add_message(MessageRole::System, "system");
+        session.add_message(MessageRole::User, "first\nline");
+        session.add_message(MessageRole::Assistant, "answer");
+        session.add_message(MessageRole::User, "second");
+
+        assert_eq!(
+            rewind_target_items(&session),
+            vec!["1  first line".to_string(), "3  second".to_string()]
+        );
+    }
 }

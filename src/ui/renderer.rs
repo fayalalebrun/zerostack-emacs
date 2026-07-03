@@ -9,14 +9,32 @@ use crossterm::style::{
 use crossterm::terminal::{Clear, ClearType, ScrollUp};
 use smallvec::{SmallVec, smallvec};
 
+use crate::session::MessageRole;
+
 use super::markdown::word_wrap;
 use super::statusline::StatusSpan;
 use super::utils::{char_display_width, display_width, resolve_color};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LineSource {
+    SessionMessage { index: usize, role: MessageRole },
+}
 
 #[derive(Clone)]
 pub struct LineEntry {
     pub text: CompactString,
     pub color: Color,
+    pub source: Option<LineSource>,
+}
+
+impl LineEntry {
+    pub fn new(text: impl Into<CompactString>, color: Color) -> Self {
+        Self {
+            text: text.into(),
+            color,
+            source: None,
+        }
+    }
 }
 
 pub struct PermissionPrompt {
@@ -35,6 +53,7 @@ pub struct Renderer {
     buffer: Vec<LineEntry>,
     partial: CompactString,
     partial_color: Color,
+    partial_source: Option<LineSource>,
     scroll_offset: usize,
     input_scroll_offset: usize,
     input_vscroll_offset: usize,
@@ -75,6 +94,7 @@ impl Renderer {
             buffer: Vec::new(),
             partial: CompactString::new(""),
             partial_color: Color::White,
+            partial_source: None,
             scroll_offset: 0,
             input_scroll_offset: 0,
             input_vscroll_offset: 0,
@@ -276,12 +296,35 @@ impl Renderer {
         self.selection_end = None;
     }
 
-    pub fn selected_text(&self) -> Option<String> {
-        let (start, end) = match (self.selection_start, self.selection_end) {
-            (Some(s), Some(e)) if s <= e => (s, e),
-            (Some(s), Some(e)) => (e, s),
-            _ => return None,
+    fn selected_range(&self) -> Option<(usize, usize)> {
+        match (self.selection_start, self.selection_end) {
+            (Some(s), Some(e)) if s <= e => Some((s, e)),
+            (Some(s), Some(e)) => Some((e, s)),
+            _ => None,
+        }
+    }
+
+    pub fn selected_session_message_indices(&self) -> Vec<usize> {
+        let Some((start, end)) = self.selected_range() else {
+            return Vec::new();
         };
+        let mut indices = Vec::new();
+        for i in start..=end {
+            if let Some(LineEntry {
+                source: Some(LineSource::SessionMessage { index, .. }),
+                ..
+            }) = self.buffer.get(i)
+            {
+                if !indices.contains(index) {
+                    indices.push(*index);
+                }
+            }
+        }
+        indices
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selected_range()?;
         let mut result = String::new();
         for i in start..=end {
             if let Some(entry) = self.buffer.get(i) {
@@ -306,13 +349,16 @@ impl Renderer {
         if !self.partial.is_empty() {
             let max_width = self.max_line_width();
             let c = self.partial_color;
+            let source = self.partial_source;
             for chunk in self.wrap_line(&self.partial, max_width) {
                 self.buffer.push(LineEntry {
                     text: chunk,
                     color: c,
+                    source,
                 });
             }
             self.partial.clear();
+            self.partial_source = None;
         }
     }
 
@@ -585,7 +631,12 @@ impl Renderer {
         }
     }
 
-    pub fn write_line(&mut self, text: &str, color: Color) -> io::Result<()> {
+    pub fn write_line_with_source(
+        &mut self,
+        text: &str,
+        color: Color,
+        source: Option<LineSource>,
+    ) -> io::Result<()> {
         self.commit_partial();
         let max_width = self.max_line_width();
         for segment in text.split('\n') {
@@ -594,6 +645,7 @@ impl Renderer {
                 self.buffer.push(LineEntry {
                     text: chunk.clone(),
                     color,
+                    source,
                 });
                 if self.scroll_offset == 0 {
                     self.ensure_room();
@@ -619,6 +671,10 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn write_line(&mut self, text: &str, color: Color) -> io::Result<()> {
+        self.write_line_with_source(text, color, None)
+    }
+
     pub fn write(&mut self, text: &str, color: Color) -> io::Result<()> {
         if text.is_empty() {
             return Ok(());
@@ -642,6 +698,7 @@ impl Renderer {
                     self.buffer.push(LineEntry {
                         text: CompactString::new(""),
                         color,
+                        source: None,
                     });
                 }
                 if self.scroll_offset == 0 {
@@ -702,6 +759,7 @@ impl Renderer {
                     }
                     let chunk: String = chars[idx..end].iter().collect();
                     self.partial_color = color;
+                    self.partial_source = None;
                     self.partial.push_str(&chunk);
                     if self.scroll_offset == 0 {
                         self.ensure_room();

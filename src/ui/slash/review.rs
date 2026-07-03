@@ -83,10 +83,7 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
         }
     }
 
-    let model_switched = ctx.switch_to_prompt_model("review").await;
-    if !model_switched {
-        ctx.rebuild_agent().await;
-    }
+    ctx.rebuild_agent().await;
     write_ok(ctx.renderer, format!("review: {}", msg));
 
     Err(anyhow::anyhow!("DEFER_REVIEW:{}", msg))

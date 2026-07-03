@@ -1,15 +1,16 @@
 pub(crate) mod add;
 mod content;
 mod features;
+mod goal;
 mod help;
 pub(crate) mod init;
 mod memory;
 mod providers;
 pub(crate) mod review;
-mod session;
+pub(crate) mod session;
 pub(crate) mod settings;
 
-pub(crate) use providers::warm_model_cache;
+pub(crate) use providers::{quick_model_names_for_provider, warm_model_cache};
 
 use smallvec::SmallVec;
 
@@ -72,6 +73,13 @@ impl SlashCtx<'_> {
                 self.ask_tx.clone(),
                 self.sandbox.clone(),
                 *self.reasoning_enabled,
+                crate::config::resolve_reasoning_effort(
+                    self.cli,
+                    self.cfg,
+                    &self.session.provider,
+                    &self.session.model,
+                )
+                .as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -91,6 +99,7 @@ impl SlashCtx<'_> {
             self.cli.api_key.as_deref(),
             &self.cfg.custom_providers_map(),
             self.cfg.api_keys.as_ref(),
+            Some(self.session.id.as_str()),
         )?;
         let model = self.client.completion_model(self.session.model.to_string());
         let temperature =
@@ -111,6 +120,13 @@ impl SlashCtx<'_> {
                 self.ask_tx.clone(),
                 self.sandbox.clone(),
                 new_reasoning,
+                crate::config::resolve_reasoning_effort(
+                    self.cli,
+                    self.cfg,
+                    provider,
+                    &self.session.model,
+                )
+                .as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -120,190 +136,6 @@ impl SlashCtx<'_> {
         );
         Ok(())
     }
-
-    /// Switch to the quick-model configured in `[prompt_to_model]` for the
-    /// given prompt name. Returns `true` if a model switch occurred (and the
-    /// agent was rebuilt). When `false`, the caller should call
-    /// `rebuild_agent()` to pick up other prompt changes (mode directive, etc.).
-    pub async fn switch_to_prompt_model(&mut self, prompt_name: &str) -> bool {
-        let qm_name = match self.cfg.resolve_prompt_model(prompt_name) {
-            Some(name) => name,
-            None => return false,
-        };
-
-        let qm = crate::config::quick_models_map(self.cfg);
-        let Some(qmc) = qm.get(qm_name) else {
-            return false;
-        };
-
-        let new_model = compact_str::CompactString::from(&*qmc.model);
-        let provider_changed = qmc.provider != self.session.provider;
-
-        // Update model before rebuild so the agent is built with it.
-        self.session.model = new_model.clone();
-
-        if provider_changed {
-            match self
-                .rebuild_agent_with_client(&qmc.provider, *self.reasoning_enabled)
-                .await
-            {
-                Ok(()) => {
-                    self.session.provider = compact_str::CompactString::from(&*qmc.provider);
-                }
-                Err(e) => {
-                    let _ = self.renderer.write_line(
-                        &format!(
-                            "failed to switch provider for prompt '{}': {}",
-                            prompt_name, e
-                        ),
-                        C_ERROR,
-                    );
-                    return false;
-                }
-            }
-        } else {
-            let model = self.client.completion_model(new_model.to_string());
-            let temperature = crate::config::resolve_temperature(self.cli, self.cfg, &new_model);
-            let extra_body = crate::config::resolve_extra_body(self.cfg, &new_model);
-            #[cfg(feature = "advisor")]
-            {
-                crate::extras::advisor::update_client(self.client.clone());
-                crate::extras::advisor::set_session_messages(self.session.messages.clone());
-            }
-            *self.agent = Some(
-                crate::provider::build_agent(
-                    model,
-                    self.cli,
-                    self.cfg,
-                    self.context,
-                    self.permission.clone(),
-                    self.ask_tx.clone(),
-                    self.sandbox.clone(),
-                    *self.reasoning_enabled,
-                    temperature,
-                    extra_body,
-                    #[cfg(feature = "mcp")]
-                    self.mcp_manager,
-                )
-                .await,
-            );
-        }
-
-        self.session.input_token_cost = qmc.input_token_cost;
-        self.session.output_token_cost = qmc.output_token_cost;
-        self.session.update_context_window(
-            self.cfg
-                .resolve_context_window(&self.session.provider, &self.session.model),
-        );
-
-        let _ = self.renderer.write_line(
-            &format!(
-                "switched to model: {} (from prompt '{}')",
-                qm_name, prompt_name
-            ),
-            C_AGENT,
-        );
-        true
-    }
-}
-
-/// Free-function variant of [`SlashCtx::switch_to_prompt_model`] for call
-/// sites that don't have a `SlashCtx` (dot commands, chain transitions,
-/// startup). Returns `true` if a model switch occurred.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_prompt_model(
-    prompt_name: &str,
-    cfg: &Config,
-    cli: &Cli,
-    client: &mut AnyClient,
-    session: &mut Session,
-    agent: &mut Option<AnyAgent>,
-    context: &ContextFiles,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
-    sandbox: &Sandbox,
-    reasoning_enabled: bool,
-    renderer: &mut Renderer,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&crate::extras::mcp::McpClientManager>,
-) -> bool {
-    let qm_name = match cfg.resolve_prompt_model(prompt_name) {
-        Some(name) => name,
-        None => return false,
-    };
-
-    let qm = crate::config::quick_models_map(cfg);
-    let Some(qmc) = qm.get(qm_name) else {
-        return false;
-    };
-
-    let new_model = compact_str::CompactString::from(&*qmc.model);
-    let provider_changed = qmc.provider != session.provider;
-
-    session.model = new_model.clone();
-
-    if provider_changed {
-        match crate::provider::create_client(
-            &qmc.provider,
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        ) {
-            Ok(new_client) => {
-                *client = new_client;
-                session.provider = compact_str::CompactString::from(&*qmc.provider);
-                // Fall through to rebuild agent below
-            }
-            Err(e) => {
-                let _ = renderer.write_line(
-                    &format!(
-                        "failed to switch provider for prompt '{}': {}",
-                        prompt_name, e
-                    ),
-                    C_ERROR,
-                );
-                return false;
-            }
-        }
-    }
-
-    let model = client.completion_model(new_model.to_string());
-    let temperature = crate::config::resolve_temperature(cli, cfg, &new_model);
-    let extra_body = crate::config::resolve_extra_body(cfg, &new_model);
-    #[cfg(feature = "advisor")]
-    {
-        crate::extras::advisor::update_client(client.clone());
-        crate::extras::advisor::set_session_messages(session.messages.clone());
-    }
-    *agent = Some(
-        crate::provider::build_agent(
-            model,
-            cli,
-            cfg,
-            context,
-            permission.clone(),
-            ask_tx.clone(),
-            sandbox.clone(),
-            reasoning_enabled,
-            temperature,
-            extra_body,
-            #[cfg(feature = "mcp")]
-            mcp_manager,
-        )
-        .await,
-    );
-
-    session.input_token_cost = qmc.input_token_cost;
-    session.output_token_cost = qmc.output_token_cost;
-    session.update_context_window(cfg.resolve_context_window(&session.provider, &session.model));
-
-    let _ = renderer.write_line(
-        &format!(
-            "switched to model: {} (from prompt '{}')",
-            qm_name, prompt_name
-        ),
-        C_AGENT,
-    );
-    true
 }
 
 pub(crate) fn write_ok(renderer: &mut Renderer, msg: impl std::fmt::Display) {
@@ -319,27 +151,43 @@ pub(crate) fn write_error(renderer: &mut Renderer, msg: impl std::fmt::Display) 
 }
 
 pub fn undo_last(session: &mut Session) -> usize {
-    let len = session.messages.len();
-    if len == 0 {
-        return 0;
+    let mut removed = 0;
+    while session.messages.last().is_some_and(|m| {
+        matches!(
+            m.role,
+            MessageRole::ToolCall | MessageRole::ToolResult | MessageRole::SubagentToolCall
+        )
+    }) {
+        session.messages.pop();
+        removed += 1;
     }
-    let removed = if session.messages[len - 1].role == MessageRole::Assistant {
-        if len >= 2 && session.messages[len - 2].role == MessageRole::User {
-            2
-        } else {
-            1
-        }
-    } else if session.messages[len - 1].role == MessageRole::User {
-        1
-    } else {
-        0
-    };
-    // Rewind via the session helper so the context figure tracks the shortened
-    // history (subtracts the removed turn from the calibration anchor rather than
-    // going stale or resetting to a cold estimate) and the cut is reversible with
-    // /redo.
+    if session
+        .messages
+        .last()
+        .is_some_and(|m| m.role == MessageRole::Assistant)
+    {
+        session.messages.pop();
+        removed += 1;
+    }
+    while session.messages.last().is_some_and(|m| {
+        matches!(
+            m.role,
+            MessageRole::ToolCall | MessageRole::ToolResult | MessageRole::SubagentToolCall
+        )
+    }) {
+        session.messages.pop();
+        removed += 1;
+    }
+    if session
+        .messages
+        .last()
+        .is_some_and(|m| m.role == MessageRole::User)
+    {
+        session.messages.pop();
+        removed += 1;
+    }
     if removed > 0 {
-        session.rewind_to(len - removed);
+        session.truncate_to(session.messages.len());
     }
     removed
 }
@@ -441,6 +289,8 @@ pub async fn handle_compress(
             ask_tx.clone(),
             sandbox.clone(),
             reasoning_enabled,
+            crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model)
+                .as_deref(),
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]
@@ -514,8 +364,9 @@ pub async fn handle_slash(
         "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys" | "/advisor" => {
             settings::handle(&parts, &mut ctx).await
         }
-        "/sessions" | "/clear" | "/new" | "/undo" | "/redo" | "/rewind" | "/retry" | "/quit"
-        | "/exit" | "/history" => session::handle(&parts, &mut ctx).await,
+        "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"
+        | "/rewind" => session::handle(&parts, &mut ctx).await,
+        "/goal" => goal::handle(&parts, &mut ctx).await,
         "/help" => {
             help::handle(&parts, &mut ctx);
             Ok(())

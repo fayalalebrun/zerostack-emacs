@@ -14,7 +14,6 @@ use std::io::Write;
 use crate::ui::pickers::file::FilePicker;
 use crate::ui::pickers::list::ListPicker;
 use crate::ui::pickers::models::ModelsPicker;
-use crate::ui::pickers::rewind::{RewindOutcome, RewindPicker};
 
 const MAX_KILL_RING: usize = 30;
 
@@ -31,6 +30,7 @@ pub struct InputEditor {
     quick_model_names: Vec<String>,
     live_model_names: Vec<String>,
     provider_names: Vec<String>,
+    rewind_targets: Vec<String>,
     editor: Option<String>,
     kill_ring: Vec<CompactString>,
     yank_pos: Option<usize>,
@@ -52,6 +52,7 @@ impl InputEditor {
             quick_model_names: Vec::new(),
             live_model_names: Vec::new(),
             provider_names: Vec::new(),
+            rewind_targets: Vec::new(),
             editor: None,
             kill_ring: Vec::with_capacity(MAX_KILL_RING),
             yank_pos: None,
@@ -79,19 +80,6 @@ impl InputEditor {
         self.yank_pos = None;
     }
 
-    /// Replace the input buffer with `text`, cursor at the end. Used by the
-    /// rewind flow to drop the chosen user turn back into the box for editing.
-    pub fn load_text(&mut self, text: &str) {
-        self.buffer = CompactString::new(text);
-        // `cursor` is a byte offset into `buffer` (sliced as `buffer[..cursor]`
-        // and advanced by `len_utf8()` elsewhere), so end-of-buffer is the byte
-        // length, not the char count — they differ for multi-byte (e.g. CJK) text.
-        self.cursor = self.buffer.len();
-        self.history_pos = None;
-        self.draft = None;
-        self.yank_pos = None;
-    }
-
     pub fn set_quick_model_names(&mut self, names: Vec<String>) {
         self.quick_model_names = names;
     }
@@ -102,6 +90,10 @@ impl InputEditor {
 
     pub fn set_provider_names(&mut self, names: Vec<String>) {
         self.provider_names = names;
+    }
+
+    pub fn set_rewind_targets(&mut self, targets: Vec<String>) {
+        self.rewind_targets = targets;
     }
 
     pub fn set_editor(&mut self, editor: String) {
@@ -168,29 +160,14 @@ impl InputEditor {
         self.picker = Some(Picker::Prefixed(picker, "/provider "));
     }
 
-    /// Open the double-Esc rewind picker over the given `(message_index,
-    /// preview)` user turns. No-op when there is nothing to rewind to.
-    pub fn start_rewind_picker(&mut self, targets: Vec<(usize, String)>) {
-        if targets.is_empty() {
-            return;
-        }
-        let mut picker = RewindPicker::new(targets);
+    pub fn start_rewind_index_picker(&mut self) {
+        let mut picker = ListPicker::new();
         picker.set_monochrome(self.monochrome);
-        picker.activate();
-        self.picker = Some(Picker::Rewind(picker));
-    }
-
-    /// Take the rewind picker's resolved outcome, if it has one. Also clears the
-    /// finished picker so the input box returns to normal.
-    pub fn take_rewind_outcome(&mut self) -> Option<RewindOutcome> {
-        let outcome = match self.picker.as_mut() {
-            Some(Picker::Rewind(p)) => p.take_outcome(),
-            _ => None,
-        };
-        if outcome.is_some() {
-            self.picker = None;
+        if !self.rewind_targets.is_empty() {
+            picker.set_items(self.rewind_targets.clone());
         }
-        outcome
+        picker.activate();
+        self.picker = Some(Picker::Prefixed(picker, "/rewind "));
     }
 
     pub fn start_prompt_picker(&mut self) {
@@ -557,6 +534,20 @@ impl InputEditor {
                             self.start_provider_picker();
                             if let Some(Picker::Prefixed(ref mut pp, _)) = self.picker {
                                 pp.char_input(c);
+                            }
+                        }
+                    }
+                }
+                if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
+                    && self.buffer.starts_with("/rewind ")
+                {
+                    let after_prefix: String = self.buffer.chars().skip("/rewind ".len()).collect();
+                    if !after_prefix.is_empty() && c != ' ' {
+                        let query_len = after_prefix.len();
+                        if query_len == 1 {
+                            self.start_rewind_index_picker();
+                            if let Some(Picker::Prefixed(ref mut fp, _)) = self.picker {
+                                fp.char_input(c);
                             }
                         }
                     }

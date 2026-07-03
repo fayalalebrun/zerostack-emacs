@@ -22,7 +22,6 @@ use crossterm::style::Color;
 use tokio::sync::mpsc;
 
 use crate::cli::Cli;
-use crate::config;
 use crate::config::Config;
 use crate::context::ContextFiles;
 use crate::event::{AgentEvent, UserEvent};
@@ -39,9 +38,8 @@ use crate::ui::event_handler::{ensure_agent, handle_agent_event};
 use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
 use crate::ui::permission_handler::handle_permission_request;
-use crate::ui::pickers::rewind::RewindOutcome;
 use crate::ui::renderer::{Renderer, copy_to_clipboard};
-use crate::ui::slash::{apply_prompt_model, handle_compress, handle_slash};
+use crate::ui::slash::{handle_compress, handle_slash};
 use crate::ui::terminal::TerminalGuard;
 
 use self::utils::parse_color;
@@ -211,22 +209,6 @@ pub(crate) fn allowed_while_running(text: &str) -> bool {
     t == "/queue" || t.starts_with("/queue ") || t == "/btw" || t.starts_with("/btw ")
 }
 
-/// Build the rewind picker's list of `(message_index, preview)` for every user
-/// turn in the conversation, oldest first. Only user turns are offered: a rewind
-/// lands just before a message you sent, dropping everything after it.
-pub(crate) fn rewind_targets(session: &Session) -> Vec<(usize, String)> {
-    session
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == MessageRole::User)
-        .map(|(idx, m)| {
-            let preview: String = m.content.chars().take(80).collect();
-            (idx, preview.replace('\n', " "))
-        })
-        .collect()
-}
-
 pub(crate) fn classify_submission(is_running: bool, text: &str) -> SubmitAction {
     // Idle, or a whitelisted parallel-safe command → let it through to its
     // handler. Everything else, while running, is gated.
@@ -326,7 +308,7 @@ async fn spawn_merge_agent(
         .as_ref()
         .unwrap()
         .clone()
-        .spawn_runner(prompt, history, cfg.retry.clone());
+        .spawn_runner(prompt, history);
     *agent_rx = Some(runner.event_rx);
     *main_abort = Some(runner.abort_handle);
     *is_running = true;
@@ -443,12 +425,11 @@ async fn start_main_run(
             h
         }
     };
-    let runner =
-        agent
-            .as_ref()
-            .unwrap()
-            .clone()
-            .spawn_runner(text.to_string(), history, cfg.retry.clone());
+    let runner = agent
+        .as_ref()
+        .unwrap()
+        .clone()
+        .spawn_runner(text.to_string(), history);
     *agent_rx = Some(runner.event_rx);
     *main_abort = Some(runner.abort_handle);
     *is_running = true;
@@ -567,7 +548,7 @@ async fn mid_turn_compact_and_respawn(
         Color::DarkGrey,
     )?;
 
-    // 3. Compact the session (no-op if its text history is under the limit).
+    // 3. Compact the session.
     #[cfg(feature = "mcp")]
     let mcp_ref = ensure_mcp_manager(mcp_manager, cfg).await;
     let compress_result = handle_compress(
@@ -611,11 +592,11 @@ async fn mid_turn_compact_and_respawn(
     )
     .await;
     let history = crate::agent::runner::convert_history(session);
-    let runner = agent.as_ref().unwrap().clone().spawn_runner(
-        MID_TURN_CONTINUE_PROMPT.to_string(),
-        history,
-        cfg.retry.clone(),
-    );
+    let runner = agent
+        .as_ref()
+        .unwrap()
+        .clone()
+        .spawn_runner(MID_TURN_CONTINUE_PROMPT.to_string(), history);
     *agent_rx = Some(runner.event_rx);
     *main_abort = Some(runner.abort_handle);
     *is_running = true;
@@ -744,6 +725,7 @@ pub async fn run_interactive(
     #[cfg(feature = "advisor")] mut handoff_rx: Option<crate::extras::advisor::HandoffReceiver>,
 ) -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
+    crate::startup_profile::mark("ui:terminal_ready");
 
     // Display preference: whether the status bar shows the cost even at $0.0000.
     session.show_cost_always = cfg.resolve_show_cost_always();
@@ -756,12 +738,14 @@ pub async fn run_interactive(
     if crate::ui::statusline::needs_git_status() {
         session.refresh_git_status();
     }
+    crate::startup_profile::mark("ui:git_ready");
     let mut last_branch_check = std::time::Instant::now();
 
     #[cfg(feature = "mcp")]
     let mut mcp_manager: Option<McpClientManager> = None;
 
     let mut renderer = Renderer::new()?;
+    crate::startup_profile::mark("ui:renderer_ready");
     renderer.set_statusline_height(crate::ui::statusline::line_count());
     renderer.set_monochrome(cli.no_color);
     renderer.set_chat_margin(cfg.resolve_chat_left_margin());
@@ -782,17 +766,28 @@ pub async fn run_interactive(
     if let Some(editor) = &cfg.editor {
         input.set_editor(editor.clone());
     }
-    input.set_quick_model_names(config::quick_models_map(cfg).into_keys().collect());
+    input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
+        cfg,
+        &session.provider,
+    ));
     {
         // fixed built-in providers plus any custom gateways from config
-        let mut providers: Vec<String> = ["anthropic", "openai", "gemini", "openrouter", "ollama"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut providers: Vec<String> = [
+            "anthropic",
+            "openai",
+            "openai-codex",
+            "gemini",
+            "openrouter",
+            "ollama",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         providers.extend(cfg.custom_providers_map().keys().cloned());
         input.set_provider_names(providers);
     }
     input.load_global_history();
+    crate::startup_profile::mark("ui:history_loaded");
     let mut is_running = false;
     let mut agent_rx: Option<mpsc::Receiver<AgentEvent>> = None;
     // Abort handle for the single in-flight main run. Enforces "at most one main
@@ -859,6 +854,7 @@ pub async fn run_interactive(
     };
 
     render_session(&mut renderer, session, cli, cfg, context)?;
+    crate::startup_profile::mark("ui:session_rendered");
     let marker_path = crate::session::storage::data_dir().join("shown_welcome_msg");
     if cfg.resolve_always_show_welcome() || !marker_path.exists() {
         crate::ui::events::show_welcome(&mut renderer)?;
@@ -882,6 +878,10 @@ pub async fn run_interactive(
         btw_total_in,
         btw_total_out,
     )?;
+    crate::startup_profile::mark("ui:first_paint");
+    if crate::startup_profile::exit_after_first_paint() {
+        return Ok(());
+    }
 
     // pre-warm the current provider's live models into the picker (best-effort)
     // Moved after first paint so the TUI is visible while the network call completes.
@@ -889,6 +889,9 @@ pub async fn run_interactive(
         let provider = session.provider.to_string();
         let is_custom = cfg.custom_providers_map().contains_key(&provider);
         let ids = crate::ui::slash::warm_model_cache(&provider, is_custom, &client, cli, cfg).await;
+        input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
+            cfg, &provider,
+        ));
         input.set_live_model_names(ids);
     }
 
@@ -916,6 +919,13 @@ pub async fn run_interactive(
                         ask_tx.clone(),
                         sandbox.clone(),
                         reasoning_enabled,
+                        crate::config::resolve_reasoning_effort(
+                            cli,
+                            cfg,
+                            &session.provider,
+                            &session.model,
+                        )
+                        .as_deref(),
                         temperature,
                         extra_body,
                         #[cfg(feature = "mcp")]
@@ -959,6 +969,13 @@ pub async fn run_interactive(
                         ask_tx.clone(),
                         sandbox.clone(),
                         reasoning_enabled,
+                        crate::config::resolve_reasoning_effort(
+                            cli,
+                            cfg,
+                            &session.provider,
+                            &session.model,
+                        )
+                        .as_deref(),
                         temperature,
                         extra_body,
                         #[cfg(feature = "mcp")]
@@ -999,11 +1016,11 @@ pub async fn run_interactive(
         )
         .await;
         let history = crate::agent::runner::convert_history(session);
-        let runner = agent.as_ref().unwrap().clone().spawn_runner(
-            trigger_msg.to_string(),
-            history,
-            cfg.retry.clone(),
-        );
+        let runner = agent
+            .as_ref()
+            .unwrap()
+            .clone()
+            .spawn_runner(trigger_msg.to_string(), history);
         agent_rx = Some(runner.event_rx);
         main_abort = Some(runner.abort_handle);
         is_running = true;
@@ -1027,6 +1044,7 @@ pub async fn run_interactive(
     if auto_trigger_msg.is_none() && agent.is_none() {
         let client_clone = client.clone();
         let session_model = session.model.to_string();
+        let session_provider = session.provider.to_string();
         let cli_clone = cli.clone();
         let cfg_clone = cfg.clone();
         let context_clone = context.clone();
@@ -1049,6 +1067,12 @@ pub async fn run_interactive(
             let temperature =
                 crate::config::resolve_temperature(&cli_clone, &cfg_clone, &session_model);
             let extra_body = crate::config::resolve_extra_body(&cfg_clone, &session_model);
+            let reasoning_effort = crate::config::resolve_reasoning_effort(
+                &cli_clone,
+                &cfg_clone,
+                &session_provider,
+                &session_model,
+            );
             let a = crate::provider::build_agent(
                 model,
                 &cli_clone,
@@ -1058,6 +1082,7 @@ pub async fn run_interactive(
                 ask_tx_clone,
                 sandbox_clone,
                 reasoning_enabled,
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -1163,10 +1188,11 @@ pub async fn run_interactive(
                                             let model = client.completion_model(session.model.to_string());
                                             let temperature = crate::config::resolve_temperature(cli, cfg, &session.model);
                                             let extra_body = crate::config::resolve_extra_body(cfg, &session.model);
+                                            let reasoning_effort = crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model);
                                             agent = Some(crate::provider::build_agent(
                                                 model, cli, cfg, context,
                                                 permission.clone(), ask_tx.clone(), sandbox.clone(),
-                                                reasoning_enabled, temperature, extra_body,
+                                                reasoning_enabled, reasoning_effort.as_deref(), temperature, extra_body,
                                                 mcp_manager.as_ref(),
                                             ).await);
                                             renderer.write_line(&format!("authorized and connected '{}'", server), C_AGENT)?;
@@ -1260,6 +1286,7 @@ pub async fn run_interactive(
                             refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
                             continue;
                         }
+
                         let ctrl_r = key.code == KeyCode::Char('r')
                             && key.modifiers.contains(KeyModifiers::CONTROL);
                         if ctrl_r {
@@ -1298,28 +1325,6 @@ pub async fn run_interactive(
 
                         if input.picker.as_ref().is_some_and(|p| p.active())
                             && input.handle_picker_key(key) {
-                                // The rewind picker resolves through here: once it
-                                // confirms, perform the rewind on the live session
-                                // and drop the chosen turn back into the input box.
-                                if let Some(RewindOutcome::Confirmed(idx)) =
-                                    input.take_rewind_outcome()
-                                {
-                                    let text =
-                                        session.messages.get(idx).map(|m| m.content.to_string());
-                                    if session.rewind_to(idx) > 0 {
-                                        if let Some(text) = text {
-                                            input.load_text(&text);
-                                        }
-                                        if !cli.no_session {
-                                            let _ = crate::session::storage::save_session(session);
-                                        }
-                                        render_session(&mut renderer, session, cli, cfg, context)?;
-                                        renderer.write_line(
-                                            "rewound; /redo to restore",
-                                            Color::Green,
-                                        )?;
-                                    }
-                                }
                                 refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
                                 continue;
                             }
@@ -1408,25 +1413,6 @@ pub async fn run_interactive(
                                                 }
                                             }
                                         }
-                                        #[cfg(feature = "mcp")]
-                                        let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
-                                        apply_prompt_model(
-                                            next_name,
-                                            cfg,
-                                            cli,
-                                            &mut client,
-                                            session,
-                                            &mut agent,
-                                            context,
-                                            &permission,
-                                            &ask_tx,
-                                            &sandbox,
-                                            reasoning_enabled,
-                                            &mut renderer,
-                                            #[cfg(feature = "mcp")]
-                                            mcp_ref,
-                                        )
-                                        .await;
                                         let msg = phase.transition_message().to_string();
                                         for line in msg.lines() {
                                             renderer.write_line(
@@ -1495,6 +1481,7 @@ pub async fn run_interactive(
                             continue;
                         }
 
+                        input.set_rewind_targets(crate::ui::slash::session::rewind_target_items(session));
                         if let Some(mut text) = input.handle_key(key) {
                             #[cfg(feature = "loop")]
                             if loop_state.as_ref().is_some_and(|ls| ls.active) && !text.starts_with('/') {
@@ -1549,25 +1536,6 @@ pub async fn run_interactive(
                                         }
                                     }
                                 }
-                                #[cfg(feature = "mcp")]
-                                let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
-                                apply_prompt_model(
-                                    next_name,
-                                    cfg,
-                                    cli,
-                                    &mut client,
-                                    session,
-                                    &mut agent,
-                                    context,
-                                    &permission,
-                                    &ask_tx,
-                                    &sandbox,
-                                    reasoning_enabled,
-                                    &mut renderer,
-                                    #[cfg(feature = "mcp")]
-                                    mcp_ref,
-                                )
-                                .await;
                                 let base_msg = phase.transition_message().to_string();
                                 let msg = format!("{}\n\nAdditional instructions: {}", base_msg, trimmed);
                                 for line in msg.lines() {
@@ -1652,7 +1620,7 @@ pub async fn run_interactive(
                                     continue;
                                 }
                             }
-                            // `/btw`: fork an isolated, tool-less, single-turn side
+                            // `/btw`: rewind an isolated, tool-less, single-turn side
                             // question. The snapshot is taken by value here and never
                             // written to the session, so there is nothing to roll
                             // back. It runs on its own `btw_tx`/`btw_rx` stream and
@@ -1683,7 +1651,7 @@ pub async fn run_interactive(
                                             model, cli, cfg, context, &permission, &ask_tx, reasoning_enabled, temperature, extra_body,
                                         );
                                         let runner = btw_agent.spawn_btw(
-                                            btw_text.to_string(), snapshot, btw_tx.clone(), id, cfg.retry.clone(),
+                                            btw_text.to_string(), snapshot, btw_tx.clone(), id,
                                         );
                                         btw_abort.push((id, runner.abort_handle));
                                         btw_inflight += 1;
@@ -1732,25 +1700,6 @@ pub async fn run_interactive(
                                                     }
                                                 }
                                         }
-                                        #[cfg(feature = "mcp")]
-                                        let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
-                                        apply_prompt_model(
-                                            prompt_name,
-                                            cfg,
-                                            cli,
-                                            &mut client,
-                                            session,
-                                            &mut agent,
-                                            context,
-                                            &permission,
-                                            &ask_tx,
-                                            &sandbox,
-                                            reasoning_enabled,
-                                            &mut renderer,
-                                            #[cfg(feature = "mcp")]
-                                            mcp_ref,
-                                        )
-                                        .await;
                                         text = msg.to_string().into();
                                         is_dot_cmd = false;
                                         agent = None;
@@ -1779,25 +1728,6 @@ pub async fn run_interactive(
                                                     }
                                                 }
                                         }
-                                        #[cfg(feature = "mcp")]
-                                        let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
-                                        apply_prompt_model(
-                                            prompt_name,
-                                            cfg,
-                                            cli,
-                                            &mut client,
-                                            session,
-                                            &mut agent,
-                                            context,
-                                            &permission,
-                                            &ask_tx,
-                                            &sandbox,
-                                            reasoning_enabled,
-                                            &mut renderer,
-                                            #[cfg(feature = "mcp")]
-                                            mcp_ref,
-                                        )
-                                        .await;
                                         agent = None;
                                         renderer.write_line(&format!("switched to prompt '{}'", prompt_name), C_AGENT)?;
                                         if !cli.no_session
@@ -1831,6 +1761,9 @@ pub async fn run_interactive(
                                     let provider = session.provider.to_string();
                                     let is_custom = cfg.custom_providers_map().contains_key(&provider);
                                     let ids = crate::ui::slash::warm_model_cache(&provider, is_custom, &client, cli, cfg).await;
+                                    input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
+                                        cfg, &provider,
+                                    ));
                                     input.set_live_model_names(ids);
                                 }
                                 match result {
@@ -1950,6 +1883,8 @@ pub async fn run_interactive(
                                                     ask_tx.clone(),
                                                     sandbox.clone(),
                                                     reasoning_enabled,
+                                                    crate::config::resolve_reasoning_effort(cli, cfg, &session.provider, &session.model)
+                                                    .as_deref(),
                                                     temperature,
                                                     extra_body,
                                                     #[cfg(feature = "mcp")] mcp_ref,
@@ -1972,7 +1907,7 @@ pub async fn run_interactive(
                                             #[cfg(feature = "mcp")] mcp_ref,
                                         ).await;
                                         let history = crate::agent::runner::convert_history(session);
-                                        let runner = agent.as_ref().unwrap().clone().spawn_runner(prompt, history, cfg.retry.clone());
+                                        let runner = agent.as_ref().unwrap().clone().spawn_runner(prompt, history);
                                         agent_rx = Some(runner.event_rx);
                                         main_abort = Some(runner.abort_handle);
                                         is_running = true;
@@ -1992,7 +1927,7 @@ pub async fn run_interactive(
                                             #[cfg(feature = "mcp")] mcp_ref,
                                         ).await;
                                         let history = crate::agent::runner::convert_history(session);
-                                        let runner = agent.as_ref().unwrap().clone().spawn_runner(msg, history, cfg.retry.clone());
+                                        let runner = agent.as_ref().unwrap().clone().spawn_runner(msg, history);
                                         agent_rx = Some(runner.event_rx);
                                         main_abort = Some(runner.abort_handle);
                                         is_running = true;
@@ -2051,7 +1986,7 @@ pub async fn run_interactive(
                                                 &permission, &ask_tx, &sandbox, reasoning_enabled,
                                                 #[cfg(feature = "mcp")] mcp_ref,
                                             ).await;
-                                            let runner = agent.as_ref().unwrap().clone().spawn_runner(prompt, Vec::new(), cfg.retry.clone());
+                                            let runner = agent.as_ref().unwrap().clone().spawn_runner(prompt, Vec::new());
                                             agent_rx = Some(runner.event_rx);
                                             main_abort = Some(runner.abort_handle);
                                             is_running = true;
@@ -2178,7 +2113,7 @@ pub async fn run_interactive(
                 // `/btw` can report what the agent is doing right now. The
                 // session itself only stores the final assistant text per turn.
                 match &event {
-                    AgentEvent::ToolCall { name, args } => {
+                    AgentEvent::ToolCall { name, args, .. } => {
                         if turn_trace.len() < TURN_TRACE_MAX {
                             turn_trace.push(compact_str::CompactString::from(format!(
                                 "→ {}",
@@ -2194,7 +2129,7 @@ pub async fn run_interactive(
                             )));
                         }
                     }
-                    AgentEvent::Done { .. } | AgentEvent::Error(_) => {
+                    AgentEvent::Done { .. } | AgentEvent::Error { .. } => {
                         turn_trace.clear();
                         awaiting_compaction_relief = false;
                     }
@@ -2209,12 +2144,7 @@ pub async fn run_interactive(
                 let loop_running = loop_state.as_ref().is_some_and(|ls| ls.active);
                 #[cfg(not(feature = "loop"))]
                 let loop_running = false;
-                if let AgentEvent::CompletionCall {
-                    input_tokens,
-                    cached_input_tokens,
-                    cache_creation_input_tokens,
-                    ..
-                } = &event
+                if let AgentEvent::CompletionCall { usage, .. } = &event
                     && is_running
                     && !loop_running
                     && !cli.no_session
@@ -2222,16 +2152,8 @@ pub async fn run_interactive(
                     && session.context_window > 0
                     && let Some(threshold) = cfg.resolve_mid_turn_compact_threshold()
                 {
-                    // Use the cache-inclusive prompt size so Anthropic cache hits
-                    // (input_tokens excludes cached/cache-creation) don't understate
-                    // real context pressure and suppress mid-turn compaction.
-                    let real_input_tokens = crate::session::Session::real_input_tokens(
-                        cfg.is_anthropic_native(&session.provider),
-                        *input_tokens,
-                        *cached_input_tokens,
-                        *cache_creation_input_tokens,
-                    );
-                    let pressure = real_input_tokens as f64 / session.context_window as f64;
+                    let input_tokens = usage.input_tokens;
+                    let pressure = input_tokens as f64 / session.context_window as f64;
                     if pressure > threshold {
                         if awaiting_compaction_relief {
                             // We already compacted this turn and the very next
@@ -2239,7 +2161,7 @@ pub async fn run_interactive(
                             // exceeds the budget, so compacting again is futile.
                             // Stop the turn and show the user the arithmetic.
                             stop_turn_context_exhausted(
-                                real_input_tokens, threshold, &mut renderer, session, cfg,
+                                input_tokens, threshold, &mut renderer, session, cfg,
                                 &mut agent_rx, &mut main_abort, &mut is_running,
                                 &status_signals, &mut turn_trace, &mut response_buf,
                                 &mut response_start_line, &mut agent_line_started,
@@ -2271,7 +2193,7 @@ pub async fn run_interactive(
                 let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
                 // Peek before the event is consumed: a failed turn rolls the
                 // in-flight interactive message back into the input editor.
-                let turn_errored = matches!(&event, AgentEvent::Error(_));
+                let turn_errored = matches!(&event, AgentEvent::Error { .. });
                 handle_agent_event(
                     event, &mut renderer, session, cfg, cli, context,
                     &mut is_running, &mut agent_rx, &mut agent_line_started,
@@ -2376,13 +2298,15 @@ pub async fn run_interactive(
                 // Parallel side-question result. Rendered as a single block; it is
                 // NEVER written to the session (cost is tracked separately).
                 match bev {
-                    crate::event::BtwEvent::Done { id, response, input_tokens, output_tokens } => {
+                    crate::event::BtwEvent::Done { id, response, usage } => {
+                        let billable_input_tokens = usage.billable_input_tokens();
+                        let billable_output_tokens = usage.billable_output_tokens();
                         btw_total_cost += crate::pricing::estimate_cost(
-                            input_tokens, output_tokens,
+                            billable_input_tokens, billable_output_tokens,
                             session.input_token_cost, session.output_token_cost,
                         );
-                        btw_total_in = btw_total_in.saturating_add(input_tokens);
-                        btw_total_out = btw_total_out.saturating_add(output_tokens);
+                        btw_total_in = btw_total_in.saturating_add(billable_input_tokens);
+                        btw_total_out = btw_total_out.saturating_add(billable_output_tokens);
                         btw_abort.retain(|(i, _)| *i != id);
                         btw_inflight = btw_inflight.saturating_sub(1);
                         renderer.write_line(&format!("[btw #{}] answer:", id), C_BTW)?;

@@ -58,7 +58,7 @@ pub fn render_session(
         )?;
         renderer.write_line("", Color::White)?;
     }
-    for msg in &session.messages {
+    for (msg_idx, msg) in session.messages.iter().enumerate() {
         let (prefix, _c) = match msg.role {
             MessageRole::User => (">", Color::Green),
             MessageRole::Assistant => ("<", Color::White),
@@ -71,19 +71,36 @@ pub fn render_session(
             render_tool_result(renderer, &msg.content, cfg)?;
         } else if msg.role == MessageRole::Assistant {
             let max_width = renderer.line_width();
-            let mut styled = markdown::markdown_to_styled(&msg.content, max_width);
+            let safe = sanitize_output(&msg.content);
+            let mut styled = markdown::markdown_to_styled(&safe, max_width);
             if !styled.is_empty() {
                 styled[0].text = CompactString::from(format!("{} {}", prefix, styled[0].text));
             }
-            for entry in styled {
-                renderer.write_line(&entry.text, entry.color)?;
+            let source = Some(crate::ui::renderer::LineSource::SessionMessage {
+                index: msg_idx,
+                role: msg.role,
+            });
+            for mut entry in styled {
+                entry.source = source;
+                renderer.write_line_with_source(&entry.text, entry.color, entry.source)?;
             }
         } else {
+            let source = Some(crate::ui::renderer::LineSource::SessionMessage {
+                index: msg_idx,
+                role: msg.role,
+            });
             for line in msg.content.lines() {
-                renderer.write_line(&format!("{} {}", prefix, line), _c)?;
+                renderer.write_line_with_source(&format!("{} {}", prefix, line), _c, source)?;
             }
         }
-        renderer.write_line("", Color::White)?;
+        renderer.write_line_with_source(
+            "",
+            Color::White,
+            Some(crate::ui::renderer::LineSource::SessionMessage {
+                index: msg_idx,
+                role: msg.role,
+            }),
+        )?;
     }
     if session.messages.is_empty() {
         let cwd = std::env::current_dir().ok();
