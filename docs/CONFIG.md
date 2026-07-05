@@ -372,6 +372,8 @@ segments = [
   { item = "separator", text = " " },
   { item = "tokens_output", color = "cyan" },
   { item = "separator", text = " " },
+  { item = "tokens_reasoning", color = "dark_magenta" },
+  { item = "separator", text = " " },
   { item = "cost", color = "green" },
 ]
 
@@ -391,7 +393,7 @@ Each segment has:
 | `left`  | Powerline cap glyph drawn before the item. A name (see below) or any literal string. Optional. |
 | `right` | Powerline cap glyph drawn after the item. Optional. |
 | `icon`  | Glyph shown before the value. `true` uses the item's built-in icon; a string sets a custom one (a named icon or a literal glyph). Optional. Needs a Nerd Font. |
-| `always` | Force a numeric item (`tokens_input`, `tokens_output`, `cost`) to show even when its value is `0` (normally hidden until non-zero). Optional. |
+| `always` | Force a numeric item (`tokens_input`, `tokens_output`, `tokens_reasoning`, `cost`) to show even when its value is `0` (normally hidden until non-zero). Optional. |
 
 Items with a built-in icon (used by `icon = true`): `git_branch`, `git_changes`,
 `git_status`, `cwd`, `model`, `cost`, `context_used`/`context_max`/
@@ -440,6 +442,7 @@ Available items:
 | `provider`            | The active provider name. |
 | `tokens_input`        | Total input tokens this session. |
 | `tokens_output`       | Total output tokens this session. |
+| `tokens_reasoning`    | Total provider-reported reasoning tokens this session (`thinking:<n>`). |
 | `context_used`        | Current context size in tokens. |
 | `context_max`         | The model's context window. |
 | `context_percentage`  | Context used as a percentage of the max. |

@@ -81,6 +81,19 @@ fn skipped_optional_item_drops_adjacent_separator() {
 }
 
 #[test]
+fn reasoning_tokens_show_as_thinking() {
+    let spec = StatusLineConfig {
+        lines: vec![StatusLineLine {
+            segments: vec![seg("tokens_reasoning")],
+        }],
+    };
+    let mut session = Session::new("openrouter", "m", 1000);
+    session.total_reasoning_tokens = 12_000;
+    let lines = statusline::build_lines(&spec, &session, &ctx());
+    assert_eq!(line_text(&lines[0]), "thinking:12k");
+}
+
+#[test]
 fn cost_shown_when_always_flag_set() {
     let spec = StatusLineConfig {
         lines: vec![StatusLineLine {

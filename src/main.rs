@@ -760,11 +760,14 @@ async fn main() -> anyhow::Result<()> {
             let print_result = response_result?;
             if !cli.no_session {
                 session.add_message(MessageRole::User, &msg);
+                let mut provider_usage =
+                    session::SessionTokenUsage::from(print_result.context_usage);
+                provider_usage.reasoning_tokens = print_result.usage.reasoning_tokens;
                 session.add_message_with_reasoning_and_usage(
                     MessageRole::Assistant,
                     &print_result.response,
                     print_result.reasoning,
-                    Some(print_result.context_usage.into()),
+                    Some(provider_usage),
                 );
                 session.total_input_tokens = session
                     .total_input_tokens
@@ -775,6 +778,9 @@ async fn main() -> anyhow::Result<()> {
                 session.total_output_tokens = session
                     .total_output_tokens
                     .saturating_add(print_result.usage.output_tokens);
+                session.total_reasoning_tokens = session
+                    .total_reasoning_tokens
+                    .saturating_add(print_result.usage.reasoning_tokens);
                 session::storage::save_session(&session)?;
                 let _ =
                     session::chat_history::append_entry(&session::chat_history::ChatHistoryEntry {

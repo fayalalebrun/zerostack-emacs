@@ -1378,8 +1378,8 @@
 (ert-deftest zerostack-test-input-line-shows-thinking-level ()
   (zerostack-test--with-buffer
    (setq zerostack--model "gpt-test")
-   (zerostack--handle-ok '(:request 1 :thinking "off"))
-   (should (string-match-p "thinking:off | gpt-test" (buffer-string)))))
+   (zerostack--handle-ok '(:request 1 :thinking "off" :reasoning-tokens 12000))
+   (should (string-match-p "thinking:off | thinking:12k | gpt-test" (buffer-string)))))
 
 (ert-deftest zerostack-test-control-return-inserts-newline ()
   (zerostack-test--with-buffer

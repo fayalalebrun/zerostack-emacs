@@ -5,7 +5,7 @@ use crossterm::style::Color;
 use crate::cli::Cli;
 use crate::config::{Config, ResolvedShowToolDetails};
 use crate::context::ContextFiles;
-use crate::session::{MessageRole, Session};
+use crate::session::{MessageRole, Session, SessionTokenUsage};
 use crate::ui::markdown;
 use crate::ui::renderer::Renderer;
 
@@ -84,6 +84,9 @@ pub fn render_session(
                 entry.source = source;
                 renderer.write_line_with_source(&entry.text, entry.color, entry.source)?;
             }
+            if let Some(marker) = thinking_marker(msg.provider_usage) {
+                renderer.write_line_with_source(&marker, Color::DarkMagenta, source)?;
+            }
         } else {
             let source = Some(crate::ui::renderer::LineSource::SessionMessage {
                 index: msg_idx,
@@ -129,6 +132,11 @@ pub fn render_session(
         renderer.write_line("", Color::White)?;
     }
     Ok(())
+}
+
+pub(crate) fn thinking_marker(usage: Option<SessionTokenUsage>) -> Option<String> {
+    let tokens = usage?.reasoning_tokens;
+    (tokens > 0).then(|| format!("thinking:{}", crate::ui::statusline::fmt_tokens(tokens)))
 }
 
 fn render_tool_result(renderer: &mut Renderer, content: &str, cfg: &Config) -> anyhow::Result<()> {

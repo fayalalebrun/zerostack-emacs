@@ -494,13 +494,18 @@ async fn handle_agent_done(
         renderer.write("< ", C_AGENT)?;
     }
 
+    let mut provider_usage = crate::session::SessionTokenUsage::from(context_usage);
+    provider_usage.reasoning_tokens = usage.reasoning_tokens;
+    if let Some(marker) = crate::ui::events::thinking_marker(Some(provider_usage)) {
+        renderer.write_line(&marker, Color::DarkMagenta)?;
+    }
     renderer.write_line("", Color::White)?;
     renderer.write_line("", Color::White)?;
     session.add_message_with_reasoning_and_usage(
         MessageRole::Assistant,
         &response,
         reasoning,
-        Some(context_usage.into()),
+        Some(provider_usage),
     );
     let billable_input_tokens = usage.billable_input_tokens();
     let billable_output_tokens = usage.billable_output_tokens();
@@ -513,6 +518,9 @@ async fn handle_agent_done(
     session.total_output_tokens = session
         .total_output_tokens
         .saturating_add(billable_output_tokens);
+    session.total_reasoning_tokens = session
+        .total_reasoning_tokens
+        .saturating_add(usage.reasoning_tokens);
 
     session.total_cost += crate::pricing::estimate_cost(
         billable_input_tokens,

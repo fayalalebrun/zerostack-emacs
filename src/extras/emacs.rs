@@ -49,6 +49,8 @@ mod imp {
         pub updated_at: String,
         pub title: String,
         pub tokens: u64,
+        #[serde(default)]
+        pub reasoning_tokens: u64,
         pub context_window: u64,
         pub protocol: u32,
         pub socket: String,
@@ -454,6 +456,7 @@ mod imp {
                 updated_at: session.updated_at.to_string(),
                 title: session.title(),
                 tokens: session.effective_context_tokens(),
+                reasoning_tokens: session.total_reasoning_tokens,
                 context_window: session.context_window,
                 protocol: PROTOCOL_VERSION,
                 socket: socket_path.to_string_lossy().to_string(),
@@ -2810,8 +2813,8 @@ mod imp {
                         .broadcast_event(
                             "completion-call",
                             format!(
-                                " :turn {} :call-index {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
-                                turn, call_index, usage.input_tokens, usage.output_tokens, usage.context_tokens(), context_window,
+                                " :turn {} :call-index {} :input-tokens {} :output-tokens {} :reasoning-tokens {} :tokens {} :context-window {}",
+                                turn, call_index, usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.context_tokens(), context_window,
                             ),
                         )
                         .await;
@@ -2890,8 +2893,10 @@ mod imp {
                         Some(start) => start,
                         None => server.mutable.lock().await.line_count,
                     };
+                    let mut provider_usage = crate::session::SessionTokenUsage::from(context_usage);
+                    provider_usage.reasoning_tokens = usage.reasoning_tokens;
                     let mut lines = with_source_lines(
-                        render_assistant_final_lines(&response, cols),
+                        render_assistant_final_lines(&response, Some(provider_usage), cols),
                         assistant_index,
                         MessageRole::Assistant,
                     );
@@ -2899,13 +2904,19 @@ mod imp {
                     server
                         .send_render_event("assistant-render", turn, start, lines)
                         .await;
-                    let (tokens, context_window, billable_input_tokens, billable_output_tokens) = {
+                    let (
+                        tokens,
+                        context_window,
+                        billable_input_tokens,
+                        billable_output_tokens,
+                        billable_reasoning_tokens,
+                    ) = {
                         let mut session = server.session.lock().await;
                         session.add_message_with_reasoning_and_usage(
                             MessageRole::Assistant,
                             &response,
                             reasoning,
-                            Some(context_usage.into()),
+                            Some(provider_usage),
                         );
                         let billable_input_tokens = usage.billable_input_tokens();
                         let billable_output_tokens = usage.billable_output_tokens();
@@ -2918,6 +2929,9 @@ mod imp {
                         session.total_output_tokens = session
                             .total_output_tokens
                             .saturating_add(billable_output_tokens);
+                        session.total_reasoning_tokens = session
+                            .total_reasoning_tokens
+                            .saturating_add(usage.reasoning_tokens);
                         session.total_cost += crate::pricing::estimate_cost(
                             billable_input_tokens,
                             billable_output_tokens,
@@ -2936,6 +2950,7 @@ mod imp {
                             session.context_window,
                             billable_input_tokens,
                             billable_output_tokens,
+                            usage.reasoning_tokens,
                         )
                     };
                     if let Err(e) = maybe_auto_compact_session(&server, turn).await {
@@ -2959,8 +2974,8 @@ mod imp {
                         .broadcast_event(
                             "done",
                             format!(
-                                " :turn {} :input-tokens {} :output-tokens {} :tokens {} :context-window {}",
-                                turn, billable_input_tokens, billable_output_tokens, tokens, context_window,
+                                " :turn {} :input-tokens {} :output-tokens {} :reasoning-tokens {} :tokens {} :context-window {}",
+                                turn, billable_input_tokens, billable_output_tokens, billable_reasoning_tokens, tokens, context_window,
                             ),
                         )
                         .await;
@@ -3270,7 +3285,7 @@ mod imp {
                     );
                 }
                 _ => out.extend(
-                    render_message_lines(msg.role, &msg.content, cols)
+                    render_message_lines(msg.role, &msg.content, msg.provider_usage, cols)
                         .into_iter()
                         .map(|line| line.with_source(message_index, msg.role)),
                 ),
@@ -3307,10 +3322,15 @@ mod imp {
         out
     }
 
-    fn render_message_lines(role: MessageRole, content: &str, cols: usize) -> Vec<WireLine> {
+    fn render_message_lines(
+        role: MessageRole,
+        content: &str,
+        provider_usage: Option<crate::session::SessionTokenUsage>,
+        cols: usize,
+    ) -> Vec<WireLine> {
         match role {
             MessageRole::User => render_user_lines(content),
-            MessageRole::Assistant => render_assistant_final_lines(content, cols),
+            MessageRole::Assistant => render_assistant_final_lines(content, provider_usage, cols),
             MessageRole::System => render_compaction_summary_lines(content),
             MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
             MessageRole::ToolResult => render_tool_result_lines(None, content, None, &[]),
@@ -3448,8 +3468,15 @@ mod imp {
         out
     }
 
-    fn render_assistant_final_lines(text: &str, cols: usize) -> Vec<WireLine> {
+    fn render_assistant_final_lines(
+        text: &str,
+        provider_usage: Option<crate::session::SessionTokenUsage>,
+        cols: usize,
+    ) -> Vec<WireLine> {
         let mut out = render_assistant_lines(text, cols, false);
+        if let Some(marker) = crate::ui::events::thinking_marker(provider_usage) {
+            out.push(WireLine::new(marker, "zs-reasoning"));
+        }
         out.push(blank_line());
         out.push(blank_line());
         out
@@ -4350,7 +4377,7 @@ mod imp {
 
     fn meta_to_sexp(meta: &SessionMeta) -> String {
         format!(
-            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {})",
+            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {})",
             sexp_quote(&meta.session_id),
             meta.pid,
             sexp_quote(&meta.cwd),
@@ -4360,6 +4387,7 @@ mod imp {
             sexp_quote(&meta.updated_at),
             sexp_quote(&meta.title),
             meta.tokens,
+            meta.reasoning_tokens,
             meta.context_window,
             meta.protocol,
             sexp_quote(&meta.socket),
@@ -4948,6 +4976,29 @@ mod imp {
 
             assert!(encoded.contains(":message-index 0 :role user"));
             assert!(encoded.contains(":message-index 1 :role assistant"));
+        }
+
+        #[tokio::test]
+        async fn session_render_lines_include_persisted_thinking_tokens() {
+            let mut session = Session::new("openai", "gpt", 1000);
+            session.add_message_with_reasoning_and_usage(
+                MessageRole::Assistant,
+                "world",
+                Vec::new(),
+                Some(crate::session::SessionTokenUsage {
+                    reasoning_tokens: 12_000,
+                    ..Default::default()
+                }),
+            );
+            let cli = Cli::default();
+            let cfg = Config::default();
+            let context = crate::context::load(true);
+            let encoded = lines_to_sexp(
+                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await,
+            );
+
+            assert!(encoded.contains("thinking:12k"));
+            assert!(encoded.contains("zs-reasoning"));
         }
 
         #[tokio::test]

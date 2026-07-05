@@ -260,6 +260,8 @@ they are not persisted in session JSON.
 Assistant markdown is rendered by zerostack and streamed as events like
 `(event :type assistant-render :replace-from N :lines ((:text "< hi" :face zs-normal)))`.
 Emacs should delete from `:replace-from` and insert the provided line batch.
+Provider usage events include `:reasoning-tokens` when the provider reports
+thinking token usage, on both `completion-call` and final `done` events.
 
 Reasoning chunks and final tool outputs are written to files inside the live
 session runtime directory instead of being sent inline. Events include an

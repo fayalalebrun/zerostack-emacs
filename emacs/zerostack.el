@@ -252,6 +252,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--subagent-provider nil)
 (defvar-local zerostack--subagent-model nil)
 (defvar-local zerostack--tokens nil)
+(defvar-local zerostack--reasoning-tokens nil)
 (defvar-local zerostack--context-window nil)
 (defvar-local zerostack--protocol nil)
 (defvar-local zerostack--cols nil)
@@ -315,6 +316,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--subagent-provider nil)
   (setq-local zerostack--subagent-model nil)
   (setq-local zerostack--tokens nil)
+  (setq-local zerostack--reasoning-tokens nil)
   (setq-local zerostack--context-window nil)
   (setq-local zerostack--metadata-status-request nil)
   (setq-local zerostack--line-markers nil)
@@ -2524,6 +2526,8 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     (setq zerostack--subagent-model (format "%s" model)))
   (when-let ((tokens (plist-get plist :tokens)))
     (setq zerostack--tokens tokens))
+  (when-let ((tokens (plist-get plist :reasoning-tokens)))
+    (setq zerostack--reasoning-tokens tokens))
   (when-let ((window (plist-get plist :context-window)))
     (setq zerostack--context-window window))
   (when-let ((level (plist-get plist :thinking)))
@@ -3181,6 +3185,9 @@ inserted into the transcript."
                     (format "reasoning:%s" zerostack--reasoning-effort))
                (and zerostack--thinking-level
                     (format "thinking:%s" zerostack--thinking-level))
+               (and (numberp zerostack--reasoning-tokens)
+                    (> zerostack--reasoning-tokens 0)
+                    (format "thinking:%s" (zerostack--format-token-count zerostack--reasoning-tokens)))
                zerostack--model
                (and zerostack--subagent-model
                     (format "subagent:%s" zerostack--subagent-model))
