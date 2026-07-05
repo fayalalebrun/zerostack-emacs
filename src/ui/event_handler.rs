@@ -216,6 +216,7 @@ pub async fn handle_agent_event(
             name,
             output,
             loaded_context,
+            duration_ms,
         } => {
             session.add_tool_result_structured_with_context(
                 &name,
@@ -223,6 +224,7 @@ pub async fn handle_agent_event(
                 &id,
                 call_id.as_deref(),
                 loaded_context,
+                duration_ms,
             );
             save_session_if_enabled(session, cli, renderer)?;
             if name == "todo_write" {
@@ -318,6 +320,7 @@ pub async fn handle_agent_event(
                     .as_ref()
                     .map(|s| s.resolve())
                     .unwrap_or(ResolvedShowToolDetails::Limited(3));
+                let duration = tool_duration_suffix(&name, duration_ms);
                 match show_details {
                     ResolvedShowToolDetails::Off => {}
                     ResolvedShowToolDetails::Limited(max_lines) => {
@@ -327,23 +330,29 @@ pub async fn handle_agent_event(
                         if lines.len() > max_lines {
                             let shown = lines[..max_lines].join("\n");
                             let summary = format!(
-                                "◈ result ({} chars, {} lines, showing {}):\n{}",
+                                "◈ result ({} chars, {} lines, showing {}){}:\n{}",
                                 char_count,
                                 lines.len(),
                                 max_lines,
+                                duration,
                                 shown
                             );
                             renderer.write_line(&summary, Color::DarkGrey)?;
                         } else {
-                            let summary =
-                                format!("◈ result ({} chars):\n{}", char_count, sanitized);
+                            let summary = format!(
+                                "◈ result ({} chars){}:\n{}",
+                                char_count, duration, sanitized
+                            );
                             renderer.write_line(&summary, Color::DarkGrey)?;
                         }
                     }
                     ResolvedShowToolDetails::Unlimited => {
                         let sanitized = sanitize_output(&output);
                         let char_count = sanitized.chars().count();
-                        let summary = format!("◈ result ({} chars):\n{}", char_count, sanitized);
+                        let summary = format!(
+                            "◈ result ({} chars){}:\n{}",
+                            char_count, duration, sanitized
+                        );
                         renderer.write_line(&summary, Color::DarkGrey)?;
                     }
                 }
@@ -435,6 +444,14 @@ pub async fn handle_agent_event(
         }
     }
     Ok(())
+}
+
+fn tool_duration_suffix(name: &str, duration_ms: u64) -> String {
+    if name == "bash" && duration_ms > 0 {
+        format!(" [{}]", crate::ui::events::fmt_duration_ms(duration_ms))
+    } else {
+        String::new()
+    }
 }
 
 fn save_session_if_enabled(

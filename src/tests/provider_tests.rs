@@ -243,6 +243,7 @@ fn serialize_multiple_roles() {
                 call_id: None,
                 name: CompactString::new("read"),
                 loaded_context: Vec::new(),
+                duration_ms: 0,
             }),
         },
     ];

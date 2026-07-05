@@ -5,7 +5,7 @@ use crossterm::style::Color;
 use crate::cli::Cli;
 use crate::config::{Config, ResolvedShowToolDetails};
 use crate::context::ContextFiles;
-use crate::session::{MessageRole, Session, SessionTokenUsage};
+use crate::session::{MessageRole, Session, SessionTokenUsage, SessionToolResult};
 use crate::ui::markdown;
 use crate::ui::renderer::Renderer;
 
@@ -68,7 +68,7 @@ pub fn render_session(
             MessageRole::SubagentToolCall => ("⌥", super::C_TOOL),
         };
         if msg.role == MessageRole::ToolResult {
-            render_tool_result(renderer, &msg.content, cfg)?;
+            render_tool_result(renderer, &msg.content, msg.tool_result.as_ref(), cfg)?;
         } else if msg.role == MessageRole::Assistant {
             let max_width = renderer.line_width();
             let safe = sanitize_output(&msg.content);
@@ -139,11 +139,37 @@ pub(crate) fn thinking_marker(usage: Option<SessionTokenUsage>) -> Option<String
     (tokens > 0).then(|| format!("thinking:{}", crate::ui::statusline::fmt_tokens(tokens)))
 }
 
-fn render_tool_result(renderer: &mut Renderer, content: &str, cfg: &Config) -> anyhow::Result<()> {
+pub(crate) fn fmt_duration_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let secs = ms / 1_000;
+        format!("{}m{}s", secs / 60, secs % 60)
+    }
+}
+
+fn tool_duration_suffix(tool_result: Option<&SessionToolResult>) -> String {
+    match tool_result {
+        Some(result) if result.name == "bash" && result.duration_ms > 0 => {
+            format!(" [{}]", fmt_duration_ms(result.duration_ms))
+        }
+        _ => String::new(),
+    }
+}
+
+fn render_tool_result(
+    renderer: &mut Renderer,
+    content: &str,
+    tool_result: Option<&SessionToolResult>,
+    cfg: &Config,
+) -> anyhow::Result<()> {
     let output = content
         .split_once(":\n")
         .map(|(_, output)| output)
         .unwrap_or(content);
+    let duration = tool_duration_suffix(tool_result);
     let show_details = cfg
         .show_tool_details
         .as_ref()
@@ -164,17 +190,21 @@ fn render_tool_result(renderer: &mut Renderer, content: &str, cfg: &Config) -> a
                 let shown = lines[..max_lines].join("\n");
                 renderer.write_line(
                     &format!(
-                        "◈ result ({} chars, {} lines, showing {}):\n{}",
+                        "◈ result ({} chars, {} lines, showing {}){}:\n{}",
                         char_count,
                         lines.len(),
                         max_lines,
+                        duration,
                         shown
                     ),
                     Color::DarkGrey,
                 )?;
             } else {
                 renderer.write_line(
-                    &format!("◈ result ({} chars):\n{}", char_count, sanitized),
+                    &format!(
+                        "◈ result ({} chars){}:\n{}",
+                        char_count, duration, sanitized
+                    ),
                     Color::DarkGrey,
                 )?;
             }
@@ -183,7 +213,10 @@ fn render_tool_result(renderer: &mut Renderer, content: &str, cfg: &Config) -> a
             let sanitized = sanitize_output(output);
             let char_count = sanitized.chars().count();
             renderer.write_line(
-                &format!("◈ result ({} chars):\n{}", char_count, sanitized),
+                &format!(
+                    "◈ result ({} chars){}:\n{}",
+                    char_count, duration, sanitized
+                ),
                 Color::DarkGrey,
             )?;
         }

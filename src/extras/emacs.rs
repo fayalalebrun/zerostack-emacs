@@ -3,6 +3,7 @@ mod imp {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::Instant;
 
     use anyhow::Context as _;
     use compact_str::CompactString;
@@ -89,6 +90,11 @@ mod imp {
         socket_path: PathBuf,
     }
 
+    struct ActiveLiveOutput {
+        path: PathBuf,
+        started_at: Instant,
+    }
+
     struct MutableState {
         seq: u64,
         cols: usize,
@@ -104,6 +110,7 @@ mod imp {
         next_permission_id: u64,
         pending_permissions: HashMap<u64, AskRequest>,
         last_event_at: Option<String>,
+        active_live_output: Option<ActiveLiveOutput>,
     }
 
     struct CompactionOutcome {
@@ -344,6 +351,7 @@ mod imp {
                 next_permission_id: 1,
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
+                active_live_output: None,
             }),
             registry_dir: registration.dir.clone(),
             socket_path: registration.socket_path.clone(),
@@ -2126,6 +2134,81 @@ mod imp {
         })
     }
 
+    async fn persist_interrupted_live_output(server: &Arc<Server>) -> anyhow::Result<bool> {
+        let active = server.mutable.lock().await.active_live_output.take();
+        let Some(active) = active else {
+            return Ok(false);
+        };
+        let bytes = tokio::fs::read(&active.path).await.unwrap_or_default();
+        let partial = String::from_utf8_lossy(&bytes);
+        let output = if partial.is_empty() {
+            "[interrupted: bash was aborted before producing output]".to_string()
+        } else {
+            format!("[interrupted: partial bash output captured before abort]\n{partial}")
+        };
+        let duration_ms = active
+            .started_at
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let content = {
+            let mut session = server.session.lock().await;
+            let content = session.add_tool_result_for_latest_unresolved_call(
+                "bash",
+                &output,
+                Vec::new(),
+                duration_ms,
+            );
+            if content.is_some() && !server.cli.no_session {
+                crate::session::storage::save_session(&session)?;
+            }
+            content
+        };
+        let Some(content) = content else {
+            return Ok(false);
+        };
+        let safe = sanitize_output(&content);
+        let turn = server.mutable.lock().await.turn;
+        let artifact = match server
+            .create_artifact(turn, "tool-output", "bash", &safe)
+            .await
+        {
+            Ok(artifact) => Some(artifact),
+            Err(e) => {
+                tracing::warn!("failed to write interrupted Emacs tool output artifact: {e}");
+                None
+            }
+        };
+        server
+            .append_lines(
+                "tool-render",
+                turn,
+                render_tool_result_lines(
+                    Some("bash"),
+                    &safe,
+                    artifact.clone(),
+                    &[],
+                    tool_duration_ms("bash", duration_ms),
+                ),
+            )
+            .await;
+        server
+            .broadcast_event(
+                "tool-result",
+                format!(
+                    " :turn {} :name {} :chars {} :preview {}{}",
+                    turn,
+                    sexp_quote("bash"),
+                    safe.chars().count(),
+                    sexp_quote(&preview_text(&safe)),
+                    artifact_field(artifact.as_ref()),
+                ),
+            )
+            .await;
+        Ok(true)
+    }
+
     async fn handle_abort(
         server: &Arc<Server>,
         cmd: &Command,
@@ -2143,6 +2226,7 @@ mod imp {
         };
         server.sandbox.kill_active();
         if aborted {
+            let _ = persist_interrupted_live_output(server).await?;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -2545,6 +2629,7 @@ mod imp {
         {
             let mut mutable = server.mutable.lock().await;
             mutable.abort_handle = Some(runner.abort_handle.clone());
+            mutable.active_live_output = None;
         }
 
         let mut response_buf = String::new();
@@ -2722,7 +2807,11 @@ mod imp {
                     name,
                     output,
                     loaded_context,
+                    duration_ms,
                 } => {
+                    if name == "bash" {
+                        server.mutable.lock().await.active_live_output = None;
+                    }
                     let loaded_lines = loaded_context
                         .iter()
                         .map(|path| {
@@ -2740,6 +2829,7 @@ mod imp {
                             &id,
                             call_id.as_deref(),
                             loaded_context,
+                            duration_ms,
                         );
                         let content = sanitize_output(&content);
                         if !server.cli.no_session {
@@ -2763,6 +2853,7 @@ mod imp {
                         &safe,
                         artifact.clone(),
                         &[],
+                        tool_duration_ms(&name, duration_ms),
                     ));
                     server.append_lines("tool-render", turn, lines).await;
                     let preview = preview_text(&safe);
@@ -3208,6 +3299,10 @@ mod imp {
                 }
             };
             let path = artifact.path.clone();
+            server.mutable.lock().await.active_live_output = Some(ActiveLiveOutput {
+                path: path.clone(),
+                started_at: Instant::now(),
+            });
             server
                 .append_lines(
                     "tool-render",
@@ -3333,7 +3428,7 @@ mod imp {
             MessageRole::Assistant => render_assistant_final_lines(content, provider_usage, cols),
             MessageRole::System => render_compaction_summary_lines(content),
             MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
-            MessageRole::ToolResult => render_tool_result_lines(None, content, None, &[]),
+            MessageRole::ToolResult => render_tool_result_lines(None, content, None, &[], 0),
             MessageRole::SubagentToolCall => render_prefixed_lines("⌥", content, "zs-tool"),
         }
     }
@@ -3360,7 +3455,13 @@ mod imp {
                 .ok(),
             _ => None,
         };
-        render_tool_result_lines(name, &safe, artifact, loaded_context)
+        let duration_ms = msg
+            .tool_result
+            .as_ref()
+            .filter(|result| result.name == "bash")
+            .map(|result| result.duration_ms)
+            .unwrap_or(0);
+        render_tool_result_lines(name, &safe, artifact, loaded_context, duration_ms)
     }
 
     fn render_compaction_summary_lines(content: &str) -> Vec<WireLine> {
@@ -3388,11 +3489,24 @@ mod imp {
         out
     }
 
+    fn tool_duration_ms(name: &str, duration_ms: u64) -> u64 {
+        if name == "bash" { duration_ms } else { 0 }
+    }
+
+    fn tool_duration_suffix(duration_ms: u64) -> String {
+        if duration_ms > 0 {
+            format!(" [{}]", crate::ui::events::fmt_duration_ms(duration_ms))
+        } else {
+            String::new()
+        }
+    }
+
     fn render_tool_result_lines(
         name: Option<&str>,
         content: &str,
         artifact: Option<ArtifactInfo>,
         loaded_context: &[CompactString],
+        duration_ms: u64,
     ) -> Vec<WireLine> {
         let mut out = loaded_context
             .iter()
@@ -3415,12 +3529,14 @@ mod imp {
             return out;
         }
 
+        let duration = tool_duration_suffix(duration_ms);
         if let Some(artifact) = artifact {
             out.push(WireLine::with_artifact(
                 format!(
-                    "  output: {} ({})",
+                    "  output: {} ({}){}",
                     sanitize_output(name.unwrap_or("tool")),
                     format_bytes(artifact.bytes),
+                    duration,
                 ),
                 "zs-link",
                 artifact,
@@ -3430,9 +3546,10 @@ mod imp {
                 .split_once(":\n")
                 .map(|(_, output)| output)
                 .unwrap_or(content);
-            for line in output.lines() {
+            for (idx, line) in output.lines().enumerate() {
+                let suffix = if idx == 0 { duration.as_str() } else { "" };
                 out.push(WireLine::new(
-                    format!("◈ result {}", sanitize_output(line)),
+                    format!("◈ result{} {}", suffix, sanitize_output(line)),
                     "zs-muted",
                 ));
             }
@@ -4872,6 +4989,7 @@ mod imp {
                 "goal_update:\nGoal:\n  [x] [high] Ship it\n      evaluator: PASS — verified files\n",
                 None,
                 &[],
+                0,
             );
             let text = lines
                 .iter()
@@ -5050,17 +5168,18 @@ mod imp {
                 bytes: 8,
                 preview: "bash: hi".to_string(),
             };
-            let lines = render_tool_result_lines(Some("bash"), "bash:\nhi\n", Some(artifact), &[]);
+            let lines =
+                render_tool_result_lines(Some("bash"), "bash:\nhi\n", Some(artifact), &[], 1250);
             let encoded = lines_to_sexp(&lines);
 
-            assert!(encoded.contains("  output: bash (8 B)"));
+            assert!(encoded.contains("  output: bash (8 B) [1.2s]"));
             assert!(encoded.contains(":artifact"));
             assert!(!encoded.contains("◈ result hi"));
         }
 
         #[test]
         fn tool_result_lines_fall_back_to_inline_output_without_artifact() {
-            let lines = render_tool_result_lines(None, "bash:\nhi\n", None, &[]);
+            let lines = render_tool_result_lines(None, "bash:\nhi\n", None, &[], 0);
             let encoded = lines_to_sexp(&lines);
 
             assert!(encoded.contains("◈ result hi"));
@@ -5113,6 +5232,7 @@ mod imp {
                 next_permission_id: 1,
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
+                active_live_output: None,
             };
 
             assert!(!should_report_agent_ended(&mutable, 1));
@@ -5408,6 +5528,39 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn interrupted_live_output_persists_tool_result() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server(prompts);
+            drop(listener);
+            let path = registration.dir.join("partial.txt");
+            tokio::fs::write(&path, "hello\nhello\n").await.unwrap();
+            {
+                let mut session = server.session.lock().await;
+                session.add_tool_call_structured(
+                    "bash",
+                    &serde_json::json!({"command": "loop"}),
+                    "call_1",
+                    Some("provider_1"),
+                );
+            }
+            server.mutable.lock().await.active_live_output = Some(ActiveLiveOutput {
+                path,
+                started_at: Instant::now(),
+            });
+
+            assert!(persist_interrupted_live_output(&server).await.unwrap());
+
+            let session = server.session.lock().await;
+            let result = session.messages.last().unwrap();
+            assert_eq!(result.role, MessageRole::ToolResult);
+            assert!(result.content.contains("partial bash output"));
+            assert!(result.content.contains("hello\nhello"));
+            assert_eq!(result.tool_result.as_ref().unwrap().id, "call_1");
+            assert!(server.mutable.lock().await.active_live_output.is_none());
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
         async fn abort_over_socket_allows_provider_to_receive_next_prompt() {
             let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
             let (server, registration, listener) = test_server(prompts.clone());
@@ -5485,6 +5638,7 @@ mod imp {
                     next_permission_id: 1,
                     pending_permissions: HashMap::new(),
                     last_event_at: None,
+                    active_live_output: None,
                 }),
                 registry_dir: registration.dir.clone(),
                 socket_path,

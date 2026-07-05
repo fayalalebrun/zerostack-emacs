@@ -533,6 +533,11 @@ where
                         } else {
                             Vec::new()
                         };
+                        let duration_ms = if name == "bash" {
+                            crate::agent::tools::bash::take_bash_duration_ms()
+                        } else {
+                            0
+                        };
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
                                 id: CompactString::new(tool_result.id.clone()),
@@ -540,6 +545,7 @@ where
                                 name: CompactString::new(name),
                                 output: CompactString::from(output),
                                 loaded_context,
+                                duration_ms,
                             })
                             .await;
                         tool_interactions.push(tool_result.clone().into());

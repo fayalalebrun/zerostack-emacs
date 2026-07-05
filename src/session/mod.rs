@@ -58,6 +58,12 @@ pub struct SessionToolResult {
     pub name: CompactString,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loaded_context: Vec<CompactString>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub duration_ms: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,7 +542,44 @@ impl Session {
         id: &str,
         call_id: Option<&str>,
     ) -> String {
-        self.add_tool_result_structured_with_context(name, output, id, call_id, Vec::new())
+        self.add_tool_result_structured_with_context(name, output, id, call_id, Vec::new(), 0)
+    }
+
+    pub fn add_tool_result_for_latest_unresolved_call(
+        &mut self,
+        name: &str,
+        output: &str,
+        loaded_context: Vec<String>,
+        duration_ms: u64,
+    ) -> Option<String> {
+        let (id, call_id) = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(idx, msg)| msg.tool_call.as_ref().map(|call| (idx, call)))
+            .find(|(idx, call)| {
+                call.name == name
+                    && !self.messages[idx + 1..].iter().any(|msg| {
+                        msg.tool_result
+                            .as_ref()
+                            .is_some_and(|result| result.id == call.id)
+                    })
+            })
+            .map(|(_, call)| {
+                (
+                    call.id.to_string(),
+                    call.call_id.as_ref().map(ToString::to_string),
+                )
+            })?;
+        Some(self.add_tool_result_structured_with_context(
+            name,
+            output,
+            &id,
+            call_id.as_deref(),
+            loaded_context,
+            duration_ms,
+        ))
     }
 
     pub fn add_tool_result_structured_with_context(
@@ -546,6 +589,7 @@ impl Session {
         id: &str,
         call_id: Option<&str>,
         loaded_context: Vec<String>,
+        duration_ms: u64,
     ) -> String {
         let content = self.tool_result_content(name, output);
         let tokens = Self::estimate_tokens(&content);
@@ -561,6 +605,7 @@ impl Session {
                 call_id: call_id.map(CompactString::new),
                 name: CompactString::new(name),
                 loaded_context: loaded_context.into_iter().map(CompactString::new).collect(),
+                duration_ms,
             }),
         });
         self.total_estimated_tokens = self.total_estimated_tokens.saturating_add(tokens);
@@ -827,6 +872,7 @@ mod tests {
             "call_1",
             None,
             vec!["/repo/src/AGENTS.md".to_string()],
+            0,
         );
 
         let json = serde_json::to_string(&session).unwrap();
@@ -861,6 +907,38 @@ mod tests {
     }
 
     #[test]
+    fn latest_unresolved_tool_result_uses_matching_call_once() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_tool_call_structured(
+            "bash",
+            &serde_json::json!({"command": "echo hi"}),
+            "call_1",
+            Some("provider_1"),
+        );
+
+        let saved = session
+            .add_tool_result_for_latest_unresolved_call("bash", "partial", Vec::new(), 42)
+            .unwrap();
+
+        assert_eq!(saved, "bash:\npartial");
+        let result = session
+            .messages
+            .last()
+            .unwrap()
+            .tool_result
+            .as_ref()
+            .unwrap();
+        assert_eq!(result.id, "call_1");
+        assert_eq!(result.call_id.as_deref(), Some("provider_1"));
+        assert_eq!(result.duration_ms, 42);
+        assert!(
+            session
+                .add_tool_result_for_latest_unresolved_call("bash", "duplicate", Vec::new(), 0)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn compaction_drops_summarized_loaded_context_metadata() {
         let mut session = Session::new("openai", "gpt-5.1", 128000);
         session.add_tool_result_structured_with_context(
@@ -869,6 +947,7 @@ mod tests {
             "call_1",
             None,
             vec!["/repo/old/AGENTS.md".to_string()],
+            0,
         );
         session.add_tool_result_structured_with_context(
             "read",
@@ -876,6 +955,7 @@ mod tests {
             "call_2",
             None,
             vec!["/repo/kept/AGENTS.md".to_string()],
+            0,
         );
 
         session.compress("summary".to_string(), 1, 10);

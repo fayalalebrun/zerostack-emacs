@@ -11,9 +11,10 @@ mod terminal;
 pub(crate) mod utils;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::ExecutableCommand;
 use crossterm::event;
@@ -21,6 +22,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEv
 use crossterm::style::Color;
 use tokio::sync::mpsc;
 
+use crate::agent::tools::bash::{BashLiveOutputRequest, set_bash_live_output_sender};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
@@ -33,6 +35,7 @@ use crate::permission::ask::{AskReceiver, AskSender};
 use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
 use crate::sandbox::Sandbox;
+use crate::session::storage::save_session;
 use crate::session::{MessageRole, Session};
 use crate::ui::event_handler::{ensure_agent, handle_agent_event};
 use crate::ui::events::{render_session, sanitize_output};
@@ -74,6 +77,53 @@ pub(super) const C_PERM: Color = Color::Magenta;
 pub(super) const C_BTW: Color = Color::Cyan;
 #[cfg(feature = "advisor")]
 pub(super) const C_HANDOFF: Color = Color::Green;
+
+struct ActiveBashOutput {
+    path: PathBuf,
+    started_at: Instant,
+}
+
+fn bash_live_output_path(session: &Session) -> PathBuf {
+    crate::session::storage::data_dir()
+        .join("live-tool-output")
+        .join(format!("{}-{}.txt", session.id, uuid::Uuid::new_v4()))
+}
+
+fn persist_interrupted_bash_output(
+    active: Option<ActiveBashOutput>,
+    session: &mut Session,
+    cli: &Cli,
+    renderer: &mut Renderer,
+) -> anyhow::Result<bool> {
+    let Some(active) = active else {
+        return Ok(false);
+    };
+    let bytes = std::fs::read(&active.path).unwrap_or_default();
+    let partial = String::from_utf8_lossy(&bytes);
+    let output = if partial.is_empty() {
+        "[interrupted: bash was aborted before producing output]".to_string()
+    } else {
+        format!("[interrupted: partial bash output captured before abort]\n{partial}")
+    };
+    let duration_ms = active
+        .started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    if session
+        .add_tool_result_for_latest_unresolved_call("bash", &output, Vec::new(), duration_ms)
+        .is_none()
+    {
+        return Ok(false);
+    }
+    if !cli.no_session
+        && let Err(e) = save_session(session)
+    {
+        renderer.write_line(&format!("warning: failed to save session: {}", e), C_ERROR)?;
+    }
+    Ok(true)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn refresh_display(
@@ -823,6 +873,9 @@ pub async fn run_interactive(
     // touch `agent_rx`/`is_running`/`session`, so they can run in parallel with
     // the main agent and leave no trace in conversation history.
     let (btw_tx, mut btw_rx) = mpsc::channel::<crate::event::BtwEvent>(32);
+    let (bash_live_output_tx, mut bash_live_output_rx) = mpsc::channel::<BashLiveOutputRequest>(16);
+    set_bash_live_output_sender(Some(bash_live_output_tx));
+    let mut active_bash_output: Option<ActiveBashOutput> = None;
     let mut btw_abort: Vec<(u32, tokio::task::AbortHandle)> = Vec::new();
     let mut btw_inflight: usize = 0;
     let mut btw_next_id: u32 = 0;
@@ -1233,6 +1286,12 @@ pub async fn run_interactive(
                                     h.abort();
                                 }
                                 sandbox.kill_active();
+                                let persisted_partial = persist_interrupted_bash_output(
+                                    active_bash_output.take(),
+                                    session,
+                                    cli,
+                                    &mut renderer,
+                                )?;
                                 is_running = false;
                                 if let Some(ss) = status_signals.as_ref() {
                                     ss.send_stop();
@@ -1262,7 +1321,11 @@ pub async fn run_interactive(
                                     }
                                 }
                                 renderer.write_line(
-                                    "interrupted (changes may be partial; review with git diff)",
+                                    if persisted_partial {
+                                        "interrupted (partial bash output saved; review with git diff)"
+                                    } else {
+                                        "interrupted (changes may be partial; review with git diff)"
+                                    },
                                     C_ERROR,
                                 )?;
                                 refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
@@ -2106,6 +2169,20 @@ pub async fn run_interactive(
                 refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
                 continue;
             }
+            Some(req) = bash_live_output_rx.recv() => {
+                let path = bash_live_output_path(session);
+                let reply = std::fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                    .map(|_| {
+                        active_bash_output = Some(ActiveBashOutput {
+                            path: path.clone(),
+                            started_at: Instant::now(),
+                        });
+                        Some(path)
+                    })
+                    .unwrap_or(None);
+                let _ = req.reply.send(reply);
+                continue;
+            }
             Some(event) = async {
                 agent_rx.as_mut()?.recv().await
             } => {
@@ -2121,7 +2198,10 @@ pub async fn run_interactive(
                             )));
                         }
                     }
-                    AgentEvent::ToolResult { output, .. } => {
+                    AgentEvent::ToolResult { name, output, .. } => {
+                        if name == "bash" {
+                            active_bash_output = None;
+                        }
                         if turn_trace.len() < TURN_TRACE_MAX {
                             turn_trace.push(compact_str::CompactString::from(format!(
                                 "← {}",
@@ -2130,6 +2210,7 @@ pub async fn run_interactive(
                         }
                     }
                     AgentEvent::Done { .. } | AgentEvent::Error { .. } => {
+                        active_bash_output = None;
                         turn_trace.clear();
                         awaiting_compaction_relief = false;
                     }
@@ -2645,6 +2726,7 @@ pub async fn run_interactive(
     if let Some(h) = event_handle.take() {
         let _ = h.join();
     }
+    set_bash_live_output_sender(None);
 
     #[cfg(feature = "mcp")]
     if let Some(mgr) = mcp_manager {

@@ -104,6 +104,7 @@ pub enum AgentEvent {
         name: CompactString,
         output: CompactString,
         loaded_context: Vec<String>,
+        duration_ms: u64,
     },
     SubagentToolCall {
         name: CompactString,
