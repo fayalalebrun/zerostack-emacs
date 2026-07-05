@@ -2511,6 +2511,8 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
   (when-let ((text (plist-get plist :text)))
     (zerostack--insert-input (format "%s" text)))
   (when (plist-member plist :compacted)
+    (when (plist-get plist :compacted)
+      (zerostack-render))
     (zerostack--set-thinking nil)
     (zerostack--set-status nil)))
 
@@ -2551,6 +2553,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
   (setq zerostack--loop-active nil
         zerostack--loop-label nil)
   (zerostack--set-thinking nil)
+  (zerostack--set-status nil)
   (zerostack--append-local-line
    (format "error: %s" (or (plist-get plist :message) plist))
    'zs-error))
@@ -2628,6 +2631,8 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
          (progn
            (zerostack--set-thinking t)
            (zerostack--set-status "continuing..."))
+       (when (plist-get plist :compacted)
+         (zerostack-render))
        (zerostack--set-thinking nil)
        (zerostack--set-status nil))
      (zerostack-board--refresh-if-visible))

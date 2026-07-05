@@ -1048,6 +1048,31 @@
        (sit-for 0.25)
        (should notified)))))
 
+(ert-deftest zerostack-test-compact-error-clears-busy-state ()
+  (zerostack-test--with-buffer
+   (zerostack--set-thinking t)
+   (zerostack--set-status "compacting...")
+   (zerostack--handle-form '(error :request 1 :message "cannot compact while an agent turn is running"))
+   (should-not zerostack--thinking)
+   (should-not zerostack--status)
+   (should (string-match-p "cannot compact" (buffer-string)))))
+
+(ert-deftest zerostack-test-compact-ok-requests-render-refresh ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (zerostack--handle-ok '(:request 1 :compacted t :messages 2 :saved-tokens 10 :message "compressed"))
+     (should (equal (car (zerostack-test--sent-forms sent))
+                    '(render :request 1 :cols 100))))))
+
+(ert-deftest zerostack-test-compact-done-requests-render-refresh ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (zerostack--handle-event '(:type compact-done :compacted t))
+     (should (equal (car (zerostack-test--sent-forms sent))
+                    '(render :request 1 :cols 100))))))
+
 (ert-deftest zerostack-test-goal-nudge-cancels-ready-notification ()
   (zerostack-test--with-buffer
    (let (notified)
