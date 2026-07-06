@@ -320,7 +320,7 @@ pub async fn handle_agent_event(
                     .as_ref()
                     .map(|s| s.resolve())
                     .unwrap_or(ResolvedShowToolDetails::Limited(3));
-                let duration = tool_duration_suffix(&name, duration_ms);
+                let duration = tool_duration_suffix(duration_ms);
                 match show_details {
                     ResolvedShowToolDetails::Off => {}
                     ResolvedShowToolDetails::Limited(max_lines) => {
@@ -446,8 +446,8 @@ pub async fn handle_agent_event(
     Ok(())
 }
 
-fn tool_duration_suffix(name: &str, duration_ms: u64) -> String {
-    if name == "bash" && duration_ms > 0 {
+fn tool_duration_suffix(duration_ms: u64) -> String {
+    if duration_ms > 0 {
         format!(" [{}]", crate::ui::events::fmt_duration_ms(duration_ms))
     } else {
         String::new()

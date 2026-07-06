@@ -2184,13 +2184,7 @@ mod imp {
             .append_lines(
                 "tool-render",
                 turn,
-                render_tool_result_lines(
-                    Some("bash"),
-                    &safe,
-                    artifact.clone(),
-                    &[],
-                    tool_duration_ms("bash", duration_ms),
-                ),
+                render_tool_result_lines(Some("bash"), &safe, artifact.clone(), &[], duration_ms),
             )
             .await;
         server
@@ -2853,7 +2847,7 @@ mod imp {
                         &safe,
                         artifact.clone(),
                         &[],
-                        tool_duration_ms(&name, duration_ms),
+                        duration_ms,
                     ));
                     server.append_lines("tool-render", turn, lines).await;
                     let preview = preview_text(&safe);
@@ -3458,7 +3452,6 @@ mod imp {
         let duration_ms = msg
             .tool_result
             .as_ref()
-            .filter(|result| result.name == "bash")
             .map(|result| result.duration_ms)
             .unwrap_or(0);
         render_tool_result_lines(name, &safe, artifact, loaded_context, duration_ms)
@@ -3487,10 +3480,6 @@ mod imp {
         }
         out.push(blank_line());
         out
-    }
-
-    fn tool_duration_ms(name: &str, duration_ms: u64) -> u64 {
-        if name == "bash" { duration_ms } else { 0 }
     }
 
     fn tool_duration_suffix(duration_ms: u64) -> String {

@@ -461,6 +461,7 @@ where
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut tool_starts: HashMap<String, Instant> = HashMap::new();
         let mut usage_total = TokenUsage::default();
         let mut latest_usage: Option<TokenUsage> = None;
         let mut response_reasoning: Vec<ProviderReasoning> = Vec::new();
@@ -497,6 +498,7 @@ where
                                 last_tool_name = Some(tool_call.function.name.clone());
                                 tool_names
                                     .insert(tool_call.id.clone(), tool_call.function.name.clone());
+                                tool_starts.insert(tool_call.id.clone(), Instant::now());
                                 tool_interactions.push(tool_call.clone().into());
                                 let _ = event_tx
                                     .send(AgentEvent::ToolCall {
@@ -533,11 +535,10 @@ where
                         } else {
                             Vec::new()
                         };
-                        let duration_ms = if name == "bash" {
-                            crate::agent::tools::bash::take_bash_duration_ms()
-                        } else {
-                            0
-                        };
+                        let duration_ms = tool_starts
+                            .remove(&tool_result.id)
+                            .map(|start| start.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+                            .unwrap_or(0);
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
                                 id: CompactString::new(tool_result.id.clone()),

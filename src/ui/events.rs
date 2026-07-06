@@ -152,7 +152,7 @@ pub(crate) fn fmt_duration_ms(ms: u64) -> String {
 
 fn tool_duration_suffix(tool_result: Option<&SessionToolResult>) -> String {
     match tool_result {
-        Some(result) if result.name == "bash" && result.duration_ms > 0 => {
+        Some(result) if result.duration_ms > 0 => {
             format!(" [{}]", fmt_duration_ms(result.duration_ms))
         }
         _ => String::new(),

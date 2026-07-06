@@ -262,7 +262,7 @@ Assistant markdown is rendered by zerostack and streamed as events like
 Emacs should delete from `:replace-from` and insert the provided line batch.
 Provider usage events include `:reasoning-tokens` when the provider reports
 thinking token usage, on both `completion-call` and final `done` events. Final
-assistant turns render persisted `thinking:12k` markers, and persisted bash tool
+assistant turns render persisted `thinking:12k` markers, and persisted tool
 results include elapsed execution time on the output line, e.g.
 `◈ result (12 chars) [1.2s]:`.
 

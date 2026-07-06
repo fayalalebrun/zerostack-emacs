@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Output;
 use std::sync::Mutex;
-use std::time::Instant;
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -21,32 +19,11 @@ pub(crate) struct BashLiveOutputRequest {
 pub(crate) type BashLiveOutputSender = mpsc::Sender<BashLiveOutputRequest>;
 
 static BASH_LIVE_OUTPUT_TX: Mutex<Option<BashLiveOutputSender>> = Mutex::new(None);
-static BASH_DURATIONS_MS: Mutex<VecDeque<u64>> = Mutex::new(VecDeque::new());
 
 pub(crate) fn set_bash_live_output_sender(sender: Option<BashLiveOutputSender>) {
     *BASH_LIVE_OUTPUT_TX
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = sender;
-}
-
-pub(crate) fn take_bash_duration_ms() -> u64 {
-    BASH_DURATIONS_MS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pop_front()
-        .unwrap_or(0)
-}
-
-fn record_bash_duration_ms(started_at: Instant) {
-    let elapsed = started_at
-        .elapsed()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
-    BASH_DURATIONS_MS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push_back(elapsed);
 }
 
 fn bash_live_output_sender() -> Option<BashLiveOutputSender> {
@@ -258,7 +235,6 @@ impl Tool for BashTool {
         #[cfg(not(feature = "rtk"))]
         let command = args.command.clone();
 
-        let started_at = Instant::now();
         let (stdout, stderr, exit_code) = if let Some(sender) = bash_live_output_sender() {
             let (reply, response) = oneshot::channel();
             let _ = sender
@@ -306,7 +282,6 @@ impl Tool for BashTool {
                 output.status.code().unwrap_or(-1),
             )
         };
-        record_bash_duration_ms(started_at);
 
         let mut result = String::new();
         if !stdout.is_empty() {
