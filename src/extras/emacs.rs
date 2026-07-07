@@ -2184,7 +2184,14 @@ mod imp {
             .append_lines(
                 "tool-render",
                 turn,
-                render_tool_result_lines(Some("bash"), &safe, artifact.clone(), &[], duration_ms),
+                render_tool_result_lines(
+                    Some("bash"),
+                    &safe,
+                    artifact.clone(),
+                    None,
+                    &[],
+                    duration_ms,
+                ),
             )
             .await;
         server
@@ -2802,6 +2809,7 @@ mod imp {
                     output,
                     loaded_context,
                     duration_ms,
+                    display_artifact,
                 } => {
                     if name == "bash" {
                         server.mutable.lock().await.active_live_output = None;
@@ -2841,11 +2849,39 @@ mod imp {
                             None
                         }
                     };
+                    let display_artifact = match display_artifact {
+                        Some(display) => {
+                            let filename = format!(
+                                "{}-{}.{}",
+                                safe_filename(&display.kind),
+                                safe_filename(&display.label),
+                                safe_filename(&display.extension)
+                            );
+                            match server
+                                .write_artifact_file_with_mime(
+                                    turn,
+                                    "display-artifact",
+                                    &filename,
+                                    &display.contents,
+                                    "text/x-diff",
+                                )
+                                .await
+                            {
+                                Ok(artifact) => Some(artifact),
+                                Err(e) => {
+                                    tracing::warn!("failed to write Emacs display artifact: {e}");
+                                    None
+                                }
+                            }
+                        }
+                        None => None,
+                    };
                     let mut lines = loaded_lines;
                     lines.extend(render_tool_result_lines(
                         Some(&name),
                         &safe,
                         artifact.clone(),
+                        display_artifact.clone(),
                         &[],
                         duration_ms,
                     ));
@@ -3422,7 +3458,7 @@ mod imp {
             MessageRole::Assistant => render_assistant_final_lines(content, provider_usage, cols),
             MessageRole::System => render_compaction_summary_lines(content),
             MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
-            MessageRole::ToolResult => render_tool_result_lines(None, content, None, &[], 0),
+            MessageRole::ToolResult => render_tool_result_lines(None, content, None, None, &[], 0),
             MessageRole::SubagentToolCall => render_prefixed_lines("⌥", content, "zs-tool"),
         }
     }
@@ -3454,7 +3490,7 @@ mod imp {
             .as_ref()
             .map(|result| result.duration_ms)
             .unwrap_or(0);
-        render_tool_result_lines(name, &safe, artifact, loaded_context, duration_ms)
+        render_tool_result_lines(name, &safe, artifact, None, loaded_context, duration_ms)
     }
 
     fn render_compaction_summary_lines(content: &str) -> Vec<WireLine> {
@@ -3494,6 +3530,7 @@ mod imp {
         name: Option<&str>,
         content: &str,
         artifact: Option<ArtifactInfo>,
+        display_artifact: Option<ArtifactInfo>,
         loaded_context: &[CompactString],
         duration_ms: u64,
     ) -> Vec<WireLine> {
@@ -3519,6 +3556,18 @@ mod imp {
         }
 
         let duration = tool_duration_suffix(duration_ms);
+        if let Some(display_artifact) = display_artifact {
+            out.push(WireLine::with_artifact(
+                format!(
+                    "  patch: {} ({}){}",
+                    sanitize_output(name.unwrap_or("tool")),
+                    format_bytes(display_artifact.bytes),
+                    duration,
+                ),
+                "zs-link",
+                display_artifact,
+            ));
+        }
         if let Some(artifact) = artifact {
             out.push(WireLine::with_artifact(
                 format!(
@@ -4977,6 +5026,7 @@ mod imp {
                 Some("goal_update"),
                 "goal_update:\nGoal:\n  [x] [high] Ship it\n      evaluator: PASS — verified files\n",
                 None,
+                None,
                 &[],
                 0,
             );
@@ -5157,8 +5207,14 @@ mod imp {
                 bytes: 8,
                 preview: "bash: hi".to_string(),
             };
-            let lines =
-                render_tool_result_lines(Some("bash"), "bash:\nhi\n", Some(artifact), &[], 1250);
+            let lines = render_tool_result_lines(
+                Some("bash"),
+                "bash:\nhi\n",
+                Some(artifact),
+                None,
+                &[],
+                1250,
+            );
             let encoded = lines_to_sexp(&lines);
 
             assert!(encoded.contains("  output: bash (8 B) [1.2s]"));
@@ -5168,7 +5224,7 @@ mod imp {
 
         #[test]
         fn tool_result_lines_fall_back_to_inline_output_without_artifact() {
-            let lines = render_tool_result_lines(None, "bash:\nhi\n", None, &[], 0);
+            let lines = render_tool_result_lines(None, "bash:\nhi\n", None, None, &[], 0);
             let encoded = lines_to_sexp(&lines);
 
             assert!(encoded.contains("◈ result hi"));

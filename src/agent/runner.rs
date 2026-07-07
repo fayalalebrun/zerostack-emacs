@@ -539,6 +539,11 @@ where
                             .remove(&tool_result.id)
                             .map(|start| start.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
                             .unwrap_or(0);
+                        let display_artifact = if name == "edit" {
+                            crate::agent::tools::edit::take_last_edit_display_artifact()
+                        } else {
+                            None
+                        };
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
                                 id: CompactString::new(tool_result.id.clone()),
@@ -547,6 +552,7 @@ where
                                 output: CompactString::from(output),
                                 loaded_context,
                                 duration_ms,
+                                display_artifact,
                             })
                             .await;
                         tool_interactions.push(tool_result.clone().into());

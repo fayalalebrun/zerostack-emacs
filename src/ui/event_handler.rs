@@ -217,6 +217,7 @@ pub async fn handle_agent_event(
             output,
             loaded_context,
             duration_ms,
+            ..
         } => {
             session.add_tool_result_structured_with_context(
                 &name,

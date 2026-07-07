@@ -7,6 +7,7 @@ use crate::agent::tools::{
     levenshtein_similarity, normalize_whitespace,
 };
 use crate::config::types::EditSystem;
+use crate::event::DisplayArtifact;
 
 pub struct EditTool {
     pub permission: Option<PermCheck>,
@@ -17,6 +18,102 @@ impl EditTool {
     pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
         EditTool { permission, ask_tx }
     }
+}
+
+static LAST_EDIT_DISPLAY_ARTIFACT: std::sync::Mutex<Option<DisplayArtifact>> =
+    std::sync::Mutex::new(None);
+
+pub fn take_last_edit_display_artifact() -> Option<DisplayArtifact> {
+    LAST_EDIT_DISPLAY_ARTIFACT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
+fn set_last_edit_display_artifact(artifact: DisplayArtifact) {
+    *LAST_EDIT_DISPLAY_ARTIFACT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(artifact);
+}
+
+fn edit_ranges_diff(path: &str, old: &str, ranges: &[(usize, usize, String)]) -> String {
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    let lines = old.lines().collect::<Vec<_>>();
+    let offsets = line_offsets(old);
+    let mut ranges = ranges.to_vec();
+    ranges.sort_by_key(|(start, _, _)| *start);
+
+    for (byte_start, byte_end, replace) in ranges {
+        let old_start = line_at_byte(&offsets, byte_start);
+        let old_end = if byte_end > byte_start {
+            line_at_byte(&offsets, byte_end.saturating_sub(1)) + 1
+        } else {
+            old_start
+        };
+        let hunk_start = old_start.saturating_sub(3);
+        let hunk_end = (old_end + 3).min(lines.len());
+        let old_start_byte = line_byte(&offsets, old_start, old.len());
+        let old_end_byte = line_byte(&offsets, old_end, old.len());
+        let old_changed = &old[old_start_byte..old_end_byte];
+        let rel_start = byte_start.saturating_sub(old_start_byte);
+        let rel_end = byte_end.saturating_sub(old_start_byte);
+        let mut new_changed = old_changed.to_string();
+        new_changed.replace_range(rel_start..rel_end, &replace);
+        let new_changed_lines = new_changed.lines().collect::<Vec<_>>();
+        let old_count = hunk_end.saturating_sub(hunk_start);
+        let new_count = old_start.saturating_sub(hunk_start)
+            + new_changed_lines.len()
+            + hunk_end.saturating_sub(old_end);
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            hunk_start + 1,
+            old_count,
+            hunk_start + 1,
+            new_count
+        ));
+        for line in &lines[hunk_start..old_start] {
+            out.push_str(" ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in &lines[old_start..old_end] {
+            out.push_str("-");
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in new_changed_lines {
+            out.push_str("+");
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in &lines[old_end..hunk_end] {
+            out.push_str(" ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn line_offsets(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' && idx + 1 < text.len() {
+            offsets.push(idx + 1);
+        }
+    }
+    offsets
+}
+
+fn line_at_byte(offsets: &[usize], byte: usize) -> usize {
+    match offsets.binary_search(&byte) {
+        Ok(idx) => idx,
+        Err(idx) => idx.saturating_sub(1),
+    }
+}
+
+fn line_byte(offsets: &[usize], line: usize, text_len: usize) -> usize {
+    offsets.get(line).copied().unwrap_or(text_len)
 }
 
 // ── V1: Similarity (SEARCH/REPLACE) ──────────────────────────────────────
@@ -570,7 +667,7 @@ impl Tool for EditTool {
         // Apply last-to-first so earlier byte positions remain valid
         ranges.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
 
-        let mut modified = content;
+        let mut modified = content.clone();
 
         for (byte_start, byte_end, replace) in &ranges {
             if *byte_end > modified.len() || *byte_start > modified.len() {
@@ -587,11 +684,18 @@ impl Tool for EditTool {
         } else {
             modified
         };
+        let diff = edit_ranges_diff(&path, &content, &ranges);
 
         crate::fs::atomic_write(&path, &output).await?;
         crate::agent::tools::untrack_read_path(&path);
 
         let mut result = format!("Applied {} edit(s) to {}", edit_count, path);
+        set_last_edit_display_artifact(DisplayArtifact {
+            kind: "patch".into(),
+            label: path.clone().into(),
+            contents: diff,
+            extension: "patch".into(),
+        });
         for note in &notes {
             result.push_str(&format!("\n  Note: {}", note));
         }

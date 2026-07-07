@@ -89,6 +89,14 @@ mod tests {
 }
 
 #[derive(Debug, Clone)]
+pub struct DisplayArtifact {
+    pub kind: CompactString,
+    pub label: CompactString,
+    pub contents: String,
+    pub extension: CompactString,
+}
+
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     Token(CompactString),
     Reasoning(CompactString),
@@ -105,6 +113,7 @@ pub enum AgentEvent {
         output: CompactString,
         loaded_context: Vec<String>,
         duration_ms: u64,
+        display_artifact: Option<DisplayArtifact>,
     },
     SubagentToolCall {
         name: CompactString,

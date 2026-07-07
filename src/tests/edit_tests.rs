@@ -123,6 +123,60 @@ async fn test_sim_single_block_replacement() {
 }
 
 #[tokio::test]
+async fn test_edit_records_display_patch_artifact() {
+    let _guard = serialize_edit_system(EditSystem::Similarity);
+    let tmp = TempFile::new("patch_artifact.txt");
+    std::fs::write(tmp.path(), "before\n").unwrap();
+    let tool = edit::EditTool::new(None, None);
+
+    tool.call(EditArgs {
+        path: tmp.path().into(),
+        block: Some("<<<<<<< SEARCH\nbefore\n=======\nafter\n>>>>>>> REPLACE".into()),
+        file_crc: None,
+        edits: None,
+    })
+    .await
+    .unwrap();
+    let artifact = edit::take_last_edit_display_artifact().unwrap();
+
+    assert_eq!(artifact.kind, "patch");
+    assert_eq!(artifact.extension, "patch");
+    assert!(artifact.contents.contains("--- a/"));
+    assert!(artifact.contents.contains("-before"));
+    assert!(artifact.contents.contains("+after"));
+}
+
+#[tokio::test]
+async fn test_edit_display_patch_uses_edit_hunk_not_whole_file() {
+    let _guard = serialize_edit_system(EditSystem::Similarity);
+    let tmp = TempFile::new("small_patch_artifact.txt");
+    let content = (1..=80)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(tmp.path(), content).unwrap();
+    let tool = edit::EditTool::new(None, None);
+
+    tool.call(EditArgs {
+        path: tmp.path().into(),
+        block: Some("<<<<<<< SEARCH\nline 40\n=======\nline forty\n>>>>>>> REPLACE".into()),
+        file_crc: None,
+        edits: None,
+    })
+    .await
+    .unwrap();
+    let artifact = edit::take_last_edit_display_artifact().unwrap();
+
+    assert!(artifact.contents.contains("-line 40"));
+    assert!(artifact.contents.contains("+line forty"));
+    assert!(artifact.contents.contains(" line 37"));
+    assert!(artifact.contents.contains(" line 43"));
+    assert!(!artifact.contents.contains(" line 1"));
+    assert!(!artifact.contents.contains(" line 80"));
+}
+
+#[tokio::test]
 async fn test_sim_multi_block_atomic() {
     let _edit_guard = serialize_edit_system(EditSystem::Similarity);
     let tmp = TempFile::new("multiblock.txt");
