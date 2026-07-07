@@ -851,8 +851,7 @@ pub async fn run_interactive(
     let mut response_buf = String::new();
     let mut response_start_line: Option<usize> = None;
     let mut show_reasoning = cfg.resolve_show_reasoning();
-    let mut reasoning_enabled = true;
-    session.reasoning_enabled = reasoning_enabled;
+    let mut reasoning_enabled = session.reasoning_enabled;
     // Seed the context-overhead estimate so the status bar reflects the system
     // prompt + context files from T0, before the first request is calibrated.
     // `ensure_agent` refreshes this whenever the preamble is rebuilt.

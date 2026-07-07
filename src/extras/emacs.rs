@@ -320,6 +320,8 @@ mod imp {
         sandbox: Sandbox,
         status_signals: Option<StatusSignals>,
     ) -> anyhow::Result<()> {
+        let initial_reasoning_enabled = session.reasoning_enabled;
+        let initial_reasoning_effort = session.reasoning_effort.clone();
         let (registration, listener) = Registration::create(&session)?;
         crate::startup_profile::mark("emacs:socket_ready");
         let (events, _) = broadcast::channel(EVENT_BUFFER);
@@ -341,8 +343,8 @@ mod imp {
                 cols: DEFAULT_COLS,
                 line_count: 0,
                 running: false,
-                reasoning_enabled: true,
-                reasoning_effort: None,
+                reasoning_enabled: initial_reasoning_enabled,
+                reasoning_effort: initial_reasoning_effort,
                 abort_handle: None,
                 turn: 0,
                 #[cfg(feature = "loop")]
@@ -1001,6 +1003,13 @@ mod imp {
             mutable.reasoning_effort = Some(CompactString::new(effort));
             let label = thinking_label(mutable.reasoning_enabled);
             let effort = mutable.reasoning_effort.as_deref().unwrap_or(effort);
+            {
+                let mut session = server.session.lock().await;
+                session.reasoning_effort = Some(CompactString::new(effort));
+                if !server.cli.no_session {
+                    crate::session::storage::save_session(&session)?;
+                }
+            }
             send_ok(
                 out,
                 request_arg(cmd),
@@ -1024,6 +1033,13 @@ mod imp {
             ),
         };
         server.mutable.lock().await.reasoning_enabled = enabled;
+        {
+            let mut session = server.session.lock().await;
+            session.reasoning_enabled = enabled;
+            if !server.cli.no_session {
+                crate::session::storage::save_session(&session)?;
+            }
+        }
         let label = thinking_label(enabled);
         send_ok(
             out,
@@ -4527,6 +4543,13 @@ mod imp {
         let (provider, model) = current_provider_model(server).await;
         if !crate::provider::supports_reasoning_effort(&provider, &model) {
             server.mutable.lock().await.reasoning_effort = None;
+            let mut session = server.session.lock().await;
+            session.reasoning_effort = None;
+            if !server.cli.no_session
+                && let Err(e) = crate::session::storage::save_session(&session)
+            {
+                tracing::warn!("failed to save session reasoning effort: {e}");
+            }
         }
     }
 

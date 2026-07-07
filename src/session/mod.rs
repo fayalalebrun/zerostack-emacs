@@ -66,6 +66,10 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTokenUsage {
     pub input_tokens: u64,
@@ -257,10 +261,11 @@ pub struct Session {
     /// Computed only when the statusline uses a git change/status item. Not persisted.
     #[serde(skip)]
     pub git_status: Option<GitStatus>,
-    /// Whether reasoning is currently enabled, for the status bar. Synced from
-    /// the event loop, not persisted.
-    #[serde(skip)]
+    /// Whether reasoning/thinking is enabled for this session.
+    #[serde(default = "default_true")]
     pub reasoning_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<CompactString>,
     /// Estimated tokens for the fixed request overhead that never lives in
     /// `messages` — system prompt, tool-use preamble, context files, memory.
     /// Used only before the first real calibration (see
@@ -349,7 +354,8 @@ impl Session {
             show_cost_always: false,
             git_branch: None,
             git_status: None,
-            reasoning_enabled: false,
+            reasoning_enabled: true,
+            reasoning_effort: None,
             overhead_tokens: 0,
         }
     }

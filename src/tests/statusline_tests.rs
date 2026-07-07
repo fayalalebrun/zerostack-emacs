@@ -306,6 +306,7 @@ fn reasoning_shows_only_when_enabled() {
         }],
     };
     let mut session = Session::new("openrouter", "m", 1000);
+    session.reasoning_enabled = false;
     assert!(line_text(&statusline::build_lines(&spec, &session, &ctx())[0]).is_empty());
     session.reasoning_enabled = true;
     assert_eq!(

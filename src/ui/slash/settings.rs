@@ -40,6 +40,10 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
 async fn handle_reasoning(_parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     *ctx.reasoning_enabled = !*ctx.reasoning_enabled;
     *ctx.show_reasoning = *ctx.reasoning_enabled;
+    ctx.session.reasoning_enabled = *ctx.reasoning_enabled;
+    if !ctx.cli.no_session {
+        crate::session::storage::save_session(ctx.session)?;
+    }
     ctx.rebuild_agent().await;
     write_ok(
         ctx.renderer,

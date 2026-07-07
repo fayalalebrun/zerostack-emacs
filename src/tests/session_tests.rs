@@ -241,6 +241,43 @@ fn new_session_sets_context_window() {
 }
 
 #[test]
+fn new_session_persists_reasoning_options() {
+    let mut s = Session::new("openai", "gpt", 1000);
+    s.reasoning_enabled = false;
+    s.reasoning_effort = Some("high".into());
+
+    let json = serde_json::to_string(&s).unwrap();
+    let loaded: Session = serde_json::from_str(&json).unwrap();
+
+    assert!(!loaded.reasoning_enabled);
+    assert_eq!(loaded.reasoning_effort.as_deref(), Some("high"));
+}
+
+#[test]
+fn legacy_session_defaults_reasoning_enabled() {
+    let loaded: Session = serde_json::from_str(
+        r#"{
+            "id":"s",
+            "name":"",
+            "messages":[],
+            "compactions":[],
+            "created_at":"now",
+            "updated_at":"now",
+            "total_cost":0.0,
+            "total_estimated_tokens":0,
+            "context_window":1000,
+            "model":"gpt",
+            "provider":"openai",
+            "working_dir":"/tmp"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(loaded.reasoning_enabled);
+    assert_eq!(loaded.reasoning_effort, None);
+}
+
+#[test]
 fn new_session_sets_working_dir() {
     let s = Session::new("openai", "gpt-4", 128000);
     assert!(!s.working_dir.is_empty());

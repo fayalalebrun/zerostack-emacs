@@ -63,6 +63,15 @@ impl SlashCtx<'_> {
             crate::extras::advisor::update_client(self.client.clone());
             crate::extras::advisor::set_session_messages(self.session.messages.clone());
         }
+        let reasoning_effort = self.session.reasoning_effort.clone().or_else(|| {
+            crate::config::resolve_reasoning_effort(
+                self.cli,
+                self.cfg,
+                &self.session.provider,
+                &self.session.model,
+            )
+            .map(Into::into)
+        });
         *self.agent = Some(
             crate::provider::build_agent(
                 model,
@@ -73,13 +82,7 @@ impl SlashCtx<'_> {
                 self.ask_tx.clone(),
                 self.sandbox.clone(),
                 *self.reasoning_enabled,
-                crate::config::resolve_reasoning_effort(
-                    self.cli,
-                    self.cfg,
-                    &self.session.provider,
-                    &self.session.model,
-                )
-                .as_deref(),
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
@@ -110,6 +113,15 @@ impl SlashCtx<'_> {
             crate::extras::advisor::update_client(self.client.clone());
             crate::extras::advisor::set_session_messages(self.session.messages.clone());
         }
+        let reasoning_effort = self.session.reasoning_effort.clone().or_else(|| {
+            crate::config::resolve_reasoning_effort(
+                self.cli,
+                self.cfg,
+                provider,
+                &self.session.model,
+            )
+            .map(Into::into)
+        });
         *self.agent = Some(
             crate::provider::build_agent(
                 model,
@@ -120,13 +132,7 @@ impl SlashCtx<'_> {
                 self.ask_tx.clone(),
                 self.sandbox.clone(),
                 new_reasoning,
-                crate::config::resolve_reasoning_effort(
-                    self.cli,
-                    self.cfg,
-                    provider,
-                    &self.session.model,
-                )
-                .as_deref(),
+                reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
