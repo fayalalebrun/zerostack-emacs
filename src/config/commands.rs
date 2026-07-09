@@ -228,6 +228,9 @@ mod tests {
     fn model_ids_for_codex_use_openai_catalog() {
         let ids = model_ids_for_provider("openai-codex");
         assert!(ids.iter().any(|id| id == "gpt-5.5"));
+        for model in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
+            assert!(ids.iter().any(|id| id == model));
+        }
     }
 
     #[test]

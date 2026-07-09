@@ -29,6 +29,19 @@ fn openrouter_includes_default_model() {
 }
 
 #[test]
+fn openai_includes_gpt_5_6_models() {
+    let model_ids = ids("openai");
+    for id in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
+        assert!(model_ids.contains(&id.to_string()));
+    }
+}
+
+#[test]
+fn openai_codex_uses_openai_catalog() {
+    assert_eq!(ids("openai-codex"), ids("openai"));
+}
+
+#[test]
 fn unbaked_provider_has_no_catalog() {
     // ollama resolves live (local), so it is intentionally not baked.
     assert!(catalog_entries("ollama").is_none());
