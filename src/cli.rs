@@ -85,7 +85,7 @@ pub struct Cli {
     #[arg(
         long = "reasoning-effort",
         value_parser = ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
-        help = "OpenAI reasoning effort for supported models (off/none, low, medium, high, max/xhigh)"
+        help = "OpenAI reasoning effort for supported models (off/none, low, medium, high, xhigh, max)"
     )]
     pub reasoning_effort: Option<String>,
 

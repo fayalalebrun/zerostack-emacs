@@ -389,7 +389,7 @@ async fn openai_codex_lists_static_zerostack_defaults() {
     assert_eq!(gpt55.context_length, Some(1_050_000));
     for id in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
         let model = models.iter().find(|m| m.id == id).unwrap();
-        assert_eq!(model.context_length, Some(1_050_000));
+        assert_eq!(model.context_length, Some(372_000));
     }
     let spark = models
         .iter()

@@ -243,7 +243,12 @@ impl Config {
     }
 
     fn codex_effective_input_window(model_id: &str) -> Option<u64> {
-        if model_id == "gpt-5.5" || model_id.starts_with("gpt-5.5-") || model_id.contains("codex") {
+        if model_id.starts_with("gpt-5.6-") {
+            Some(362_000)
+        } else if model_id == "gpt-5.5"
+            || model_id.starts_with("gpt-5.5-")
+            || model_id.contains("codex")
+        {
             Some(272_000)
         } else {
             None

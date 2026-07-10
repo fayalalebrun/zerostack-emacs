@@ -181,6 +181,16 @@ fn openai_codex_gpt_55_uses_codex_input_window() {
 }
 
 #[test]
+fn openai_codex_gpt_56_reserves_truncation_tokens() {
+    let cfg = Config::default();
+    for model in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
+        assert_eq!(cfg.resolve_context_window("openai", model), 372_000);
+        assert_eq!(cfg.resolve_context_window("openai-codex", model), 362_000);
+        assert_eq!(cfg.resolve_context_window("codex", model), 362_000);
+    }
+}
+
+#[test]
 fn openai_codex_keeps_smaller_catalog_limits() {
     let cfg = Config::default();
     assert_eq!(

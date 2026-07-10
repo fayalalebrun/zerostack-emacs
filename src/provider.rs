@@ -518,10 +518,12 @@ pub(crate) fn supports_reasoning_effort_value(provider: &str, model: &str, effor
     let provider = provider.trim().to_ascii_lowercase();
     let model = model.trim().to_ascii_lowercase();
     if provider == "openai-codex" || provider == "codex" {
-        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh");
+        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh")
+            || model.starts_with("gpt-5.6-") && effort == "max";
     }
     if provider == "openai" && model.starts_with("gpt-5") {
-        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh");
+        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh")
+            || model.starts_with("gpt-5.6-") && effort == "max";
     }
     matches!(effort, "minimal" | "low" | "medium" | "high")
 }
@@ -542,7 +544,8 @@ fn canonical_reasoning_effort(effort: &str) -> Option<&'static str> {
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
-        "xhigh" | "max" => Some("xhigh"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
         _ => None,
     }
 }
@@ -1669,8 +1672,20 @@ mod tests {
         );
         assert_eq!(
             normalize_reasoning_effort_value("openai-codex", "gpt-5.5", "max"),
-            Some("xhigh")
+            None
         );
+        for model in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
+            for effort in ["xhigh", "max"] {
+                assert_eq!(
+                    normalize_reasoning_effort_value("openai-codex", model, effort),
+                    Some(effort)
+                );
+                assert_eq!(
+                    normalize_reasoning_effort_value("openai", model, effort),
+                    Some(effort)
+                );
+            }
+        }
     }
 
     #[test]
