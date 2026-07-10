@@ -61,6 +61,8 @@ mod imp {
         pub reasoning_effort_supported: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub reasoning_effort: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub reasoning_efforts: Vec<String>,
     }
 
     fn default_thinking_level() -> String {
@@ -473,6 +475,7 @@ mod imp {
                 thinking: "on".to_string(),
                 reasoning_effort_supported: false,
                 reasoning_effort: None,
+                reasoning_efforts: Vec::new(),
             }
         }
     }
@@ -969,13 +972,15 @@ mod imp {
         sync_subagent_with_main(server, &client, &provider, &model).await;
 
         let message = format!("switched to provider: {provider} (model: {model})");
+        let effort = server.mutable.lock().await.reasoning_effort.clone();
         send_ok(
             out,
             request_arg(cmd),
             format!(
-                " :provider {} :model {} :message {}",
+                " :provider {} :model {}{} :message {}",
                 sexp_quote(&provider),
                 sexp_quote(&model),
+                reasoning_effort_fields(&provider, &model, effort.as_deref()),
                 sexp_quote(&message),
             ),
         )
@@ -1014,9 +1019,9 @@ mod imp {
                 out,
                 request_arg(cmd),
                 format!(
-                    " :thinking {} :reasoning-effort-supported t :reasoning-effort {} :message {}",
+                    " :thinking {}{} :message {}",
                     sexp_quote(label),
-                    sexp_quote(effort),
+                    reasoning_effort_fields(&provider, &model, Some(effort)),
                     sexp_quote(&format!("reasoning effort: {effort}")),
                 ),
             )
@@ -1156,14 +1161,24 @@ mod imp {
         tools
     }
 
-    fn string_list_to_sexp(items: &[&str]) -> String {
+    fn string_list_to_sexp<T: AsRef<str>>(items: &[T]) -> String {
         format!(
             "({})",
             items
                 .iter()
-                .map(|item| sexp_quote(item))
+                .map(|item| sexp_quote(item.as_ref()))
                 .collect::<Vec<_>>()
                 .join(" ")
+        )
+    }
+
+    fn reasoning_effort_fields(provider: &str, model: &str, effort: Option<&str>) -> String {
+        let efforts = crate::provider::supported_reasoning_efforts(provider, model);
+        format!(
+            " :reasoning-effort-supported {} :reasoning-effort {} :reasoning-efforts {}",
+            if efforts.is_empty() { "nil" } else { "t" },
+            effort.map(sexp_quote).unwrap_or_else(|| "nil".to_string()),
+            string_list_to_sexp(efforts),
         )
     }
 
@@ -1272,13 +1287,15 @@ mod imp {
         sync_subagent_with_main(server, &client, &provider, &model).await;
 
         let message = format!("switched to model: {model}");
+        let effort = server.mutable.lock().await.reasoning_effort.clone();
         send_ok(
             out,
             request_arg(cmd),
             format!(
-                " :provider {} :model {} :message {}",
+                " :provider {} :model {}{} :message {}",
                 sexp_quote(&provider),
                 sexp_quote(&model),
+                reasoning_effort_fields(&provider, &model, effort.as_deref()),
                 sexp_quote(&message),
             ),
         )
@@ -4513,8 +4530,12 @@ mod imp {
     }
 
     fn apply_reasoning_effort_meta(meta: &mut SessionMeta, cfg: &Config, mutable: &MutableState) {
-        meta.reasoning_effort_supported =
-            crate::provider::supports_reasoning_effort(&meta.provider, &meta.model);
+        meta.reasoning_efforts =
+            crate::provider::supported_reasoning_efforts(&meta.provider, &meta.model)
+                .iter()
+                .map(|effort| (*effort).to_string())
+                .collect();
+        meta.reasoning_effort_supported = !meta.reasoning_efforts.is_empty();
         meta.reasoning_effort = if meta.reasoning_effort_supported {
             mutable
                 .reasoning_effort
@@ -4541,7 +4562,11 @@ mod imp {
 
     async fn clear_unsupported_reasoning_effort(server: &Arc<Server>) {
         let (provider, model) = current_provider_model(server).await;
-        if !crate::provider::supports_reasoning_effort(&provider, &model) {
+        let effort = server.mutable.lock().await.reasoning_effort.clone();
+        let unsupported = effort.as_deref().is_some_and(|effort| {
+            !crate::provider::supports_reasoning_effort_value(&provider, &model, effort)
+        });
+        if !crate::provider::supports_reasoning_effort(&provider, &model) || unsupported {
             server.mutable.lock().await.reasoning_effort = None;
             let mut session = server.session.lock().await;
             session.reasoning_effort = None;
@@ -4555,7 +4580,7 @@ mod imp {
 
     fn meta_to_sexp(meta: &SessionMeta) -> String {
         format!(
-            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {})",
+            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {} :reasoning-efforts {})",
             sexp_quote(&meta.session_id),
             meta.pid,
             sexp_quote(&meta.cwd),
@@ -4579,6 +4604,7 @@ mod imp {
                 .as_deref()
                 .map(sexp_quote)
                 .unwrap_or_else(|| "nil".to_string()),
+            string_list_to_sexp(&meta.reasoning_efforts),
         )
     }
 
@@ -5041,6 +5067,16 @@ mod imp {
             assert!(tools.contains(&"goal_update"));
             assert!(tools.contains(&"todo_write"));
             assert!(string_list_to_sexp(&["goal_update", "todo_write"]).contains("goal_update"));
+        }
+
+        #[test]
+        fn reasoning_effort_fields_advertise_model_specific_choices() {
+            let fields = reasoning_effort_fields("openai-codex", "gpt-5.6-sol", Some("max"));
+            assert!(fields.contains(":reasoning-effort-supported t"));
+            assert!(fields.contains(":reasoning-effort \"max\""));
+            assert!(fields.contains(
+                ":reasoning-efforts (\"none\" \"low\" \"medium\" \"high\" \"xhigh\" \"max\")"
+            ));
         }
 
         #[test]

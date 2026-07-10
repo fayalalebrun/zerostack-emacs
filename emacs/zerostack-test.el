@@ -1400,6 +1400,31 @@
        (should (equal (cadr forms)
                       '(prompt :request 2 :text "/compact now")))))))
 
+(ert-deftest zerostack-test-reasoning-efforts-use-server-metadata ()
+  (zerostack-test--with-buffer
+   (zerostack--update-provider-model
+    '(:reasoning-effort-supported t
+      :reasoning-effort "xhigh"
+      :reasoning-efforts ("none" "low" "medium" "high" "xhigh" "max")))
+   (should (equal zerostack--reasoning-effort "xhigh"))
+   (should (equal zerostack--reasoning-efforts
+                  '("none" "low" "medium" "high" "xhigh" "max")))
+   (let (seen)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (setq seen collection)
+                  "max"))
+               ((symbol-function 'zerostack--send-command) (lambda (&rest _))))
+       (zerostack-thinking-menu))
+     (should (equal seen
+                    '("on" "off" "none" "low" "medium" "high" "xhigh" "max"))))))
+
+(ert-deftest zerostack-test-reasoning-efforts-fall-back-for-old-server ()
+  (zerostack-test--with-buffer
+   (setq zerostack--reasoning-effort-supported t)
+   (should (equal (zerostack--reasoning-effort-options)
+                  '("minimal" "low" "medium" "high")))))
+
 (ert-deftest zerostack-test-input-line-shows-thinking-level ()
   (zerostack-test--with-buffer
    (setq zerostack--model "gpt-test")

@@ -272,6 +272,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--thinking-level "on")
 (defvar-local zerostack--reasoning-effort-supported nil)
 (defvar-local zerostack--reasoning-effort nil)
+(defvar-local zerostack--reasoning-efforts nil)
 (defvar-local zerostack--status nil)
 (defvar-local zerostack--notice nil)
 (defvar-local zerostack--notice-timer nil)
@@ -332,6 +333,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--thinking-level "on")
   (setq-local zerostack--reasoning-effort-supported nil)
   (setq-local zerostack--reasoning-effort nil)
+  (setq-local zerostack--reasoning-efforts nil)
   (setq-local zerostack--status nil)
    (setq-local zerostack--notice nil)
    (setq-local zerostack--notice-timer nil)
@@ -1803,25 +1805,16 @@ Return non-nil when DIRECTORY was newly added."
   (and (boundp 'zerostack--reasoning-effort-supported)
        zerostack--reasoning-effort-supported))
 
-(defun zerostack-reasoning-effort-menu (&optional level)
-  "Set OpenAI reasoning effort LEVEL when supported by the current model."
-  (interactive)
-  (unless (zerostack--reasoning-effort-supported-p)
-    (user-error "Current model does not support reasoning effort"))
-  (let ((level (or level
-                   (completing-read "Reasoning effort: "
-                                    '("minimal" "low" "medium" "high")
-                                    nil t nil nil zerostack--reasoning-effort))))
-    (zerostack--send-command 'thinking
-                             :request (zerostack--next-request)
-                             :level level)))
+(defun zerostack--reasoning-effort-options ()
+  "Return server-advertised reasoning efforts, with an old-server fallback."
+  (or zerostack--reasoning-efforts '("minimal" "low" "medium" "high")))
 
 (defun zerostack-thinking-menu (&optional level)
   "Set native zerostack thinking/reasoning LEVEL."
   (interactive)
   (let* ((choices (append '("on" "off")
                           (when (zerostack--reasoning-effort-supported-p)
-                            '("minimal" "low" "medium" "high"))))
+                            (zerostack--reasoning-effort-options))))
          (level (or level
                     (completing-read "Thinking: " choices nil t nil nil zerostack--thinking-level))))
     (zerostack--send-command 'thinking
@@ -2256,7 +2249,7 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _t_ thinking  _r_ reasoning  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
+_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _t_ thinking  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2267,7 +2260,6 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     ("G" zerostack-clear-goal)
     ("l" zerostack-loop)
     ("t" zerostack-thinking-menu)
-    ("r" zerostack-reasoning-effort-menu)
     ("p" zerostack-provider-menu)
     ("m" zerostack-model-menu)
     ("P" zerostack-subagent-provider-menu)
@@ -2287,10 +2279,9 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands (append '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking")
-                           (when (zerostack--reasoning-effort-supported-p)
-                             '("reasoning"))
-                           '("provider" "model" "subagent-provider" "subagent-model" "goal" "clear-goal" "tools" "mcp" "view" "artifact" "restart")))
+  (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking"
+                    "provider" "model" "subagent-provider" "subagent-model" "goal"
+                    "clear-goal" "tools" "mcp" "view" "artifact" "restart"))
          (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
@@ -2300,7 +2291,6 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
       ("redo" (call-interactively #'zerostack-redo))
       ("loop" (call-interactively #'zerostack-loop))
       ("thinking" (call-interactively #'zerostack-thinking-menu))
-      ("reasoning" (call-interactively #'zerostack-reasoning-effort-menu))
       ("provider" (call-interactively #'zerostack-provider-menu))
       ("model" (call-interactively #'zerostack-model-menu))
       ("subagent-provider" (call-interactively #'zerostack-subagent-provider-menu))
@@ -2541,6 +2531,9 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     (setq zerostack--reasoning-effort
           (when-let ((effort (plist-get plist :reasoning-effort)))
             (format "%s" effort))))
+  (when (plist-member plist :reasoning-efforts)
+    (setq zerostack--reasoning-efforts
+          (cl-remove-if-not #'stringp (plist-get plist :reasoning-efforts))))
   (when (and (markerp zerostack--prompt-start-marker)
              (markerp zerostack--input-marker)
              (marker-position zerostack--prompt-start-marker)

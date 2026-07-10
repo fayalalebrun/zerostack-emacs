@@ -486,19 +486,39 @@ pub(crate) fn merge_extra_body(
     }
 }
 
-pub fn supports_reasoning_effort(provider: &str, model: &str) -> bool {
+pub(crate) fn supported_reasoning_efforts(provider: &str, model: &str) -> &'static [&'static str] {
+    const STANDARD: &[&str] = &["minimal", "low", "medium", "high"];
+    const GPT_5: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+    const GPT_56: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+
     let provider = provider.trim().to_ascii_lowercase();
-    if provider == "openai-codex" || provider == "codex" {
-        return true;
-    }
     let model = model.trim().to_ascii_lowercase();
+    if provider == "openai-codex" || provider == "codex" {
+        return if model.starts_with("gpt-5.6-") {
+            GPT_56
+        } else {
+            GPT_5
+        };
+    }
     if provider == "demo-openai" && model == "zerostack-demo-random" {
-        return true;
+        return STANDARD;
     }
     if provider != "openai" {
-        return false;
+        return &[];
     }
-    model.starts_with('o') || model.starts_with("gpt-5")
+    if model.starts_with("gpt-5.6-") {
+        GPT_56
+    } else if model.starts_with("gpt-5") {
+        GPT_5
+    } else if model.starts_with('o') {
+        STANDARD
+    } else {
+        &[]
+    }
+}
+
+pub fn supports_reasoning_effort(provider: &str, model: &str) -> bool {
+    !supported_reasoning_efforts(provider, model).is_empty()
 }
 
 pub(crate) fn valid_reasoning_effort(effort: &str) -> bool {
@@ -515,17 +535,7 @@ pub(crate) fn supports_reasoning_effort_value(provider: &str, model: &str, effor
     if !supports_reasoning_effort(provider, model) {
         return false;
     }
-    let provider = provider.trim().to_ascii_lowercase();
-    let model = model.trim().to_ascii_lowercase();
-    if provider == "openai-codex" || provider == "codex" {
-        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh")
-            || model.starts_with("gpt-5.6-") && effort == "max";
-    }
-    if provider == "openai" && model.starts_with("gpt-5") {
-        return matches!(effort, "none" | "low" | "medium" | "high" | "xhigh")
-            || model.starts_with("gpt-5.6-") && effort == "max";
-    }
-    matches!(effort, "minimal" | "low" | "medium" | "high")
+    supported_reasoning_efforts(provider, model).contains(&effort)
 }
 
 pub(crate) fn normalize_reasoning_effort_value(
@@ -1634,7 +1644,7 @@ pub fn build_btw_agent(
 mod tests {
     use super::{
         ensure_codex_instructions, normalize_reasoning_effort_value, openrouter_anthropic_routing,
-        supports_reasoning_effort_value,
+        supported_reasoning_efforts, supports_reasoning_effort_value,
     };
     use bytes::Bytes;
     use serde_json::json;
@@ -1675,6 +1685,10 @@ mod tests {
             None
         );
         for model in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
+            assert_eq!(
+                supported_reasoning_efforts("openai-codex", model),
+                &["none", "low", "medium", "high", "xhigh", "max"]
+            );
             for effort in ["xhigh", "max"] {
                 assert_eq!(
                     normalize_reasoning_effort_value("openai-codex", model, effort),
