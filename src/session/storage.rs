@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::cell::RefCell;
 use uuid::Uuid;
 
 use crate::session::Session;
@@ -24,7 +26,21 @@ fn dirs_path() -> PathBuf {
     data_dir()
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_data_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    TEST_DATA_DIR.with(|current| current.replace(dir))
+}
+
 pub fn data_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DATA_DIR.with(|dir| dir.borrow().clone()) {
+        return dir;
+    }
     if let Some(dir) = std::env::var_os("ZS_DATA_DIR") {
         return PathBuf::from(dir);
     }

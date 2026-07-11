@@ -230,6 +230,15 @@ fn nested_agents_for_path(
     let Ok(root) = std::env::current_dir().and_then(|p| p.canonicalize()) else {
         return Vec::new();
     };
+    nested_agents_for_path_from_root(path, already_loaded, include_target_dir, &root)
+}
+
+fn nested_agents_for_path_from_root(
+    path: &Path,
+    already_loaded: &HashSet<PathBuf>,
+    include_target_dir: bool,
+    root: &Path,
+) -> Vec<(PathBuf, String)> {
     let Ok(target) = path.canonicalize() else {
         return Vec::new();
     };
@@ -272,17 +281,12 @@ fn nested_agents_for_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{nested_agents_for_dir, nested_agents_for_read};
+    use super::nested_agents_for_path_from_root;
     use std::collections::HashSet;
     use std::fs;
-    use std::sync::Mutex;
-
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn nested_agents_for_read_walks_to_cwd_exclusive_and_dedupes() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let original = std::env::current_dir().unwrap();
         let root =
             std::env::temp_dir().join(format!("zerostack-nested-agents-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -292,14 +296,18 @@ mod tests {
         fs::write(root.join("src/components/CLAUDE.md"), "components").unwrap();
         fs::write(root.join("src/components/button.rs"), "fn main() {}").unwrap();
 
-        std::env::set_current_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
         let loaded = HashSet::from([root.join("src/AGENTS.md").canonicalize().unwrap()]);
         let expected = root
             .join("src/components/CLAUDE.md")
             .canonicalize()
             .unwrap();
-        let found = nested_agents_for_read(&root.join("src/components/button.rs"), &loaded);
-        std::env::set_current_dir(original).unwrap();
+        let found = nested_agents_for_path_from_root(
+            &root.join("src/components/button.rs"),
+            &loaded,
+            false,
+            &root,
+        );
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(found.len(), 1);
@@ -309,8 +317,6 @@ mod tests {
 
     #[test]
     fn nested_agents_for_dir_includes_target_directory() {
-        let _guard = CWD_LOCK.lock().unwrap();
-        let original = std::env::current_dir().unwrap();
         let root = std::env::temp_dir().join(format!(
             "zerostack-nested-dir-agents-{}",
             std::process::id()
@@ -319,9 +325,13 @@ mod tests {
         fs::create_dir_all(root.join("src/components")).unwrap();
         fs::write(root.join("src/components/AGENTS.md"), "components").unwrap();
 
-        std::env::set_current_dir(&root).unwrap();
-        let found = nested_agents_for_dir(&root.join("src/components"), &HashSet::new());
-        std::env::set_current_dir(original).unwrap();
+        let root = root.canonicalize().unwrap();
+        let found = nested_agents_for_path_from_root(
+            &root.join("src/components"),
+            &HashSet::new(),
+            true,
+            &root,
+        );
         fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(found.len(), 1);

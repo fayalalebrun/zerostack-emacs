@@ -5,20 +5,21 @@ use crate::session::storage::{
 };
 use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
-use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static STORAGE_LOCK: Mutex<()> = Mutex::new(());
 
 struct TestEnv {
-    dir: std::path::PathBuf,
+    dir: PathBuf,
     data_dir: String,
+    original_data_dir: Option<PathBuf>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
+        crate::session::storage::set_test_data_dir(self.original_data_dir.take());
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -29,13 +30,34 @@ fn setup_test_env() -> TestEnv {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let data_dir = dir.to_str().unwrap().to_string();
-    unsafe { env::set_var("ZS_DATA_DIR", &data_dir) };
+    let original_data_dir = crate::session::storage::set_test_data_dir(Some(dir.clone()));
     std::fs::create_dir_all(format!("{}/sessions", data_dir)).unwrap();
     TestEnv {
         dir,
         data_dir,
+        original_data_dir,
         _lock: lock,
     }
+}
+
+#[test]
+fn test_data_dir_override_is_thread_local() {
+    let current_dir = PathBuf::from("thread-local-current");
+    let child_dir = PathBuf::from("thread-local-child");
+    let original = crate::session::storage::set_test_data_dir(Some(current_dir.clone()));
+
+    let observed = std::thread::spawn(move || {
+        let original = crate::session::storage::set_test_data_dir(Some(child_dir.clone()));
+        let observed = crate::session::storage::data_dir();
+        crate::session::storage::set_test_data_dir(original);
+        observed
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(observed, PathBuf::from("thread-local-child"));
+    assert_eq!(crate::session::storage::data_dir(), current_dir);
+    crate::session::storage::set_test_data_dir(original);
 }
 
 #[test]
@@ -184,7 +206,7 @@ fn long_tool_result_save_failure_keeps_full_output() {
     let path = std::env::temp_dir().join(format!("zs_data_file_{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
     std::fs::write(&path, b"not a directory").unwrap();
-    unsafe { env::set_var("ZS_DATA_DIR", path.to_str().unwrap()) };
+    let original_data_dir = crate::session::storage::set_test_data_dir(Some(path.clone()));
 
     let mut s = Session::new("anthropic", "claude", 200000);
     let output = "x".repeat(TOOL_RESULT_SAVE_THRESHOLD + 1);
@@ -193,6 +215,7 @@ fn long_tool_result_save_failure_keeps_full_output() {
     let content = s.messages[0].content.as_str();
     assert!(content.contains(&output));
     assert!(content.contains("failed to save long tool output separately"));
+    crate::session::storage::set_test_data_dir(original_data_dir);
     let _ = std::fs::remove_file(path);
     drop(lock);
 }
@@ -249,10 +272,10 @@ fn find_sessions_by_prefix_empty_for_nonexistent_dir() {
     let lock = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("zs_nodir_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    unsafe { env::set_var("ZS_DATA_DIR", dir.to_str().unwrap()) };
-    // Don't create the directory at all
+    let original_data_dir = crate::session::storage::set_test_data_dir(Some(dir.clone()));
     let found = find_sessions_by_prefix("anything").unwrap();
     assert!(found.is_empty());
+    crate::session::storage::set_test_data_dir(original_data_dir);
     let _ = std::fs::remove_dir_all(&dir);
     drop(lock);
 }

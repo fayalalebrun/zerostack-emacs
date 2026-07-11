@@ -5,6 +5,8 @@ use compact_str::CompactString;
 use futures::StreamExt;
 use rig::OneOrMany;
 use rig::agent::{Agent, MultiTurnStreamItem, StreamingResult};
+#[cfg(feature = "subagents")]
+use rig::agent::{InvalidToolCallContext, InvalidToolCallHookAction, PromptHook};
 use rig::completion::message::{
     AssistantContent, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
 };
@@ -834,6 +836,38 @@ impl SubagentLimits {
 }
 
 #[cfg(feature = "subagents")]
+const SUBAGENT_INVALID_TOOL_RETRIES: usize = 2;
+
+#[cfg(feature = "subagents")]
+#[derive(Clone, Copy)]
+struct SubagentPromptHook;
+
+#[cfg(feature = "subagents")]
+impl<M: CompletionModel> PromptHook<M> for SubagentPromptHook {
+    async fn on_invalid_tool_call(
+        &self,
+        context: &InvalidToolCallContext,
+    ) -> InvalidToolCallHookAction {
+        InvalidToolCallHookAction::retry(subagent_invalid_tool_feedback(
+            &context.tool_name,
+            &context.allowed_tools,
+        ))
+    }
+}
+
+#[cfg(feature = "subagents")]
+fn subagent_invalid_tool_feedback(tool_name: &str, allowed_tools: &[String]) -> String {
+    let tools = if allowed_tools.is_empty() {
+        "none".to_string()
+    } else {
+        allowed_tools.join(", ")
+    };
+    format!(
+        "Unknown tool `{tool_name}`. Available tools: {tools}. Retry using only an available tool, or answer without calling a tool."
+    )
+}
+
+#[cfg(feature = "subagents")]
 pub async fn run_subagent<M, P>(
     agent: &Agent<M, P>,
     prompt: &str,
@@ -848,6 +882,8 @@ where
 {
     let mut stream = agent
         .stream_chat(prompt.to_string(), Vec::<Message>::new())
+        .with_hook(SubagentPromptHook)
+        .max_invalid_tool_call_retries(SUBAGENT_INVALID_TOOL_RETRIES)
         .multi_turn(max_turns)
         .await;
 
@@ -1071,7 +1107,7 @@ fn recent_tool_notes(tool_notes: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "subagents")]
-    use super::{SubagentLimits, subagent_cutoff_prompt};
+    use super::{SubagentLimits, subagent_cutoff_prompt, subagent_invalid_tool_feedback};
     use super::{
         convert_history, retry_delay_ms, streamed_provider_reasoning, streamed_reasoning_text,
     };
@@ -1090,6 +1126,26 @@ mod tests {
         };
 
         assert_eq!(limits.cutoff_tokens(), Some(900));
+    }
+
+    #[cfg(feature = "subagents")]
+    #[test]
+    fn subagent_invalid_tool_feedback_lists_allowed_tools() {
+        let feedback =
+            subagent_invalid_tool_feedback("bash", &["read".to_string(), "grep".to_string()]);
+
+        assert!(feedback.contains("Unknown tool `bash`"));
+        assert!(feedback.contains("read, grep"));
+        assert!(feedback.contains("Retry"));
+    }
+
+    #[cfg(feature = "subagents")]
+    #[test]
+    fn subagent_invalid_tool_feedback_handles_no_allowed_tools() {
+        let feedback = subagent_invalid_tool_feedback("bash", &[]);
+
+        assert!(feedback.contains("Available tools: none"));
+        assert!(feedback.contains("answer without calling a tool"));
     }
 
     #[cfg(feature = "subagents")]
