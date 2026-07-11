@@ -407,6 +407,7 @@ pub async fn handle_agent_event(
         AgentEvent::CompletionCall {
             call_index: _,
             usage,
+            duration_ms: _,
         } => {
             let real = usage.context_tokens();
             if real > session.total_estimated_tokens {

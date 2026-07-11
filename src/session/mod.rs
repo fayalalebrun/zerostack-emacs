@@ -50,6 +50,26 @@ pub struct SessionToolCall {
     pub arguments: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCallPurpose {
+    #[default]
+    Agent,
+    Compaction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProviderCall {
+    pub message_index: usize,
+    pub call_index: usize,
+    pub provider: CompactString,
+    pub model: CompactString,
+    #[serde(default)]
+    pub purpose: ProviderCallPurpose,
+    pub usage: SessionTokenUsage,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionToolResult {
     pub id: CompactString,
@@ -199,6 +219,7 @@ pub struct Compaction {
 #[derive(Debug, Clone)]
 pub struct RewindUndo {
     messages: Vec<SessionMessage>,
+    provider_calls: Vec<SessionProviderCall>,
     total_estimated_tokens: u64,
     calibrated_tokens: u64,
     calibrated_msg_count: usize,
@@ -215,6 +236,8 @@ pub struct Session {
     pub id: CompactString,
     pub name: CompactString,
     pub messages: Vec<SessionMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_calls: Vec<SessionProviderCall>,
     pub compactions: Vec<Compaction>,
     #[serde(skip)]
     pub rewind_undo: Option<RewindUndo>,
@@ -327,6 +350,7 @@ impl Session {
             id: CompactString::new(Uuid::new_v4().to_string()),
             name: CompactString::new(""),
             messages: Vec::new(),
+            provider_calls: Vec::new(),
             compactions: Vec::new(),
             rewind_undo: None,
             goal: None,
@@ -458,6 +482,58 @@ impl Session {
 
     pub fn add_message(&mut self, role: MessageRole, content: &str) {
         self.add_message_with_reasoning(role, content, Vec::new());
+    }
+
+    pub fn add_provider_call(
+        &mut self,
+        call_index: usize,
+        usage: crate::event::TokenUsage,
+        duration_ms: u64,
+    ) {
+        self.add_provider_call_with_purpose(
+            call_index,
+            usage,
+            duration_ms,
+            ProviderCallPurpose::Agent,
+        );
+    }
+
+    pub fn add_compaction_provider_call(
+        &mut self,
+        call_index: usize,
+        usage: crate::event::TokenUsage,
+        duration_ms: u64,
+    ) {
+        self.add_provider_call_with_purpose(
+            call_index,
+            usage,
+            duration_ms,
+            ProviderCallPurpose::Compaction,
+        );
+    }
+
+    fn add_provider_call_with_purpose(
+        &mut self,
+        call_index: usize,
+        usage: crate::event::TokenUsage,
+        duration_ms: u64,
+        purpose: ProviderCallPurpose,
+    ) {
+        let message_index = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == MessageRole::User)
+            .unwrap_or(0);
+        self.provider_calls.push(SessionProviderCall {
+            message_index,
+            call_index,
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            purpose,
+            usage: usage.into(),
+            duration_ms,
+        });
+        self.updated_at = CompactString::new(chrono::Utc::now().to_rfc3339());
     }
 
     pub fn add_message_with_reasoning(
@@ -734,6 +810,7 @@ impl Session {
         }
         self.rewind_undo = Some(RewindUndo {
             messages: self.messages.clone(),
+            provider_calls: self.provider_calls.clone(),
             total_estimated_tokens: self.total_estimated_tokens,
             calibrated_tokens: self.calibrated_tokens,
             calibrated_msg_count: self.calibrated_msg_count,
@@ -748,6 +825,7 @@ impl Session {
             return false;
         };
         self.messages = undo.messages;
+        self.provider_calls = undo.provider_calls;
         self.total_estimated_tokens = undo.total_estimated_tokens;
         self.calibrated_tokens = undo.calibrated_tokens;
         self.calibrated_msg_count = undo.calibrated_msg_count;
@@ -768,6 +846,8 @@ impl Session {
             self.calibrated_msg_count = new_len;
         }
         self.messages.truncate(new_len);
+        self.provider_calls
+            .retain(|call| call.message_index < new_len);
         self.total_estimated_tokens = self.estimated_message_tokens();
     }
 
@@ -856,6 +936,14 @@ impl Session {
         // Remove summarized messages and insert summary
         self.messages.drain(..first_kept_index);
         self.messages.insert(0, summary_msg);
+        self.provider_calls.retain_mut(|call| {
+            if call.message_index < first_kept_index {
+                false
+            } else {
+                call.message_index = call.message_index - first_kept_index + 1;
+                true
+            }
+        });
         for msg in &mut self.messages {
             msg.provider_usage = None;
         }

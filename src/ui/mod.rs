@@ -2232,6 +2232,22 @@ pub async fn run_interactive(
                 // Mid-turn compaction (PR H). On a provider-call boundary, if
                 // real prompt pressure crossed the opt-in threshold, abort the
                 // run cleanly, compact, and respawn on the compacted history.
+                if let AgentEvent::CompletionCall {
+                    call_index,
+                    usage,
+                    duration_ms,
+                } = &event
+                {
+                    session.add_provider_call(*call_index, *usage, *duration_ms);
+                    if !cli.no_session
+                        && let Err(error) = save_session(session)
+                    {
+                        renderer.write_line(
+                            &format!("warning: failed to save session: {error}"),
+                            C_ERROR,
+                        )?;
+                    }
+                }
                 // Gated by `compact_enabled` (master switch) and suppressed in
                 // /loop runs and `--no-session` mode (which never compact).
                 #[cfg(feature = "loop")]

@@ -258,9 +258,13 @@ pub async fn handle_compress(
     renderer.write_line("", crossterm::style::Color::White)?;
 
     let messages_to_summarize = &session.messages[..cut_idx];
+    let tokens_before: u64 = messages_to_summarize
+        .iter()
+        .map(|m| m.estimated_tokens)
+        .sum();
     let previous_summary = session.compactions.last().map(|c| c.summary.as_str());
 
-    let summary = client
+    let compression = client
         .compress_messages(
             &session.model,
             messages_to_summarize,
@@ -268,11 +272,14 @@ pub async fn handle_compress(
             instructions,
         )
         .await?;
+    if let Some(call) = compression.provider_call {
+        session.add_compaction_provider_call(call.call_index, call.usage, call.duration_ms);
+    }
+    let summary = compression.summary;
 
-    let tokens_before: u64 = messages_to_summarize
-        .iter()
-        .map(|m| m.estimated_tokens)
-        .sum();
+    if !cli.no_session {
+        crate::session::storage::archive_pre_compaction(session)?;
+    }
 
     #[cfg(feature = "memory")]
     crate::extras::memory::flush_compaction_summary(
@@ -281,6 +288,9 @@ pub async fn handle_compress(
         Some(cut_idx), // = first_kept_index: how many messages were summarized
     );
     session.compress(summary, cut_idx, tokens_before);
+    if !cli.no_session {
+        crate::session::storage::save_session(session)?;
+    }
 
     let model = client.completion_model(session.model.to_string());
     let temperature = crate::config::resolve_temperature(cli, cfg, &session.model);

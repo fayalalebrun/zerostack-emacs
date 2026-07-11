@@ -19,7 +19,7 @@ use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingCha
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep, sleep_until};
 
-use crate::event::{AgentEvent, BtwEvent, TokenUsage};
+use crate::event::{AgentEvent, BtwEvent, ProviderCall, TokenUsage};
 use crate::session::{
     MessageRole, ProviderReasoning, Session, SessionMessage, assistant_message_with_reasoning,
 };
@@ -37,6 +37,7 @@ pub struct PrintRunResult {
     pub reasoning: Vec<ProviderReasoning>,
     pub usage: TokenUsage,
     pub context_usage: TokenUsage,
+    pub provider_calls: Vec<ProviderCall>,
 }
 
 /// Handle to an in-flight `/btw` side-question task. The `abort_handle` lets the
@@ -479,6 +480,7 @@ where
         let mut retry_attempts = 0usize;
         let mut stream_had_output = false;
 
+        let mut provider_call_started = Instant::now();
         let mut stream = agent.stream_chat(prompt, history).await;
 
         loop {
@@ -567,6 +569,7 @@ where
                             })
                             .await;
                         tool_interactions.push(tool_result.clone().into());
+                        provider_call_started = Instant::now();
                     }
                     Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                         let response_text = res.response();
@@ -589,6 +592,11 @@ where
                         break;
                     }
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                        let duration_ms = provider_call_started
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
                         let usage = TokenUsage::from(call.usage);
                         usage_total += usage;
                         latest_usage = Some(usage);
@@ -596,8 +604,10 @@ where
                             .send(AgentEvent::CompletionCall {
                                 call_index: call.call_index,
                                 usage,
+                                duration_ms,
                             })
                             .await;
+                        provider_call_started = Instant::now();
                     }
                     Err(e) => {
                         let message = e.to_string();
@@ -613,6 +623,7 @@ where
                                 })
                                 .await;
                             sleep_for_retry(delay_ms).await;
+                            provider_call_started = Instant::now();
                             stream = agent
                                 .stream_chat(retry_prompt.clone(), retry_history.clone())
                                 .await;
@@ -633,6 +644,7 @@ where
 
             retry_attempts = 0;
             stream_had_output = false;
+            provider_call_started = Instant::now();
             stream =
                 continue_prompt_injector(&agent, &retry_prompt, &retry_history, &tool_interactions)
                     .await;
@@ -656,6 +668,7 @@ where
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
     P: rig::agent::PromptHook<M> + 'static,
 {
+    let mut provider_call_started = Instant::now();
     let mut stream = agent
         .stream_chat(prompt.to_string(), Vec::<Message>::new())
         .multi_turn(max_turns)
@@ -665,6 +678,7 @@ where
     let mut response_reasoning = Vec::new();
     let mut usage_total = TokenUsage::default();
     let mut latest_usage: Option<TokenUsage> = None;
+    let mut provider_calls = Vec::new();
     let mut last_tool_name: Option<String> = None;
 
     while let Some(item) = stream.next().await {
@@ -696,34 +710,48 @@ where
             Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,
                 ..
-            })) if pure_stdout => {
-                let name = last_tool_name.take().unwrap_or_default();
-                let mut output = String::new();
-                for c in tool_result.content.iter() {
-                    if let ToolResultContent::Text(t) = c {
-                        if !output.is_empty() {
-                            output.push('\n');
+            })) => {
+                if pure_stdout {
+                    let name = last_tool_name.take().unwrap_or_default();
+                    let mut output = String::new();
+                    for c in tool_result.content.iter() {
+                        if let ToolResultContent::Text(t) = c {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            output.push_str(&t.text);
                         }
-                        output.push_str(&t.text);
+                    }
+                    if !output.is_empty() {
+                        println!("◈ {} result:", name);
+                        let lines: Vec<&str> = output.lines().collect();
+                        if lines.len() > 40 {
+                            let truncated: Vec<&str> = lines.iter().take(40).copied().collect();
+                            println!("{}", truncated.join("\n"));
+                            println!("(truncated {} more lines)", lines.len().saturating_sub(40));
+                        } else {
+                            println!("{}", output);
+                        }
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                 }
-                if !output.is_empty() {
-                    println!("◈ {} result:", name);
-                    let lines: Vec<&str> = output.lines().collect();
-                    if lines.len() > 40 {
-                        let truncated: Vec<&str> = lines.iter().take(40).copied().collect();
-                        println!("{}", truncated.join("\n"));
-                        println!("(truncated {} more lines)", lines.len().saturating_sub(40));
-                    } else {
-                        println!("{}", output);
-                    }
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                }
+                provider_call_started = Instant::now();
             }
             Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                let duration_ms = provider_call_started
+                    .elapsed()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
                 let usage = TokenUsage::from(call.usage);
                 usage_total += usage;
                 latest_usage = Some(usage);
+                provider_calls.push(ProviderCall {
+                    call_index: call.call_index,
+                    usage,
+                    duration_ms,
+                });
+                provider_call_started = Instant::now();
             }
             Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
             Ok(_) => {}
@@ -741,6 +769,7 @@ where
         reasoning: response_reasoning,
         usage: usage_total,
         context_usage,
+        provider_calls,
     })
 }
 

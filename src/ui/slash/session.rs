@@ -212,6 +212,7 @@ async fn handle_redo(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
 
 async fn handle_clear(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     ctx.session.messages.clear();
+    ctx.session.provider_calls.clear();
     ctx.session.total_estimated_tokens = 0;
     ctx.session.reset_calibration();
     ctx.session.compactions.clear();

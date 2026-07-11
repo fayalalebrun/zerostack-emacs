@@ -1,7 +1,7 @@
 use crate::session::Session;
 use crate::session::storage::{
-    delete_session, find_all_sessions, find_sessions_by_prefix, load_suffix, save_session,
-    suffix_path,
+    archive_pre_compaction, delete_session, find_all_sessions, find_sessions_by_prefix,
+    load_suffix, save_session, suffix_path,
 };
 use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
@@ -58,6 +58,25 @@ fn test_data_dir_override_is_thread_local() {
     assert_eq!(observed, PathBuf::from("thread-local-child"));
     assert_eq!(crate::session::storage::data_dir(), current_dir);
     crate::session::storage::set_test_data_dir(original);
+}
+
+#[test]
+fn archive_pre_compaction_preserves_complete_original_session() {
+    let env = setup_test_env();
+    let mut session = Session::new("openai", "gpt-4", 128000);
+    session.add_message(MessageRole::User, "original prompt");
+    session.add_provider_call(0, crate::event::TokenUsage::default(), 321);
+    session.add_message(MessageRole::Assistant, "original answer");
+
+    let path = archive_pre_compaction(&session).unwrap();
+    session.compress("summary".to_string(), 1, 10);
+    let archived: Session = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+    assert!(path.starts_with(env.dir.join("sessions/compacted").join(&session.id)));
+    assert_eq!(archived.messages[0].content, "original prompt");
+    assert!(archived.compactions.is_empty());
+    assert_eq!(archived.provider_calls[0].duration_ms, 321);
+    assert_eq!(session.messages[0].content, "summary");
 }
 
 #[test]

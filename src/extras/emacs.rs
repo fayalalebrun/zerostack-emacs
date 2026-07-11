@@ -2148,13 +2148,19 @@ mod imp {
 
         let (model, cut_idx, messages, previous_summary, saved_tokens) = plan;
         let client = server.client.lock().await.clone();
-        let summary = client
+        let compression = client
             .compress_messages(&model, &messages, previous_summary.as_deref(), instructions)
             .await?;
 
         {
             let mut session = server.session.lock().await;
-            session.compress(summary, cut_idx, saved_tokens);
+            if let Some(call) = compression.provider_call {
+                session.add_compaction_provider_call(call.call_index, call.usage, call.duration_ms);
+            }
+            if !server.cli.no_session {
+                crate::session::storage::archive_pre_compaction(&session)?;
+            }
+            session.compress(compression.summary, cut_idx, saved_tokens);
             if !server.cli.no_session {
                 crate::session::storage::save_session(&session)?;
             }
@@ -3017,14 +3023,25 @@ mod imp {
                         )
                         .await;
                 }
-                AgentEvent::CompletionCall { call_index, usage } => {
-                    let context_window = server.session.lock().await.context_window;
+                AgentEvent::CompletionCall {
+                    call_index,
+                    usage,
+                    duration_ms,
+                } => {
+                    let context_window = {
+                        let mut session = server.session.lock().await;
+                        session.add_provider_call(call_index, usage, duration_ms);
+                        if !server.cli.no_session {
+                            crate::session::storage::save_session(&session)?;
+                        }
+                        session.context_window
+                    };
                     server
                         .broadcast_event(
                             "completion-call",
                             format!(
-                                " :turn {} :call-index {} :input-tokens {} :output-tokens {} :reasoning-tokens {} :tokens {} :context-window {}",
-                                turn, call_index, usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.context_tokens(), context_window,
+                                " :turn {} :call-index {} :input-tokens {} :output-tokens {} :reasoning-tokens {} :tokens {} :context-window {} :duration-ms {}",
+                                turn, call_index, usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.context_tokens(), context_window, duration_ms,
                             ),
                         )
                         .await;

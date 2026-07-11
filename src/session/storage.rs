@@ -59,11 +59,36 @@ pub fn save_session(session: &Session) -> anyhow::Result<()> {
     let dir = session_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", session.id));
+    std::fs::write(path, serialize_session(session)?)?;
+    Ok(())
+}
+
+pub fn archive_pre_compaction(session: &Session) -> anyhow::Result<PathBuf> {
+    let dir = session_dir()
+        .join("compacted")
+        .join(safe_path_component(&session.id));
+    std::fs::create_dir_all(&dir)?;
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
+    let filename = format!(
+        "{:04}-{}-{}.json",
+        session.compactions.len() + 1,
+        timestamp,
+        Uuid::new_v4()
+    );
+    let path = dir.join(filename);
+    let temp = dir.join(format!(".{}.tmp", Uuid::new_v4()));
+    std::fs::write(&temp, serialize_session(session)?)?;
+    if let Err(error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(temp);
+        return Err(error.into());
+    }
+    Ok(path)
+}
+
+fn serialize_session(session: &Session) -> anyhow::Result<String> {
     let mut session = session.clone();
     session.goal = crate::agent::tools::goal::current_goal_state();
-    let json = serde_json::to_string(&session)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    Ok(serde_json::to_string(&session)?)
 }
 
 pub fn save_tool_output(

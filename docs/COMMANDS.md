@@ -130,6 +130,11 @@ You are in read-only mode. Only read files and explore.
 | `/reasoning` | Toggle LLM reasoning on/off (requires model support). |
 | `/thinking` | Alias for `/reasoning`. |
 | `/review [msg]` | Run a one-shot code review. Activates the `review` prompt in readonly mode, submits a review message, and restores the previous prompt afterward. Without a message, auto-generates one based on session and worktree context. |
+
+Before each successful compaction, zerostack archives the complete pre-compaction
+session under `<data-dir>/sessions/compacted/<session-id>/`. Session JSON also
+stores each provider call's token usage and `duration_ms`; tool results retain
+their existing `duration_ms`, allowing provider-wait and tool time analysis.
 | `/toggle` | Show available toggleable features. |
 | `/toggle todo [on\|off]` | Enable or disable todo-list tools. |
 

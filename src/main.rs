@@ -760,6 +760,9 @@ async fn main() -> anyhow::Result<()> {
             let print_result = response_result?;
             if !cli.no_session {
                 session.add_message(MessageRole::User, &msg);
+                for call in print_result.provider_calls {
+                    session.add_provider_call(call.call_index, call.usage, call.duration_ms);
+                }
                 let mut provider_usage =
                     session::SessionTokenUsage::from(print_result.context_usage);
                 provider_usage.reasoning_tokens = print_result.usage.reasoning_tokens;

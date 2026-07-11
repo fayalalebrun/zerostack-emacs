@@ -88,6 +88,13 @@ mod tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCall {
+    pub call_index: usize,
+    pub usage: TokenUsage,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct DisplayArtifact {
     pub kind: CompactString,
@@ -135,6 +142,7 @@ pub enum AgentEvent {
     CompletionCall {
         call_index: usize,
         usage: TokenUsage,
+        duration_ms: u64,
     },
     Done {
         response: CompactString,

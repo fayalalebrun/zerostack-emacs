@@ -311,6 +311,40 @@ fn add_message_appends() {
 }
 
 #[test]
+fn provider_calls_round_trip_and_follow_compaction() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    s.add_message(MessageRole::User, "old turn");
+    s.add_provider_call(
+        0,
+        crate::event::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 2,
+            ..Default::default()
+        },
+        125,
+    );
+    s.add_message(MessageRole::Assistant, "old answer");
+    s.add_message(MessageRole::User, "kept turn");
+    s.add_provider_call(1, crate::event::TokenUsage::default(), 250);
+
+    let json = serde_json::to_string(&s).unwrap();
+    let mut loaded: Session = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(loaded.provider_calls.len(), 2);
+    assert_eq!(loaded.provider_calls[0].usage.input_tokens, 10);
+    assert_eq!(loaded.provider_calls[0].provider, "openai");
+    assert_eq!(loaded.provider_calls[0].model, "gpt-4");
+    assert_eq!(
+        loaded.provider_calls[0].purpose,
+        crate::session::ProviderCallPurpose::Agent
+    );
+    assert_eq!(loaded.provider_calls[1].duration_ms, 250);
+    loaded.compress("summary".to_string(), 2, 10);
+    assert_eq!(loaded.provider_calls.len(), 1);
+    assert_eq!(loaded.provider_calls[0].message_index, 1);
+}
+
+#[test]
 fn partial_assistant_output_is_preserved_with_reasoning() {
     let mut s = Session::new("openai", "gpt-4", 128000);
     let reasoning = vec![crate::session::ProviderReasoning {

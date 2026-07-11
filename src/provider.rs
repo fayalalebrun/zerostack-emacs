@@ -600,7 +600,7 @@ impl AnyClient {
         messages: &[SessionMessage],
         previous_summary: Option<&str>,
         instructions: Option<&str>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<CompressionResult> {
         let conversation = serialize_conversation(messages);
 
         let prompt = prompt::COMPACTION_PROMPT
@@ -609,9 +609,13 @@ impl AnyClient {
             .replace("{instructions}", instructions.unwrap_or("(none)"));
 
         let model = self.completion_model(model_name.to_string());
-        let response = summarize_with_model(model, prompt).await?;
-        Ok(response)
+        summarize_with_model(model, prompt).await
     }
+}
+
+pub struct CompressionResult {
+    pub summary: String,
+    pub provider_call: Option<crate::event::ProviderCall>,
 }
 
 #[derive(Clone)]
@@ -764,7 +768,10 @@ pub async fn list_models_manual(
         .collect())
 }
 
-async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result<String> {
+async fn summarize_with_model(
+    model: AnyModel,
+    prompt: String,
+) -> anyhow::Result<CompressionResult> {
     match model {
         AnyModel::OpenRouter(m, _) => run_summarizer(m, prompt).await,
         AnyModel::OpenAI(m) => match m {
@@ -776,11 +783,14 @@ async fn summarize_with_model(model: AnyModel, prompt: String) -> anyhow::Result
         AnyModel::Gemini(m) => run_summarizer(m, prompt).await,
         AnyModel::Ollama(m) => run_summarizer(m, prompt).await,
         #[cfg(test)]
-        AnyModel::Test(_) => Ok(prompt),
+        AnyModel::Test(_) => Ok(CompressionResult {
+            summary: prompt,
+            provider_call: None,
+        }),
     }
 }
 
-async fn run_summarizer<M>(model: M, prompt: String) -> anyhow::Result<String>
+async fn run_summarizer<M>(model: M, prompt: String) -> anyhow::Result<CompressionResult>
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
@@ -795,18 +805,27 @@ where
         .preamble(&preamble)
         .build();
 
+    let started = std::time::Instant::now();
     let mut stream = agent
         .stream_chat(prompt, Vec::<Message>::new())
         .multi_turn(1)
         .await;
 
     let mut response = String::new();
+    let mut provider_call = None;
     use futures::StreamExt;
     while let Some(item) = stream.next().await {
         match item {
             Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                 rig::streaming::StreamedAssistantContent::Text(text),
             )) => response.push_str(&text.text),
+            Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
+                provider_call = Some(crate::event::ProviderCall {
+                    call_index: call.call_index,
+                    usage: call.usage.into(),
+                    duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                });
+            }
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
                 response = res.response().to_string();
                 break;
@@ -820,7 +839,10 @@ where
         anyhow::bail!("Compression returned empty response");
     }
 
-    Ok(response)
+    Ok(CompressionResult {
+        summary: response,
+        provider_call,
+    })
 }
 
 pub(crate) fn serialize_conversation(messages: &[SessionMessage]) -> String {
@@ -912,6 +934,7 @@ impl AnyAgent {
                 reasoning: Vec::new(),
                 usage: crate::event::TokenUsage::default(),
                 context_usage: crate::event::TokenUsage::default(),
+                provider_calls: Vec::new(),
             }),
         }
     }
