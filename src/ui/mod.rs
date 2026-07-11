@@ -667,7 +667,8 @@ fn stop_turn_context_exhausted(
     prompt_tokens: u64,
     threshold: f64,
     renderer: &mut Renderer,
-    session: &Session,
+    session: &mut Session,
+    cli: &Cli,
     cfg: &Config,
     agent_rx: &mut Option<mpsc::Receiver<AgentEvent>>,
     main_abort: &mut Option<tokio::task::AbortHandle>,
@@ -687,8 +688,12 @@ fn stop_turn_context_exhausted(
     *was_reasoning = false;
     *agent_line_started = false;
     turn_trace.clear();
+    session.add_partial_assistant_output(response_buf, Vec::new());
     response_buf.clear();
     *response_start_line = None;
+    if !cli.no_session {
+        save_session(session)?;
+    }
     if let Some(ss) = status_signals.as_ref() {
         ss.send_stop();
     }
@@ -1291,6 +1296,15 @@ pub async fn run_interactive(
                                     cli,
                                     &mut renderer,
                                 )?;
+                                let persisted_response = session
+                                    .add_partial_assistant_output(&response_buf, Vec::new());
+                                response_buf.clear();
+                                response_start_line = None;
+                                agent_line_started = false;
+                                was_reasoning = false;
+                                if persisted_response && !cli.no_session {
+                                    save_session(session)?;
+                                }
                                 is_running = false;
                                 if let Some(ss) = status_signals.as_ref() {
                                     ss.send_stop();
@@ -2241,7 +2255,7 @@ pub async fn run_interactive(
                             // exceeds the budget, so compacting again is futile.
                             // Stop the turn and show the user the arithmetic.
                             stop_turn_context_exhausted(
-                                input_tokens, threshold, &mut renderer, session, cfg,
+                                input_tokens, threshold, &mut renderer, session, cli, cfg,
                                 &mut agent_rx, &mut main_abort, &mut is_running,
                                 &status_signals, &mut turn_trace, &mut response_buf,
                                 &mut response_start_line, &mut agent_line_started,
@@ -2271,8 +2285,8 @@ pub async fn run_interactive(
                 }
                 #[cfg(feature = "mcp")]
                 let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
-                // Peek before the event is consumed: a failed turn rolls the
-                // in-flight interactive message back into the input editor.
+                // Peek before the event is consumed: a failed turn with no
+                // persisted output rolls its user message back into the editor.
                 let turn_errored = matches!(&event, AgentEvent::Error { .. });
                 handle_agent_event(
                     event, &mut renderer, session, cfg, cli, context,
@@ -2287,18 +2301,16 @@ pub async fn run_interactive(
                     #[cfg(feature = "mcp")] mcp_ref,
                 ).await?;
                 if turn_errored {
-                    // The turn produced no response, so the trailing user message
-                    // is still pending. Remove it (so it never poisons the next
-                    // request) and restore it to the input editor for the user to
-                    // edit or resend. Provider-agnostic: works for too-long, auth,
-                    // rate-limit, and transient errors alike.
+                    // Roll back only if the user message is still last. Partial
+                    // assistant or tool output commits the turn and must remain in
+                    // the next request's history.
                     if let Some(text) = pending_send.take() {
                         let len = session.messages.len();
                         if len > 0 && session.messages[len - 1].role == MessageRole::User {
                             session.truncate_to(len - 1);
+                            input.buffer = text.into();
+                            input.cursor = input.buffer.len();
                         }
-                        input.buffer = text.into();
-                        input.cursor = input.buffer.len();
                     }
                 } else if !is_running {
                     // Turn completed normally; the message is committed.

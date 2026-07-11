@@ -140,6 +140,12 @@ pub async fn handle_agent_event(
             if !show_reasoning {
                 return Ok(());
             }
+            if !response_buf.is_empty() {
+                session.add_partial_assistant_output(response_buf, Vec::new());
+                response_buf.clear();
+                *response_start_line = None;
+                save_session_if_enabled(session, cli, renderer)?;
+            }
             if !*agent_line_started {
                 renderer.write("< ", Color::DarkMagenta)?;
                 *agent_line_started = true;
@@ -191,6 +197,7 @@ pub async fn handle_agent_event(
                 renderer.write_line("", Color::White)?;
                 *agent_line_started = false;
             }
+            session.add_partial_assistant_output(response_buf, Vec::new());
             response_buf.clear();
             *response_start_line = None;
             session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
@@ -426,13 +433,7 @@ pub async fn handle_agent_event(
             *was_reasoning = false;
             let safe = sanitize_output(&message);
             renderer.write_line(&format!("error: {}", safe), C_ERROR)?;
-            if !reasoning.is_empty() {
-                session.add_message_with_reasoning(
-                    MessageRole::Assistant,
-                    "[turn failed; partial provider reasoning captured]",
-                    reasoning,
-                );
-            }
+            session.add_partial_assistant_output(response_buf, reasoning);
             *is_running = false;
             if let Some(ss) = status_signals.as_ref() {
                 ss.send_stop();

@@ -113,6 +113,7 @@ mod imp {
         pending_permissions: HashMap<u64, AskRequest>,
         last_event_at: Option<String>,
         active_live_output: Option<ActiveLiveOutput>,
+        active_response: Option<(u64, String)>,
     }
 
     struct CompactionOutcome {
@@ -356,6 +357,7 @@ mod imp {
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
                 active_live_output: None,
+                active_response: None,
             }),
             registry_dir: registration.dir.clone(),
             socket_path: registration.socket_path.clone(),
@@ -2167,6 +2169,25 @@ mod imp {
         })
     }
 
+    async fn persist_partial_assistant_output(
+        server: &Arc<Server>,
+        response: &str,
+        reasoning: Vec<crate::session::ProviderReasoning>,
+    ) -> anyhow::Result<bool> {
+        let persisted = {
+            let mut session = server.session.lock().await;
+            let persisted = session.add_partial_assistant_output(response, reasoning);
+            if persisted && !server.cli.no_session {
+                crate::session::storage::save_session(&session)?;
+            }
+            persisted
+        };
+        if persisted {
+            server.update_meta_from_session().await;
+        }
+        Ok(persisted)
+    }
+
     async fn persist_interrupted_live_output(server: &Arc<Server>) -> anyhow::Result<bool> {
         let active = server.mutable.lock().await.active_live_output.take();
         let Some(active) = active else {
@@ -2249,18 +2270,24 @@ mod imp {
         out: &mpsc::Sender<String>,
     ) -> anyhow::Result<()> {
         stop_loop_state(server, false).await;
-        let aborted = {
+        let (aborted, partial_response) = {
             let mut mutable = server.mutable.lock().await;
             let was_running = mutable.running;
             if let Some(handle) = mutable.abort_handle.take() {
                 handle.abort();
             }
             mutable.running = false;
-            was_running
+            let partial_response = mutable
+                .active_response
+                .take()
+                .map(|(_, response)| response)
+                .unwrap_or_default();
+            (was_running, partial_response)
         };
         server.sandbox.kill_active();
         if aborted {
             let _ = persist_interrupted_live_output(server).await?;
+            let _ = persist_partial_assistant_output(server, &partial_response, Vec::new()).await?;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -2277,7 +2304,7 @@ mod imp {
 
     #[cfg(feature = "loop")]
     async fn stop_loop_state(server: &Arc<Server>, abort_running: bool) -> bool {
-        let (stopped, aborted, abort_handle) = {
+        let (stopped, aborted, abort_handle, partial_response) = {
             let mut mutable = server.mutable.lock().await;
             let stopped = mutable.loop_state.take().is_some();
             let aborted = abort_running && mutable.running;
@@ -2286,16 +2313,26 @@ mod imp {
             } else {
                 None
             };
+            let partial_response = if abort_running {
+                mutable
+                    .active_response
+                    .take()
+                    .map(|(_, response)| response)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             if abort_running {
                 mutable.running = false;
             }
-            (stopped, aborted, abort_handle)
+            (stopped, aborted, abort_handle, partial_response)
         };
         if let Some(handle) = abort_handle {
             handle.abort();
         }
         if aborted {
             server.sandbox.kill_active();
+            let _ = persist_partial_assistant_output(server, &partial_response, Vec::new()).await;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -2664,6 +2701,7 @@ mod imp {
             let mut mutable = server.mutable.lock().await;
             mutable.abort_handle = Some(runner.abort_handle.clone());
             mutable.active_live_output = None;
+            mutable.active_response = Some((turn, String::new()));
         }
 
         let mut response_buf = String::new();
@@ -2730,7 +2768,15 @@ mod imp {
                 AgentEvent::Token(text) => {
                     let safe = sanitize_output(&text);
                     response_buf.push_str(&safe);
-                    let cols = server.mutable.lock().await.cols;
+                    let cols = {
+                        let mut mutable = server.mutable.lock().await;
+                        if let Some((active_turn, active_response)) = &mut mutable.active_response
+                            && *active_turn == turn
+                        {
+                            active_response.push_str(&safe);
+                        }
+                        mutable.cols
+                    };
                     let lines = with_source_lines(
                         render_assistant_lines(&response_buf, cols, false),
                         assistant_index,
@@ -2766,8 +2812,14 @@ mod imp {
                             )
                             .await;
                     }
-                    response_buf.clear();
-                    response_start_line = None;
+                    {
+                        let mut mutable = server.mutable.lock().await;
+                        if let Some((active_turn, active_response)) = &mut mutable.active_response
+                            && *active_turn == turn
+                        {
+                            active_response.clear();
+                        }
+                    }
                     // A later model call may emit a new reasoning stream after this
                     // tool result. Start that as a new rendered segment so replacing
                     // `thinking: ...` does not delete the tool rows appended below.
@@ -2775,11 +2827,14 @@ mod imp {
                     let summary = format_tool_call_summary(&name, &args);
                     {
                         let mut session = server.session.lock().await;
+                        session.add_partial_assistant_output(&response_buf, Vec::new());
                         session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
                     }
+                    response_buf.clear();
+                    response_start_line = None;
                     server
                         .append_lines(
                             "tool-render",
@@ -2870,6 +2925,7 @@ mod imp {
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
+                        assistant_index = session.messages.len();
                         content
                     };
                     let artifact = match server
@@ -2979,6 +3035,15 @@ mod imp {
                         if let Some(handle) = server.mutable.lock().await.abort_handle.take() {
                             handle.abort();
                         }
+                        {
+                            let mut mutable = server.mutable.lock().await;
+                            if let Some((active_turn, active_response)) =
+                                &mut mutable.active_response
+                                && *active_turn == turn
+                            {
+                                active_response.clear();
+                            }
+                        }
                         server
                             .broadcast_event(
                                 "compact-started",
@@ -3042,7 +3107,17 @@ mod imp {
                     context_usage,
                     reasoning,
                 } => {
-                    let cols = server.mutable.lock().await.cols;
+                    let cols = {
+                        let mut mutable = server.mutable.lock().await;
+                        if mutable
+                            .active_response
+                            .as_ref()
+                            .is_some_and(|(active_turn, _)| *active_turn == turn)
+                        {
+                            mutable.active_response = None;
+                        }
+                        mutable.cols
+                    };
                     let start = match response_start_line {
                         Some(start) => start,
                         None => server.mutable.lock().await.line_count,
@@ -3147,7 +3222,18 @@ mod imp {
                     }
                     return Ok(Some(response.to_string()));
                 }
-                AgentEvent::Error { message, .. } => {
+                AgentEvent::Error { message, reasoning } => {
+                    {
+                        let mut mutable = server.mutable.lock().await;
+                        if mutable
+                            .active_response
+                            .as_ref()
+                            .is_some_and(|(active_turn, _)| *active_turn == turn)
+                        {
+                            mutable.active_response = None;
+                        }
+                    }
+                    persist_partial_assistant_output(&server, &response_buf, reasoning).await?;
                     server
                         .append_lines(
                             "error-render",
@@ -3169,10 +3255,20 @@ mod imp {
             }
         }
 
-        let should_report = {
-            let mutable = server.mutable.lock().await;
-            should_report_agent_ended(&mutable, turn)
+        let (should_report, should_persist) = {
+            let mut mutable = server.mutable.lock().await;
+            let should_persist = mutable
+                .active_response
+                .as_ref()
+                .is_some_and(|(active_turn, _)| *active_turn == turn);
+            if should_persist {
+                mutable.active_response = None;
+            }
+            (should_report_agent_ended(&mutable, turn), should_persist)
         };
+        if should_persist {
+            persist_partial_assistant_output(&server, &response_buf, Vec::new()).await?;
+        }
         if should_report {
             server
                 .broadcast_event(
@@ -5337,6 +5433,7 @@ mod imp {
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
                 active_live_output: None,
+                active_response: None,
             };
 
             assert!(!should_report_agent_ended(&mutable, 1));
@@ -5632,6 +5729,36 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn abort_persists_partial_assistant_response() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server(prompts);
+            drop(listener);
+            {
+                let mut session = server.session.lock().await;
+                session.add_message(MessageRole::User, "question");
+            }
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.turn = 7;
+                mutable.active_response = Some((7, "partial answer".to_string()));
+            }
+            let (out_tx, mut out_rx) = mpsc::channel(4);
+            let abort_cmd = parse_command("(abort :request 2)").unwrap();
+
+            handle_abort(&server, &abort_cmd, &out_tx).await.unwrap();
+
+            assert!(out_rx.recv().await.unwrap().contains(":aborted t"));
+            let session = server.session.lock().await;
+            assert_eq!(
+                session.messages.last().unwrap().role,
+                MessageRole::Assistant
+            );
+            assert_eq!(session.messages.last().unwrap().content, "partial answer");
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
         async fn interrupted_live_output_persists_tool_result() {
             let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
             let (server, registration, listener) = test_server(prompts);
@@ -5743,6 +5870,7 @@ mod imp {
                     pending_permissions: HashMap::new(),
                     last_event_at: None,
                     active_live_output: None,
+                    active_response: None,
                 }),
                 registry_dir: registration.dir.clone(),
                 socket_path,

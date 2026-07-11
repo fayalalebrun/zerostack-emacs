@@ -469,6 +469,23 @@ impl Session {
         self.add_message_with_reasoning_and_usage(role, content, provider_reasoning, None);
     }
 
+    pub fn add_partial_assistant_output(
+        &mut self,
+        content: &str,
+        provider_reasoning: Vec<ProviderReasoning>,
+    ) -> bool {
+        if content.is_empty() && provider_reasoning.is_empty() {
+            return false;
+        }
+        let content = if content.is_empty() {
+            "[turn failed; partial provider reasoning captured]"
+        } else {
+            content
+        };
+        self.add_message_with_reasoning(MessageRole::Assistant, content, provider_reasoning);
+        true
+    }
+
     pub fn add_message_with_reasoning_and_usage(
         &mut self,
         role: MessageRole,

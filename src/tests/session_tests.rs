@@ -311,6 +311,30 @@ fn add_message_appends() {
 }
 
 #[test]
+fn partial_assistant_output_is_preserved_with_reasoning() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+    let reasoning = vec![crate::session::ProviderReasoning {
+        id: "reasoning-1".to_string(),
+        content: vec![crate::session::ProviderReasoningContent::Summary(
+            "partial thought".to_string(),
+        )],
+    }];
+
+    assert!(s.add_partial_assistant_output("partial answer", reasoning.clone()));
+    assert_eq!(s.messages[0].role, MessageRole::Assistant);
+    assert_eq!(s.messages[0].content, "partial answer");
+    assert_eq!(s.messages[0].provider_reasoning, reasoning);
+}
+
+#[test]
+fn empty_partial_assistant_output_is_ignored() {
+    let mut s = Session::new("openai", "gpt-4", 128000);
+
+    assert!(!s.add_partial_assistant_output("", Vec::new()));
+    assert!(s.messages.is_empty());
+}
+
+#[test]
 fn add_message_increments_estimated_tokens() {
     let mut s = Session::new("openai", "gpt-4", 128000);
     let before = s.total_estimated_tokens;

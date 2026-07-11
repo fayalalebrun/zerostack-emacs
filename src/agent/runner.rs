@@ -273,7 +273,16 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
                     && let Some(message) = tool_call_message(msg)
                 {
                     replayed_tool_call_ids.insert(call.id.to_string());
-                    messages.push(message);
+                    if let Message::Assistant {
+                        content: tool_content,
+                        ..
+                    } = &message
+                        && let Some(Message::Assistant { content, .. }) = messages.last_mut()
+                    {
+                        content.push(tool_content.first());
+                    } else {
+                        messages.push(message);
+                    }
                 }
             }
             MessageRole::ToolResult => {
@@ -1253,6 +1262,32 @@ mod tests {
         let result_items = content.iter().collect::<Vec<_>>();
         assert!(matches!(result_items[0], UserContent::ToolResult(result)
             if result.id == "call_1" && result.call_id.as_deref() == Some("fc_1")));
+    }
+
+    #[test]
+    fn convert_history_preserves_partial_text_before_tool_call() {
+        let mut session = Session::new("openai", "gpt-5.1", 128000);
+        session.add_message(MessageRole::User, "inspect it");
+        session.add_partial_assistant_output("I found a lead.", Vec::new());
+        session.add_tool_call_structured(
+            "read",
+            &serde_json::json!({ "path": "src/main.rs" }),
+            "call_1",
+            None,
+        );
+        session.add_tool_result_structured("read", "file contents", "call_1", None);
+
+        let history = convert_history(&session);
+
+        let Message::Assistant { content, .. } = &history[1] else {
+            panic!("expected combined assistant text and tool call");
+        };
+        let items = content.iter().collect::<Vec<_>>();
+        assert!(matches!(items[0], AssistantContent::Text(text) if text.text == "I found a lead."));
+        assert!(
+            matches!(items[1], AssistantContent::ToolCall(call) if call.function.name == "read")
+        );
+        assert!(matches!(history[2], Message::User { .. }));
     }
 
     #[test]
