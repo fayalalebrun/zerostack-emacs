@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+#[cfg(feature = "multimodal")]
+use base64::Engine;
 use compact_str::CompactString;
 use futures::StreamExt;
 use rig::OneOrMany;
@@ -12,7 +14,7 @@ use rig::completion::message::{
 };
 #[cfg(feature = "multimodal")]
 use rig::completion::message::{
-    AudioMediaType, Document, DocumentMediaType, DocumentSourceKind, ImageMediaType,
+    AudioMediaType, Document, DocumentMediaType, DocumentSourceKind, ImageMediaType, MimeType,
 };
 use rig::completion::{CompletionModel, Message};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
@@ -304,9 +306,9 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
             MessageRole::ToolResult => {
                 if let Some(result) = msg.tool_result.as_ref()
                     && replayed_tool_call_ids.contains(result.id.as_str())
-                    && let Some(message) = tool_result_message(msg)
+                    && let Some(replayed) = tool_result_messages(msg, &session.id)
                 {
-                    messages.push(message);
+                    messages.extend(replayed);
                 }
             }
             MessageRole::SubagentToolCall => messages.push(Message::assistant(format!(
@@ -341,15 +343,56 @@ fn tool_call_message(msg: &SessionMessage) -> Option<Message> {
     })
 }
 
-fn tool_result_message(msg: &SessionMessage) -> Option<Message> {
+fn tool_result_messages(msg: &SessionMessage, session_id: &str) -> Option<Vec<Message>> {
     let result = msg.tool_result.as_ref()?;
-    Some(Message::User {
-        content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-            id: result.id.to_string(),
-            call_id: result.call_id.as_ref().map(ToString::to_string),
-            content: OneOrMany::one(ToolResultContent::Text(Text::new(tool_result_output(msg)))),
-        })),
-    })
+    let mut output = tool_result_output(msg);
+    let mut messages = Vec::new();
+    #[cfg(feature = "multimodal")]
+    for attachment in &result.attachments {
+        match crate::extras::multimodal::load_persisted_attachment(session_id, attachment) {
+            Ok(media) => messages.extend(media_to_messages(&[media])),
+            Err(error) => output.push_str(&format!(
+                "\n[failed to load image attachment {}: {error}]",
+                attachment.filename
+            )),
+        }
+    }
+    messages.insert(
+        0,
+        Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                id: result.id.to_string(),
+                call_id: result.call_id.as_ref().map(ToString::to_string),
+                content: OneOrMany::one(ToolResultContent::Text(Text::new(output))),
+            })),
+        },
+    );
+    Some(messages)
+}
+
+#[cfg(feature = "multimodal")]
+fn tool_result_images(
+    content: &OneOrMany<ToolResultContent>,
+) -> Vec<crate::event::ToolResultImage> {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
+
+    content
+        .iter()
+        .filter_map(|item| {
+            let ToolResultContent::Image(image) = item else {
+                return None;
+            };
+            let DocumentSourceKind::Base64(data) = &image.data else {
+                return None;
+            };
+            let mime = image.media_type.as_ref()?.to_mime_type();
+            Some(crate::event::ToolResultImage {
+                data: BASE64_STANDARD.decode(data).ok()?,
+                mime: CompactString::new(mime),
+            })
+        })
+        .collect()
 }
 
 fn tool_result_output(msg: &SessionMessage) -> String {
@@ -554,6 +597,10 @@ where
                                 output.push_str(&t.text);
                             }
                         }
+                        #[cfg(feature = "multimodal")]
+                        let images = tool_result_images(&tool_result.content);
+                        #[cfg(not(feature = "multimodal"))]
+                        let images = Vec::new();
                         let name = tool_names
                             .remove(&tool_result.id)
                             .or_else(|| last_tool_name.take())
@@ -577,12 +624,35 @@ where
                                 id: CompactString::new(tool_result.id.clone()),
                                 call_id: tool_result.call_id.clone().map(CompactString::from),
                                 name: CompactString::new(name),
-                                output: CompactString::from(output),
+                                output: CompactString::from(output.clone()),
+                                images: images.clone(),
                                 loaded_context,
                                 duration_ms,
                                 display_artifact,
                             })
                             .await;
+                        #[cfg(feature = "multimodal")]
+                        if !images.is_empty() {
+                            tool_interactions.push(Message::User {
+                                content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                                    id: tool_result.id,
+                                    call_id: tool_result.call_id,
+                                    content: OneOrMany::one(ToolResultContent::Text(Text::new(
+                                        output,
+                                    ))),
+                                })),
+                            });
+                            for image in images {
+                                tool_interactions.push(Message::User {
+                                    content: OneOrMany::one(UserContent::image_base64(
+                                        base64::prelude::BASE64_STANDARD.encode(image.data),
+                                        Some(image_media_type(&image.mime)),
+                                        None,
+                                    )),
+                                });
+                            }
+                            break;
+                        }
                         tool_interactions.push(tool_result.clone().into());
                         provider_call_started = Instant::now();
                     }

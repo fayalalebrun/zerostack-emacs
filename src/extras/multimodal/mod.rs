@@ -68,26 +68,55 @@ pub fn persist_attachment(
     session_id: &str,
     attachment: &MediaAttachment,
 ) -> std::io::Result<SessionAttachment> {
+    let filename = attachment
+        .path()
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
+    persist_bytes(session_id, filename, attachment.mime(), attachment.data())
+}
+
+pub fn persist_bytes(
+    session_id: &str,
+    filename: &str,
+    mime: &str,
+    data: &[u8],
+) -> std::io::Result<SessionAttachment> {
+    if data.len() as u64 > MAX_MEDIA_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "attachment exceeds size limit",
+        ));
+    }
+    if mime.starts_with("image/") {
+        let info = crate::extras::image_validate::validate(data)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "attachment does not contain supported image data",
+                )
+            })?;
+        if info.mime != mime {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "attachment MIME type does not match its contents",
+            ));
+        }
+    }
     let dir = crate::session::storage::media_dir(session_id);
     std::fs::create_dir_all(&dir)?;
-    let extension = attachment
-        .path()
+    let extension = Path::new(filename)
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("media");
     let stored_name = format!("{}.{}", Uuid::new_v4(), extension);
-    std::fs::write(dir.join(&stored_name), attachment.data())?;
+    std::fs::write(dir.join(&stored_name), data)?;
     Ok(SessionAttachment {
-        filename: CompactString::new(
-            attachment
-                .path()
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("attachment"),
-        ),
+        filename: CompactString::new(filename),
         stored_name: CompactString::new(stored_name),
-        mime: CompactString::new(attachment.mime()),
-        size_bytes: attachment.size() as u64,
+        mime: CompactString::new(mime),
+        size_bytes: data.len() as u64,
     })
 }
 
@@ -112,6 +141,20 @@ pub fn load_persisted_attachment(
     }
     let mime = attachment.mime.to_string();
     Ok(if mime.starts_with("image/") {
+        let info = crate::extras::image_validate::validate(&data)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stored image does not contain supported image data",
+                )
+            })?;
+        if info.mime != mime {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stored image MIME type does not match its contents",
+            ));
+        }
         MediaAttachment::Image { path, data, mime }
     } else if mime.starts_with("audio/") {
         MediaAttachment::Audio { path, data, mime }
@@ -168,6 +211,20 @@ pub fn load_attachment(path: &Path) -> std::io::Result<MediaAttachment> {
     // We already know the mime from detect_media — dispatch on the prefix.
     let path = path.to_path_buf();
     Ok(if mime.starts_with("image/") {
+        let info = crate::extras::image_validate::validate(&data)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "file does not contain supported image data",
+                )
+            })?;
+        if info.mime != mime {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "image extension does not match its contents",
+            ));
+        }
         MediaAttachment::Image { path, data, mime }
     } else if mime.starts_with("audio/") {
         MediaAttachment::Audio { path, data, mime }

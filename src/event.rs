@@ -104,6 +104,12 @@ pub struct DisplayArtifact {
 }
 
 #[derive(Debug, Clone)]
+pub struct ToolResultImage {
+    pub data: Vec<u8>,
+    pub mime: CompactString,
+}
+
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     Token(CompactString),
     Reasoning(CompactString),
@@ -118,6 +124,7 @@ pub enum AgentEvent {
         call_id: Option<CompactString>,
         name: CompactString,
         output: CompactString,
+        images: Vec<ToolResultImage>,
         loaded_context: Vec<String>,
         duration_ms: u64,
         display_artifact: Option<DisplayArtifact>,

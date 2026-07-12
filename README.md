@@ -206,7 +206,10 @@ JPEG, GIF, or WebP image data only; clipboard text, including file paths and fil
 URIs, is pasted normally. Clipboard reads use Emacs GUI image selection targets
 first and fall back to `wl-paste`, `xclip`, or `pngpaste` when available.
 Submitted media is copied into session-owned storage, displayed on its user turn,
-and restored into provider history when the session is resumed.
+and restored into provider history when the session is resumed. With the same
+feature enabled, the `read` tool locally decodes and validates PNG, JPEG, static
+GIF, and static WebP files before sending them to image-capable models as
+multimodal tool results. Animated images are rejected.
 For screenshots and other image clipboard data, `zerostack-mode` also registers
 an Emacs `yank-media` handler, so `M-x yank-media` and `C-c / -> attach ->
 clipboard` use Emacs' native media clipboard path before the lower-level

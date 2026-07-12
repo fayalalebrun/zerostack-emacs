@@ -8824,10 +8824,13 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "gif",
  "http 1.4.2",
  "ignore",
+ "image-webp",
  "include_dir",
  "mimalloc",
+ "png",
  "pulldown-cmark",
  "regex",
  "reqwest 0.13.4",
@@ -8845,6 +8848,8 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "uuid",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

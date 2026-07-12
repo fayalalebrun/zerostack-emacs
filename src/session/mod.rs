@@ -87,6 +87,8 @@ pub struct SessionToolResult {
     pub call_id: Option<CompactString>,
     pub name: CompactString,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SessionAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loaded_context: Vec<CompactString>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub duration_ms: u64,
@@ -716,6 +718,7 @@ impl Session {
                 id: CompactString::new(id),
                 call_id: call_id.map(CompactString::new),
                 name: CompactString::new(name),
+                attachments: Vec::new(),
                 loaded_context: loaded_context.into_iter().map(CompactString::new).collect(),
                 duration_ms,
             }),

@@ -1,3 +1,7 @@
+#[cfg(feature = "multimodal")]
+use base64::Engine;
+#[cfg(feature = "multimodal")]
+use base64::prelude::BASE64_STANDARD;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
@@ -50,7 +54,7 @@ impl Tool for ReadTool {
         let (desc, params) = match edit_system() {
             EditSystem::Similarity => (
                 format!(
-                    "Read the contents of a file. Supports text files. Defaults to first {} lines. Use offset/limit for large files.",
+                    "Read a text file or view a PNG, JPEG, GIF, or WebP image. Text defaults to the first {} lines; use offset/limit for large text files.",
                     self.max_lines
                 ),
                 serde_json::json!({
@@ -65,7 +69,7 @@ impl Tool for ReadTool {
             ),
             EditSystem::Hashedit => (
                 format!(
-                    "Read file contents with CRC-32 tagged lines for tag-based editing. Each line is prefixed with 'N|TAG' where TAG is an 8-char hex CRC-32 of the line content. Use these tags with the edit tool for CAS-guarded edits. Defaults to first {} lines.",
+                    "Read text with CRC-32 tagged lines for tag-based editing, or view a PNG, JPEG, GIF, or WebP image. Each text line is prefixed with 'N|TAG' where TAG is an 8-char hex CRC-32. Defaults to first {} lines.",
                     self.max_lines
                 ),
                 serde_json::json!({
@@ -100,6 +104,36 @@ impl Tool for ReadTool {
 
         let metadata = tokio::fs::metadata(&path).await?;
         let file_size = metadata.len();
+        #[cfg(feature = "multimodal")]
+        if file_size <= crate::extras::multimodal::MAX_MEDIA_BYTES {
+            let data = tokio::fs::read(&path).await?;
+            match crate::extras::image_validate::validate(&data) {
+                Ok(Some(image)) => {
+                    return Ok(serde_json::json!({
+                        "response": format!(
+                            "Read image: {} ({}, {}x{}, {} bytes)",
+                            path, image.mime, image.width, image.height, file_size
+                        ),
+                        "parts": [{
+                            "type": "image",
+                            "data": BASE64_STANDARD.encode(data),
+                            "mimeType": image.mime,
+                        }]
+                    })
+                    .to_string());
+                }
+                Ok(None) => {}
+                Err(error) => return Err(ToolError::Msg(error)),
+            }
+        } else if crate::extras::multimodal::detect_media(std::path::Path::new(&path))
+            .is_some_and(|mime| mime.starts_with("image/"))
+        {
+            return Err(ToolError::Msg(format!(
+                "Image too large ({} bytes). Maximum allowed image size is {} bytes.",
+                file_size,
+                crate::extras::multimodal::MAX_MEDIA_BYTES
+            )));
+        }
         if file_size > self.max_text_file_size {
             return Err(ToolError::Msg(format!(
                 "File too large ({} bytes). Maximum allowed file size is {} bytes.",
@@ -232,7 +266,16 @@ fn display_start(start: usize, total_lines: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "multimodal")]
+    use rig::completion::message::ToolResultContent;
+    #[cfg(feature = "multimodal")]
+    use rig::tool::Tool;
+
+    #[cfg(feature = "multimodal")]
+    use super::ReadTool;
     use super::{display_start, read_bounds};
+    #[cfg(feature = "multimodal")]
+    use crate::agent::tools::ReadArgs;
 
     #[test]
     fn read_bounds_clamps_offset_past_eof() {
@@ -247,5 +290,53 @@ mod tests {
     #[test]
     fn display_start_handles_empty_file() {
         assert_eq!(display_start(0, 0), 0);
+    }
+
+    #[cfg(feature = "multimodal")]
+    #[tokio::test]
+    async fn image_read_becomes_rig_image_tool_content() {
+        let path =
+            std::env::temp_dir().join(format!("zerostack-read-{}.png", uuid::Uuid::new_v4()));
+        let bytes = crate::extras::image_validate::test_png();
+        std::fs::write(&path, bytes).unwrap();
+        let tool = ReadTool::new(None, None, None, 2000);
+
+        let output = tool
+            .call(ReadArgs {
+                path: path.to_string_lossy().to_string(),
+                offset: None,
+                limit: None,
+            })
+            .await
+            .unwrap();
+        let content = ToolResultContent::from_tool_output(output);
+
+        assert!(matches!(content.first_ref(), ToolResultContent::Text(_)));
+        assert!(matches!(
+            content.iter().nth(1),
+            Some(ToolResultContent::Image(_))
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "multimodal")]
+    #[tokio::test]
+    async fn non_image_binary_still_returns_utf8_error() {
+        let path =
+            std::env::temp_dir().join(format!("zerostack-read-{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+        let tool = ReadTool::new(None, None, None, 2000);
+
+        let error = tool
+            .call(ReadArgs {
+                path: path.to_string_lossy().to_string(),
+                offset: None,
+                limit: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("UTF-8") || error.to_string().contains("utf-8"));
+        std::fs::remove_file(path).unwrap();
     }
 }

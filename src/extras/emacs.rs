@@ -2915,6 +2915,7 @@ mod imp {
                     call_id,
                     name,
                     output,
+                    images: _result_images,
                     loaded_context,
                     duration_ms,
                     display_artifact,
@@ -2941,6 +2942,27 @@ mod imp {
                             loaded_context,
                             duration_ms,
                         );
+                        #[cfg(feature = "multimodal")]
+                        {
+                            let session_id = session.id.clone();
+                            let result = session
+                                .messages
+                                .last_mut()
+                                .and_then(|message| message.tool_result.as_mut())
+                                .expect("tool result was added");
+                            for (index, image) in _result_images.iter().enumerate() {
+                                let extension =
+                                    image.mime.strip_prefix("image/").unwrap_or("image");
+                                result
+                                    .attachments
+                                    .push(crate::extras::multimodal::persist_bytes(
+                                        &session_id,
+                                        &format!("read-image-{}.{}", index + 1, extension),
+                                        &image.mime,
+                                        &image.data,
+                                    )?);
+                            }
+                        }
                         let content = sanitize_output(&content);
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;

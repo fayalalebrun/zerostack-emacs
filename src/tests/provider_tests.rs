@@ -248,6 +248,7 @@ fn serialize_multiple_roles() {
                 id: CompactString::new("call_1"),
                 call_id: None,
                 name: CompactString::new("read"),
+                attachments: Vec::new(),
                 loaded_context: Vec::new(),
                 duration_ms: 0,
             }),

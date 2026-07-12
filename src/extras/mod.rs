@@ -31,6 +31,9 @@ pub mod emacs_attention;
 pub mod emacs_board;
 
 #[cfg(feature = "multimodal")]
+pub mod image_validate;
+
+#[cfg(feature = "multimodal")]
 pub mod multimodal;
 
 pub mod status_signals;

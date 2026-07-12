@@ -61,18 +61,27 @@ fn load_attachment_unknown_media_type() {
 }
 
 #[test]
+fn load_attachment_rejects_malformed_image() {
+    let path = std::env::temp_dir().join(format!("zerostack-bad-{}.png", uuid::Uuid::new_v4()));
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\ninvalid").unwrap();
+
+    let error = load_attachment(&path).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn load_attachment_success_for_small_media() {
-    use std::io::Write;
     let dir = std::env::temp_dir();
     let path = dir.join("zerostack_test_media.png");
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(b"fake png data").unwrap();
-    drop(f);
+    let png = crate::extras::image_validate::test_png();
+    std::fs::write(&path, &png).unwrap();
     let result = load_attachment(&path);
     let _ = std::fs::remove_file(&path);
     assert!(result.is_ok(), "expected Ok, got {result:?}");
     let att = result.unwrap();
-    assert_eq!(att.size(), 13);
+    assert_eq!(att.size(), png.len());
     assert_eq!(att.path().to_string_lossy(), path.to_string_lossy());
 }
 
@@ -160,9 +169,10 @@ fn media_to_messages_empty_vec_returns_empty() {
 fn persisted_attachment_survives_serialization_and_reloads_bytes() {
     let dir = std::env::temp_dir().join(format!("zerostack-media-test-{}", uuid::Uuid::new_v4()));
     let previous = crate::session::storage::set_test_data_dir(Some(dir.clone()));
+    let png = crate::extras::image_validate::test_png();
     let media = MediaAttachment::Image {
         path: Path::new("clipboard.png").to_path_buf(),
-        data: vec![1, 2, 3, 4],
+        data: png.clone(),
         mime: "image/png".into(),
     };
     let attachment = persist_attachment("session-1", &media).unwrap();
@@ -170,7 +180,7 @@ fn persisted_attachment_survives_serialization_and_reloads_bytes() {
     let decoded = serde_json::from_str(&encoded).unwrap();
     let loaded = load_persisted_attachment("session-1", &decoded).unwrap();
 
-    assert_eq!(loaded.size(), 4);
+    assert_eq!(loaded.size(), png.len());
     assert_eq!(decoded.filename, "clipboard.png");
     crate::session::storage::set_test_data_dir(previous);
     std::fs::remove_dir_all(dir).unwrap();
@@ -185,7 +195,7 @@ fn convert_history_replays_persisted_attachment_with_its_turn() {
     let previous = crate::session::storage::set_test_data_dir(Some(dir.clone()));
     let media = MediaAttachment::Image {
         path: Path::new("clipboard.png").to_path_buf(),
-        data: vec![1, 2, 3, 4],
+        data: crate::extras::image_validate::test_png(),
         mime: "image/png".into(),
     };
     let attachment = persist_attachment("session-1", &media).unwrap();
@@ -201,6 +211,107 @@ fn convert_history_replays_persisted_attachment_with_its_turn() {
     };
     assert!(matches!(content.first_ref(), UserContent::Image(_)));
     assert!(matches!(&history[1], Message::User { .. }));
+
+    crate::session::storage::set_test_data_dir(previous);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn convert_history_replays_image_tool_result() {
+    use rig::completion::Message;
+    use rig::completion::message::UserContent;
+
+    let dir = std::env::temp_dir().join(format!("zerostack-media-test-{}", uuid::Uuid::new_v4()));
+    let previous = crate::session::storage::set_test_data_dir(Some(dir.clone()));
+    let mut session = crate::session::Session::new("openai", "model", 100_000);
+    session.id = "session-tool-image".into();
+    session.add_tool_call_structured(
+        "read",
+        &serde_json::json!({"path": "image.png"}),
+        "call-1",
+        None,
+    );
+    session.add_tool_result_structured("read", "Read image: image.png", "call-1", None);
+    let attachment = crate::extras::multimodal::persist_bytes(
+        &session.id,
+        "image.png",
+        "image/png",
+        &crate::extras::image_validate::test_png(),
+    )
+    .unwrap();
+    session.messages[1]
+        .tool_result
+        .as_mut()
+        .unwrap()
+        .attachments
+        .push(attachment);
+
+    let history = crate::agent::runner::convert_history(&session);
+    let Message::User { content } = &history[1] else {
+        panic!("expected tool result user message")
+    };
+    assert!(matches!(content.first_ref(), UserContent::ToolResult(_)));
+    let Message::User { content } = &history[2] else {
+        panic!("expected separate image user message")
+    };
+    assert!(matches!(content.first_ref(), UserContent::Image(_)));
+
+    crate::session::storage::set_test_data_dir(previous);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn corrupt_persisted_tool_image_replays_as_warning() {
+    use rig::completion::Message;
+    use rig::completion::message::{ToolResultContent, UserContent};
+
+    let dir = std::env::temp_dir().join(format!("zerostack-media-test-{}", uuid::Uuid::new_v4()));
+    let previous = crate::session::storage::set_test_data_dir(Some(dir.clone()));
+    let mut session = crate::session::Session::new("openai", "model", 100_000);
+    session.id = "session-corrupt-image".into();
+    session.add_tool_call_structured(
+        "read",
+        &serde_json::json!({"path": "image.png"}),
+        "call-1",
+        None,
+    );
+    session.add_tool_result_structured("read", "Read image: image.png", "call-1", None);
+    let attachment = crate::extras::multimodal::persist_bytes(
+        &session.id,
+        "image.png",
+        "image/png",
+        &crate::extras::image_validate::test_png(),
+    )
+    .unwrap();
+    std::fs::write(
+        crate::session::storage::media_dir(&session.id).join(&attachment.stored_name),
+        b"corrupt",
+    )
+    .unwrap();
+    session.messages[1]
+        .tool_result
+        .as_mut()
+        .unwrap()
+        .attachments
+        .push(attachment);
+
+    let history = crate::agent::runner::convert_history(&session);
+    let Message::User { content } = history.last().unwrap() else {
+        panic!("expected tool result")
+    };
+    let UserContent::ToolResult(result) = content.first_ref() else {
+        panic!("expected tool result")
+    };
+    assert!(result.content.iter().any(|item| matches!(
+        item,
+        ToolResultContent::Text(text) if text.text.contains("failed to load image attachment")
+    )));
+    assert!(
+        !result
+            .content
+            .iter()
+            .any(|item| matches!(item, ToolResultContent::Image(_)))
+    );
 
     crate::session::storage::set_test_data_dir(previous);
     std::fs::remove_dir_all(dir).unwrap();
