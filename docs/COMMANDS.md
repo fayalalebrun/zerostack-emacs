@@ -258,9 +258,10 @@ iteration, and `loop-stopped` with `:reason stopped` or `:reason max`. Each loop
 iteration still emits normal render/tool/reasoning/permission/done events.
 
 Queued files are consumed by later agent starts. Context files remain in the
-server-side context until dropped, matching the TUI `/add` behavior. Media
-attachments are held in memory and drained into the next prompt's Rig history;
-they are not persisted in session JSON.
+server-side context until dropped, matching the TUI `/add` behavior. Submitted
+media is copied into `$ZS_DATA_DIR/media/<session-id>/`; its filename, MIME type,
+size, and stored filename are linked to the user message in session JSON so the
+attachment is displayed and restored into provider history after resume.
 
 Assistant markdown is rendered by zerostack and streamed as events like
 `(event :type assistant-render :replace-from N :lines ((:text "< hi" :face zs-normal)))`.
@@ -510,7 +511,7 @@ Command menu actions:
 | ------ | ----------- |
 | `restart` | Restart the current buffer's `zerostack --emacs` daemon and reconnect without closing the buffer. |
 | `view` | Change server-side markdown render width. |
-| `attach` | Add a file by path, attach clipboard file/image/text contents, list queued attachments, or drop all queued attachments. |
+| `attach` | Add a file by path, attach image data from the clipboard, list queued attachments, or drop all queued attachments. |
 | `provider` | Switch the live session provider. This is session-local and does not rewrite config. |
 | `model` | Switch the live session model for the current provider. This is session-local and does not rewrite config. |
 | `compact` | Ask zerostack to compact history, then rerender the buffer. |
@@ -518,18 +519,15 @@ Command menu actions:
 | `skill` | Discover runtime skills from the same home/project skill roots and insert an explicit selected-skill directive into the input line. |
 | `artifact` | Open the most recent artifact. |
 
-The `attach` action sends `file-add` for path-based files. Clipboard paste first
-tries to interpret the clipboard as a plain path, `file://` URI, `text/uri-list`,
-or desktop copied-file target such as `x-special/gnome-copied-files`. If image
-bytes are available, Emacs writes them to a temporary image file and attaches
-that path; as a final fallback it writes clipboard text to a temporary `.txt`
-file. Clipboard reads use Emacs GUI selection targets first and fall back to
-common platform commands such as `wl-paste`, `xclip`, `pbpaste`, and `pngpaste`
-when available. Temporary clipboard files are kept for the session and removed
-on disconnect. `zerostack-mode` also registers an Emacs `yank-media` handler for
-image MIME types, so `M-x yank-media` and `C-c / -> attach -> clipboard` use the
-native Emacs media clipboard path before falling back to the lower-level target
-and command probing.
+The `attach` action sends `file-add` for path-based files. Clipboard attachment
+accepts actual PNG, JPEG, GIF, or WebP image data only; clipboard text, including
+paths and file URIs, is pasted normally. Emacs reads image data through GUI
+selection targets and falls back to `wl-paste`, `xclip`, or `pngpaste` when
+available. On prompt submission, zerostack copies the image into the session's
+media directory and links it to that user turn. `zerostack-mode` also registers
+an Emacs `yank-media` handler for image MIME types, so `M-x yank-media` and
+`C-c / -> attach -> clipboard` use the native Emacs media clipboard path before
+falling back to lower-level image target and command probing.
 
 Other operations use direct keys instead: `C-c C-c` aborts, `C-c C-a` attaches or
 rerenders the full snapshot, `C-c C-s` requests status, and `C-c C-o` opens the

@@ -16,6 +16,12 @@ pub fn tool_output_dir(session_id: &str) -> PathBuf {
         .join(safe_path_component(session_id))
 }
 
+pub fn media_dir(session_id: &str) -> PathBuf {
+    dirs_path()
+        .join("media")
+        .join(safe_path_component(session_id))
+}
+
 fn home_fallback() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -132,6 +138,10 @@ pub fn delete_session(id: &str) -> anyhow::Result<()> {
     let path = dir.join(format!("{}.json", id));
     if path.exists() {
         std::fs::remove_file(path)?;
+    }
+    let media = media_dir(id);
+    if media.exists() {
+        std::fs::remove_dir_all(media)?;
     }
     Ok(())
 }

@@ -1960,23 +1960,16 @@ LIMIT defaults to 50."
     (call-interactively #'yank)))
 
 (defun zerostack-add-clipboard (&optional quiet)
-  "Attach clipboard contents to the current zerostack session.
+  "Attach image data from the clipboard to the current zerostack session.
 
-If the clipboard contains a path or file URI, attach that file.  If it contains
-image bytes, write them to a temporary image file first.  Otherwise, write text
-clipboard contents to a temporary text file and attach that.
-
-When QUIET is non-nil, return nil instead of falling back to text attachment or
-raising an error when no file/media clipboard content is available."
+When QUIET is non-nil, return nil instead of raising an error when no image
+clipboard content is available."
   (interactive)
-  (let ((path (or (zerostack--clipboard-path)
-                  (zerostack--clipboard-image-file)
-                  (unless quiet
-                    (zerostack--clipboard-text-file)))))
+  (let ((path (zerostack--clipboard-image-file)))
     (unless path
       (unless quiet
-        (zerostack--set-notice "clipboard: no file path, image, or text found")
-        (user-error "Clipboard does not contain a file path, image, or text")))
+        (zerostack--set-notice "clipboard: no image found")
+        (user-error "Clipboard does not contain image data")))
     (when path
       (zerostack--set-status (format "attaching clipboard: %s"
                                      (file-name-nondirectory path)))
@@ -2030,33 +2023,7 @@ Return non-nil when a registered media handler attached something."
   (when (yes-or-no-p "Drop all attached files/media? ")
     (zerostack--send-command 'file-drop-all :request (zerostack--next-request))))
 
-(defun zerostack--clipboard-path ()
-  "Return an existing file path described by the clipboard, if any."
-  (or (zerostack--clipboard-path-from-selection)
-      (zerostack--clipboard-path-from-command)
-      (when-let ((text (zerostack--clipboard-text)))
-        (zerostack--path-from-clipboard-text text))))
 
-(defun zerostack--clipboard-path-from-selection ()
-  "Return a file path from GUI clipboard file targets, if any."
-  (catch 'path
-    (dolist (target (append (zerostack--clipboard-file-targets)
-                            (zerostack--clipboard-text-targets)))
-      (when-let* ((text (zerostack--clipboard-selection target))
-                  ((stringp text))
-                  (path (zerostack--path-from-clipboard-text text)))
-        (throw 'path path)))))
-
-(defun zerostack--clipboard-path-from-command ()
-  "Return a file path from platform clipboard command file targets, if any."
-  (catch 'path
-    (dolist (command '(("wl-paste" "--type" "text/uri-list" "--no-newline")
-                       ("wl-paste" "--type" "x-special/gnome-copied-files" "--no-newline")
-                       ("xclip" "-selection" "clipboard" "-t" "text/uri-list" "-o")
-                       ("xclip" "-selection" "clipboard" "-t" "x-special/gnome-copied-files" "-o")))
-      (when-let* ((text (apply #'zerostack--clipboard-command-output nil command))
-                  (path (zerostack--path-from-clipboard-text text)))
-        (throw 'path path)))))
 
 (defun zerostack--clipboard-text ()
   "Return text currently available from the clipboard or kill ring."
@@ -2085,39 +2052,12 @@ Return non-nil when a registered media handler attached something."
       (gui-get-selection 'CLIPBOARD
                          (if (symbolp target) target (intern target))))))
 
-(defun zerostack--clipboard-file-targets ()
-  "Return GUI clipboard target symbols commonly used for copied files."
-  (mapcar #'intern
-          '("text/uri-list"
-            "x-special/gnome-copied-files"
-            "public.file-url")))
 
 (defun zerostack--clipboard-text-targets ()
   "Return GUI clipboard target symbols commonly used for text."
   (append (mapcar #'intern '("text/plain;charset=utf-8" "text/plain"))
           '(UTF8_STRING STRING TEXT COMPOUND_TEXT)))
 
-(defun zerostack--path-from-clipboard-text (text)
-  "Return an existing path encoded in clipboard TEXT."
-  (let ((candidates nil))
-    (dolist (line (split-string text "\n" t))
-      (let ((line (string-trim line)))
-        (unless (or (string-empty-p line)
-                    (string-prefix-p "#" line)
-                    (member line '("copy" "cut" "move")))
-          (push (zerostack--decode-clipboard-path line) candidates))))
-    (cl-find-if #'file-exists-p (nreverse candidates))))
-
-(defun zerostack--decode-clipboard-path (value)
-  "Decode VALUE as a plain path or file URI."
-  (let ((value (string-trim value "[ \t\n\r'\"]+" "[ \t\n\r'\"]+")))
-    (when (string-prefix-p "file://" value)
-      (setq value (substring value 7))
-      (when (string-prefix-p "localhost/" value)
-        (setq value (substring value (length "localhost"))))
-      (when (and (fboundp 'url-unhex-string) (string-match-p "%" value))
-        (setq value (url-unhex-string value))))
-    (substitute-in-file-name value)))
 
 (defun zerostack--clipboard-image-file ()
   "Write clipboard image data to a temporary file and return its path, if any."
@@ -2177,11 +2117,6 @@ When BINARY is non-nil, preserve unibyte data."
             (unless (string-empty-p text)
               text)))))))
 
-(defun zerostack--clipboard-text-file ()
-  "Write text clipboard content to a temporary file and return its path."
-  (when-let ((text (zerostack--clipboard-text)))
-    (unless (string-empty-p text)
-      (zerostack--write-clipboard-temp-file text "txt" nil))))
 
 (defun zerostack--write-clipboard-temp-file (data extension binary)
   "Write clipboard DATA to a temp file with EXTENSION.

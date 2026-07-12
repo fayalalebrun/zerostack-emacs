@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use compact_str::CompactString;
+use uuid::Uuid;
+
+use crate::session::SessionAttachment;
+
 /// Maximum file size for media attachments: 20 MB.
 pub const MAX_MEDIA_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -41,6 +46,78 @@ impl MediaAttachment {
             | MediaAttachment::Document { path, .. } => path,
         }
     }
+
+    fn data(&self) -> &[u8] {
+        match self {
+            MediaAttachment::Image { data, .. }
+            | MediaAttachment::Audio { data, .. }
+            | MediaAttachment::Document { data, .. } => data,
+        }
+    }
+
+    fn mime(&self) -> &str {
+        match self {
+            MediaAttachment::Image { mime, .. }
+            | MediaAttachment::Audio { mime, .. }
+            | MediaAttachment::Document { mime, .. } => mime,
+        }
+    }
+}
+
+pub fn persist_attachment(
+    session_id: &str,
+    attachment: &MediaAttachment,
+) -> std::io::Result<SessionAttachment> {
+    let dir = crate::session::storage::media_dir(session_id);
+    std::fs::create_dir_all(&dir)?;
+    let extension = attachment
+        .path()
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("media");
+    let stored_name = format!("{}.{}", Uuid::new_v4(), extension);
+    std::fs::write(dir.join(&stored_name), attachment.data())?;
+    Ok(SessionAttachment {
+        filename: CompactString::new(
+            attachment
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("attachment"),
+        ),
+        stored_name: CompactString::new(stored_name),
+        mime: CompactString::new(attachment.mime()),
+        size_bytes: attachment.size() as u64,
+    })
+}
+
+pub fn load_persisted_attachment(
+    session_id: &str,
+    attachment: &SessionAttachment,
+) -> std::io::Result<MediaAttachment> {
+    let stored_name = Path::new(attachment.stored_name.as_str());
+    if stored_name.file_name() != Some(stored_name.as_os_str()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid stored attachment name",
+        ));
+    }
+    let path = crate::session::storage::media_dir(session_id).join(stored_name);
+    let data = std::fs::read(&path)?;
+    if data.len() as u64 > MAX_MEDIA_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stored attachment exceeds size limit",
+        ));
+    }
+    let mime = attachment.mime.to_string();
+    Ok(if mime.starts_with("image/") {
+        MediaAttachment::Image { path, data, mime }
+    } else if mime.starts_with("audio/") {
+        MediaAttachment::Audio { path, data, mime }
+    } else {
+        MediaAttachment::Document { path, data, mime }
+    })
 }
 
 /// Check whether a file extension indicates multi-modal media (not text).

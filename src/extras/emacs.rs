@@ -2604,22 +2604,32 @@ mod imp {
         text: String,
         turn: u64,
     ) -> anyhow::Result<Option<String>> {
-        let (history, user_index, mut assistant_index) = {
+        let (history, user_index, mut assistant_index, attachments) = {
             let mut session = server.session.lock().await;
             let user_index = session.messages.len();
             let history = convert_history(&session);
             #[cfg(feature = "multimodal")]
-            let history = {
+            let (history, media) = {
                 let media = session.drain_media();
-                if !media.is_empty() {
-                    let mut history = history;
-                    history.extend(crate::agent::runner::media_to_messages(&media));
-                    history
-                } else {
-                    history
-                }
+                let mut history = history;
+                history.extend(crate::agent::runner::media_to_messages(&media));
+                (history, media)
             };
             session.add_message(MessageRole::User, &text);
+            #[cfg(feature = "multimodal")]
+            {
+                let session_id = session.id.clone();
+                let message = session.messages.last_mut().expect("user message was added");
+                for attachment in &media {
+                    message
+                        .attachments
+                        .push(crate::extras::multimodal::persist_attachment(
+                            &session_id,
+                            attachment,
+                        )?);
+                }
+            }
+            let attachments = session.messages[user_index].attachments.clone();
             let assistant_index = session.messages.len();
             if !server.cli.no_session {
                 let _ = crate::session::chat_history::append_entry(
@@ -2629,13 +2639,17 @@ mod imp {
                     },
                 );
             }
-            (history, user_index, assistant_index)
+            (history, user_index, assistant_index, attachments)
         };
         server
             .append_lines(
                 "user-render",
                 turn,
-                with_source_lines(render_user_lines(&text), user_index, MessageRole::User),
+                with_source_lines(
+                    render_user_lines(&text, &attachments),
+                    user_index,
+                    MessageRole::User,
+                ),
             )
             .await;
         server.update_meta_from_session().await;
@@ -3556,9 +3570,15 @@ mod imp {
                     );
                 }
                 _ => out.extend(
-                    render_message_lines(msg.role, &msg.content, msg.provider_usage, cols)
-                        .into_iter()
-                        .map(|line| line.with_source(message_index, msg.role)),
+                    render_message_lines(
+                        msg.role,
+                        &msg.content,
+                        &msg.attachments,
+                        msg.provider_usage,
+                        cols,
+                    )
+                    .into_iter()
+                    .map(|line| line.with_source(message_index, msg.role)),
                 ),
             }
         }
@@ -3596,11 +3616,12 @@ mod imp {
     fn render_message_lines(
         role: MessageRole,
         content: &str,
+        attachments: &[crate::session::SessionAttachment],
         provider_usage: Option<crate::session::SessionTokenUsage>,
         cols: usize,
     ) -> Vec<WireLine> {
         match role {
-            MessageRole::User => render_user_lines(content),
+            MessageRole::User => render_user_lines(content, attachments),
             MessageRole::Assistant => render_assistant_final_lines(content, provider_usage, cols),
             MessageRole::System => render_compaction_summary_lines(content),
             MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
@@ -3753,7 +3774,10 @@ mod imp {
             .collect()
     }
 
-    fn render_user_lines(text: &str) -> Vec<WireLine> {
+    fn render_user_lines(
+        text: &str,
+        attachments: &[crate::session::SessionAttachment],
+    ) -> Vec<WireLine> {
         let mut out = Vec::new();
         if text.is_empty() {
             out.push(WireLine::new("> ", "zs-user"));
@@ -3764,6 +3788,17 @@ mod imp {
                     "zs-user",
                 ));
             }
+        }
+        for attachment in attachments {
+            out.push(WireLine::new(
+                format!(
+                    "  attachment: {} ({}, {})",
+                    sanitize_output(&attachment.filename),
+                    attachment.mime,
+                    format_bytes(attachment.size_bytes as usize)
+                ),
+                "zs-muted",
+            ));
         }
         out.push(blank_line());
         out
@@ -5416,12 +5451,26 @@ mod imp {
         #[test]
         fn with_source_lines_adds_message_source_metadata() {
             let encoded = lines_to_sexp(&with_source_lines(
-                render_user_lines("hello"),
+                render_user_lines("hello", &[]),
                 3,
                 MessageRole::User,
             ));
 
             assert!(encoded.contains(":message-index 3 :role user"));
+        }
+
+        #[test]
+        fn user_lines_render_persisted_attachments() {
+            let attachment = crate::session::SessionAttachment {
+                filename: "clipboard.png".into(),
+                stored_name: "stored.png".into(),
+                mime: "image/png".into(),
+                size_bytes: 1024,
+            };
+
+            let encoded = lines_to_sexp(&render_user_lines("describe this", &[attachment]));
+
+            assert!(encoded.contains("attachment: clipboard.png (image/png, 1.0 KB)"));
         }
 
         #[test]

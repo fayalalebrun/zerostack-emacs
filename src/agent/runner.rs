@@ -257,7 +257,22 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
 
     for msg in &session.messages[first_kept..] {
         match msg.role {
-            MessageRole::User => messages.push(Message::user(msg.content.to_string())),
+            MessageRole::User => {
+                #[cfg(feature = "multimodal")]
+                for attachment in &msg.attachments {
+                    match crate::extras::multimodal::load_persisted_attachment(
+                        &session.id,
+                        attachment,
+                    ) {
+                        Ok(media) => messages.extend(media_to_messages(&[media])),
+                        Err(error) => tracing::warn!(
+                            "failed to load session attachment {}: {error}",
+                            attachment.filename
+                        ),
+                    }
+                }
+                messages.push(Message::user(msg.content.to_string()));
+            }
             MessageRole::Assistant => messages.push(assistant_message_with_reasoning(
                 &msg.content,
                 &msg.provider_reasoning,

@@ -95,6 +95,18 @@ pub fn render_session(
             for line in msg.content.lines() {
                 renderer.write_line_with_source(&format!("{} {}", prefix, line), _c, source)?;
             }
+            if msg.role == MessageRole::User {
+                for attachment in &msg.attachments {
+                    renderer.write_line_with_source(
+                        &format!(
+                            "  attachment: {} ({}, {} bytes)",
+                            attachment.filename, attachment.mime, attachment.size_bytes
+                        ),
+                        Color::DarkGrey,
+                        source,
+                    )?;
+                }
+            }
         }
         renderer.write_line_with_source(
             "",

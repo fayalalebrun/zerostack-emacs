@@ -465,15 +465,11 @@ async fn start_main_run(
     .await;
     let history = crate::agent::runner::convert_history(session);
     #[cfg(feature = "multimodal")]
-    let history = {
+    let (history, media) = {
         let media = session.drain_media();
-        if media.is_empty() {
-            history
-        } else {
-            let mut h = history;
-            h.extend(crate::agent::runner::media_to_messages(&media));
-            h
-        }
+        let mut history = history;
+        history.extend(crate::agent::runner::media_to_messages(&media));
+        (history, media)
     };
     let runner = agent
         .as_ref()
@@ -487,6 +483,17 @@ async fn start_main_run(
         ss.send_start();
     }
     session.add_message(MessageRole::User, text);
+    #[cfg(feature = "multimodal")]
+    {
+        let session_id = session.id.clone();
+        let message = session.messages.last_mut().expect("user message was added");
+        for attachment in &media {
+            match crate::extras::multimodal::persist_attachment(&session_id, attachment) {
+                Ok(attachment) => message.attachments.push(attachment),
+                Err(error) => tracing::warn!("failed to persist session attachment: {error}"),
+            }
+        }
+    }
     // Mark this message as the rollback target if the turn fails (see the
     // failed-send handling in the main event loop).
     *pending_send = Some(text.to_string());

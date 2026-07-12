@@ -26,11 +26,21 @@ pub enum MessageRole {
     SubagentToolCall,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAttachment {
+    pub filename: CompactString,
+    pub stored_name: CompactString,
+    pub mime: CompactString,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessage {
     pub role: MessageRole,
     pub content: CompactString,
     pub estimated_tokens: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SessionAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_reasoning: Vec<ProviderReasoning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -575,6 +585,7 @@ impl Session {
             role,
             content: CompactString::new(content),
             estimated_tokens: tokens,
+            attachments: Vec::new(),
             provider_reasoning,
             provider_usage,
             tool_call: None,
@@ -603,6 +614,7 @@ impl Session {
             role: MessageRole::ToolCall,
             content: CompactString::new(content),
             estimated_tokens: tokens,
+            attachments: Vec::new(),
             provider_reasoning: Vec::new(),
             provider_usage: None,
             tool_call: Some(SessionToolCall {
@@ -696,6 +708,7 @@ impl Session {
             role: MessageRole::ToolResult,
             content: CompactString::new(&content),
             estimated_tokens: tokens,
+            attachments: Vec::new(),
             provider_reasoning: Vec::new(),
             provider_usage: None,
             tool_call: None,
@@ -927,6 +940,7 @@ impl Session {
             role: MessageRole::System,
             content: CompactString::from(summary.clone()),
             estimated_tokens: summary_tokens,
+            attachments: Vec::new(),
             provider_reasoning: Vec::new(),
             provider_usage: None,
             tool_call: None,

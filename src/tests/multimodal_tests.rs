@@ -1,6 +1,8 @@
 #![cfg(feature = "multimodal")]
 
-use crate::extras::multimodal::{MediaAttachment, detect_media, load_attachment};
+use crate::extras::multimodal::{
+    MediaAttachment, detect_media, load_attachment, load_persisted_attachment, persist_attachment,
+};
 use std::path::Path;
 
 // --- detect_media tests ---
@@ -152,4 +154,67 @@ fn media_to_messages_empty_vec_returns_empty() {
 
     let messages = media_to_messages(&[]);
     assert!(messages.is_empty());
+}
+
+#[test]
+fn persisted_attachment_survives_serialization_and_reloads_bytes() {
+    let dir = std::env::temp_dir().join(format!("zerostack-media-test-{}", uuid::Uuid::new_v4()));
+    let previous = crate::session::storage::set_test_data_dir(Some(dir.clone()));
+    let media = MediaAttachment::Image {
+        path: Path::new("clipboard.png").to_path_buf(),
+        data: vec![1, 2, 3, 4],
+        mime: "image/png".into(),
+    };
+    let attachment = persist_attachment("session-1", &media).unwrap();
+    let encoded = serde_json::to_string(&attachment).unwrap();
+    let decoded = serde_json::from_str(&encoded).unwrap();
+    let loaded = load_persisted_attachment("session-1", &decoded).unwrap();
+
+    assert_eq!(loaded.size(), 4);
+    assert_eq!(decoded.filename, "clipboard.png");
+    crate::session::storage::set_test_data_dir(previous);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn convert_history_replays_persisted_attachment_with_its_turn() {
+    use rig::completion::Message;
+    use rig::completion::message::UserContent;
+
+    let dir = std::env::temp_dir().join(format!("zerostack-media-test-{}", uuid::Uuid::new_v4()));
+    let previous = crate::session::storage::set_test_data_dir(Some(dir.clone()));
+    let media = MediaAttachment::Image {
+        path: Path::new("clipboard.png").to_path_buf(),
+        data: vec![1, 2, 3, 4],
+        mime: "image/png".into(),
+    };
+    let attachment = persist_attachment("session-1", &media).unwrap();
+    let mut session = crate::session::Session::new("openai", "model", 100_000);
+    session.id = "session-1".into();
+    session.add_message(crate::session::MessageRole::User, "What is this?");
+    session.messages[0].attachments.push(attachment);
+
+    let history = crate::agent::runner::convert_history(&session);
+    assert_eq!(history.len(), 2);
+    let Message::User { content } = &history[0] else {
+        panic!("expected media user message")
+    };
+    assert!(matches!(content.first_ref(), UserContent::Image(_)));
+    assert!(matches!(&history[1], Message::User { .. }));
+
+    crate::session::storage::set_test_data_dir(previous);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn persisted_attachment_rejects_path_traversal() {
+    let attachment = crate::session::SessionAttachment {
+        filename: "image.png".into(),
+        stored_name: "../image.png".into(),
+        mime: "image/png".into(),
+        size_bytes: 1,
+    };
+
+    let error = load_persisted_attachment("session-1", &attachment).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }

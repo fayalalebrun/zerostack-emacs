@@ -201,13 +201,12 @@ Thinking and actionable status are kept on the single prompt line.
 Use `C-c / -> attach` to queue files for the next prompt. File paths are sent to
 the native worker for validation; text files become extra context and, when built
 with the `multimodal` feature, recognized image/audio/PDF files become model
-media attachments for the next turn. The same menu can paste from the clipboard:
-if the clipboard contains a plain path, `file://` URI, `text/uri-list`, or
-desktop copied-file target it attaches that file; if it contains image data it
-writes a temporary image file first; otherwise it writes clipboard text to a
-temporary text file and attaches that. Clipboard reads use Emacs GUI selection
-targets first and fall back to common platform commands such as `wl-paste`,
-`xclip`, `pbpaste`, and `pngpaste` when available.
+media attachments for the next turn. Clipboard attachment accepts actual PNG,
+JPEG, GIF, or WebP image data only; clipboard text, including file paths and file
+URIs, is pasted normally. Clipboard reads use Emacs GUI image selection targets
+first and fall back to `wl-paste`, `xclip`, or `pngpaste` when available.
+Submitted media is copied into session-owned storage, displayed on its user turn,
+and restored into provider history when the session is resumed.
 For screenshots and other image clipboard data, `zerostack-mode` also registers
 an Emacs `yank-media` handler, so `M-x yank-media` and `C-c / -> attach ->
 clipboard` use Emacs' native media clipboard path before the lower-level

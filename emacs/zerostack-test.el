@@ -1206,63 +1206,23 @@
                (marker-position zerostack--input-marker)
                (point-max)))))))
 
-(ert-deftest zerostack-test-attachment-menu-adds_path_and_clipboard_file ()
-  (let* ((dir (make-temp-file "zerostack-attach" t))
-         (file (expand-file-name "image.png" dir)))
-    (unwind-protect
-        (progn
-          (with-temp-file file (insert "png"))
-          (zerostack-test--with-buffer
-           (let (sent)
-             (setq zerostack--send-function (lambda (line) (push line sent)))
-             (zerostack-add-file file)
-             (cl-letf (((symbol-function 'gui-get-selection)
-                        (lambda (&rest _) file)))
-               (zerostack-add-clipboard))
-             (should (equal (zerostack-test--sent-forms sent)
-                            `((file-add :request 1 :path ,file)
-                              (file-add :request 2 :path ,file)))))))
-      (delete-directory dir t))))
-
-(ert-deftest zerostack-test-clipboard_uri_list_adds_copied_file ()
-  (let* ((dir (make-temp-file "zerostack-uri-list" t))
-         (file (expand-file-name "copied file.txt" dir)))
-    (unwind-protect
-        (progn
-          (with-temp-file file (insert "copied"))
-          (zerostack-test--with-buffer
-           (let (sent)
-             (setq zerostack--send-function (lambda (line) (push line sent)))
-             (cl-letf (((symbol-function 'gui-get-selection)
-                        (lambda (_selection target)
-                          (when (eq target (intern "x-special/gnome-copied-files"))
-                            (concat "copy\nfile://"
-                                    (replace-regexp-in-string " " "%20" file))))))
-               (zerostack-add-clipboard))
-             (should (equal (zerostack-test--sent-forms sent)
-                            `((file-add :request 1 :path ,file)))))))
-      (delete-directory dir t))))
-
-(ert-deftest zerostack-test-clipboard_command_uri_list_fallback ()
-  (let* ((dir (make-temp-file "zerostack-uri-command" t))
-         (file (expand-file-name "command.txt" dir)))
-    (unwind-protect
-        (progn
-          (with-temp-file file (insert "copied"))
-          (zerostack-test--with-buffer
-           (let (sent)
-             (setq zerostack--send-function (lambda (line) (push line sent)))
-             (cl-letf (((symbol-function 'gui-get-selection)
-                        (lambda (&rest _) nil))
-                       ((symbol-function 'zerostack--clipboard-command-output)
-                        (lambda (_binary program &rest args)
-                          (when (and (equal program "wl-paste")
-                                     (member "text/uri-list" args))
-                            (concat "file://" file)))))
-               (zerostack-add-clipboard))
-             (should (equal (zerostack-test--sent-forms sent)
-                            `((file-add :request 1 :path ,file)))))))
-      (delete-directory dir t))))
+(ert-deftest zerostack-test-clipboard_path_is_not_attached ()
+  (zerostack-test--with-buffer
+   (let (sent yanked)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (cl-letf (((symbol-function 'gui-get-selection)
+                (lambda (_selection target)
+                  (when (memq target '(UTF8_STRING STRING TEXT))
+                    "/tmp/image.png")))
+               ((symbol-function 'zerostack--clipboard-command-output)
+                (lambda (&rest _) nil))
+               ((symbol-function 'yank)
+                (lambda (&rest _)
+                  (interactive)
+                  (setq yanked t))))
+       (zerostack-yank))
+     (should yanked)
+     (should-not sent))))
 
 (ert-deftest zerostack-test-clipboard_image_is_written_to_temp_file ()
   (zerostack-test--with-buffer
