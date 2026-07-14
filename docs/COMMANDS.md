@@ -452,8 +452,9 @@ including worktrees that currently have no sessions. Worktree rows in Emacs show
 only the branch description, branch name, and a compact directory marker.
 Session rows are saved zerostack sessions whose `working_dir` belongs to that
 worktree; Emacs displays only the title and how long ago the session was last
-updated. Sessions whose `working_dir` is not inside a Git repository are grouped
-under `:loose-workspaces` and rendered as a separate "other workspaces" section.
+updated. Sessions whose `working_dir` no longer exists are omitted. Sessions
+whose `working_dir` is not inside a Git repository are grouped under
+`:loose-workspaces` and rendered as a separate "other workspaces" section.
 Projects, worktrees, loose workspaces, and sessions with live native Emacs
 sessions sort before inactive ones; sessions are then sorted by most-recent
 update. Each worktree/workspace initially renders five sessions and adds a

@@ -112,6 +112,9 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
 
     for session in sessions {
         let dir = Path::new(session.working_dir.as_str());
+        if !session_directory_exists(dir) {
+            continue;
+        }
         let live_meta = live.get(session.id.as_str());
         let board_session = board_session(&session, live_meta);
         if attention.contains(session.id.as_str()) {
@@ -209,6 +212,10 @@ fn board_defaults(cfg: &Config) -> (String, String, String, String) {
     let subagent_model = model.clone();
 
     (provider, model, subagent_provider, subagent_model)
+}
+
+fn session_directory_exists(dir: &Path) -> bool {
+    dir.is_dir()
 }
 
 fn workspace_path(dir: &Path) -> PathBuf {
@@ -727,6 +734,25 @@ mod tests {
             pid: alive.then_some(123),
             socket: alive.then_some("/tmp/sock".to_string()),
         }
+    }
+
+    #[test]
+    fn session_directory_must_exist() {
+        let root = std::env::temp_dir().join(format!(
+            "zs-emacs-board-directory-test-{}",
+            std::process::id()
+        ));
+        let file = root.with_extension("file");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&file);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&file, "not a directory").unwrap();
+
+        assert!(session_directory_exists(&root));
+        assert!(!session_directory_exists(&file));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(!session_directory_exists(&root));
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]
