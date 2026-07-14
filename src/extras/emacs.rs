@@ -2357,6 +2357,14 @@ mod imp {
         false
     }
 
+    fn remove_pending_permission(
+        pending: &mut HashMap<u64, AskRequest>,
+        request: u64,
+    ) -> Option<(AskRequest, bool)> {
+        let ask_req = pending.remove(&request)?;
+        Some((ask_req, pending.is_empty()))
+    }
+
     async fn handle_permission_answer(
         server: &Arc<Server>,
         cmd: &Command,
@@ -2364,9 +2372,9 @@ mod imp {
     ) -> anyhow::Result<()> {
         let request = u64_arg(cmd, "request").context("permission-answer requires :request")?;
         let decision = atom_arg(cmd, "decision").context("permission-answer requires :decision")?;
-        let ask_req = {
+        let (ask_req, last_pending_permission) = {
             let mut mutable = server.mutable.lock().await;
-            mutable.pending_permissions.remove(&request)
+            remove_pending_permission(&mut mutable.pending_permissions, request)
         }
         .context("unknown permission request")?;
 
@@ -2392,6 +2400,9 @@ mod imp {
             other => anyhow::bail!("unknown permission decision '{}'", other),
         };
         let _ = ask_req.reply.send(user_decision);
+        if last_pending_permission {
+            dismiss_attention_marker(server).await;
+        }
         server
             .broadcast_event(
                 "permission-answered",
@@ -5970,6 +5981,27 @@ mod imp {
             assert!(!dir.exists());
 
             let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn permission_attention_clears_only_after_last_pending_answer() {
+            let mut pending = HashMap::new();
+            for request in [1, 2] {
+                let (reply, _receiver) = tokio::sync::oneshot::channel();
+                pending.insert(
+                    request,
+                    AskRequest {
+                        tool: CompactString::new("bash"),
+                        input: "pwd".to_string(),
+                        reply,
+                    },
+                );
+            }
+
+            let (_, last) = remove_pending_permission(&mut pending, 1).unwrap();
+            assert!(!last);
+            let (_, last) = remove_pending_permission(&mut pending, 2).unwrap();
+            assert!(last);
         }
 
         #[tokio::test]

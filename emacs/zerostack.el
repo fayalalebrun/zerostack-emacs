@@ -2580,7 +2580,8 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     ('permission-answered
      (when-let ((request (plist-get plist :request)))
        (remhash request zerostack--pending-permissions))
-     (zerostack--refresh-permission-status))
+     (zerostack--refresh-permission-status)
+     (zerostack-board--refresh-if-visible))
     ('completion-call
      (zerostack--set-thinking t)
      (zerostack--update-provider-model plist))

@@ -1801,6 +1801,20 @@
       (when (buffer-live-p chat)
         (kill-buffer chat)))))
 
+(ert-deftest zerostack-test-permission-answer-refreshes-visible-board ()
+  (zerostack-test--with-buffer
+   (let ((refreshes 0))
+     (cl-letf (((symbol-function 'zerostack-board--refresh-if-visible)
+                (lambda () (setq refreshes (1+ refreshes)))))
+       (zerostack--handle-form
+        '(event :seq 1 :session "s" :type permission-request
+                :request 8 :tool "bash" :input "pwd"))
+       (should (= refreshes 1))
+       (zerostack--handle-form
+        '(event :seq 2 :session "s" :type permission-answered
+                :request 8 :decision allow-once))
+       (should (= refreshes 2))))))
+
 (ert-deftest zerostack-test-prompt-indicates-waiting-for-permission ()
   (zerostack-test--with-buffer
    (let (sent)
