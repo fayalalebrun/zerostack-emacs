@@ -1801,6 +1801,26 @@
       (when (buffer-live-p chat)
         (kill-buffer chat)))))
 
+(ert-deftest zerostack-test-markdown-link-opens-url ()
+  (zerostack-test--with-buffer
+   (let (opened)
+     (zerostack--replace-lines
+      0
+      '((:text "< docs" :face zs-normal
+                :spans ((:text "< " :face zs-normal)
+                        (:text "docs" :face zs-link
+                               :url "https://example.com/docs")))))
+     (goto-char (point-min))
+     (search-forward "docs")
+     (backward-char)
+     (should (equal (get-text-property (point) 'zerostack-url)
+                    "https://example.com/docs"))
+     (should (eq (get-text-property (point) 'keymap) zerostack-url-map))
+     (cl-letf (((symbol-function 'browse-url)
+                (lambda (url &rest _) (setq opened url))))
+       (zerostack-open-url-at-point))
+     (should (equal opened "https://example.com/docs")))))
+
 (ert-deftest zerostack-test-permission-answer-refreshes-visible-board ()
   (zerostack-test--with-buffer
    (let ((refreshes 0))

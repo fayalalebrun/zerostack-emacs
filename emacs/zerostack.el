@@ -211,6 +211,13 @@ math macros while keeping the original LaTeX source and artifact link intact."
     map)
   "Keymap used on clickable artifact and LaTeX spans.")
 
+(defvar zerostack-url-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'zerostack-open-url-at-point)
+    (define-key map [mouse-2] #'zerostack-open-url-at-point)
+    map)
+  "Keymap used on Markdown links.")
+
 (defun zerostack-board--bind-keys (map)
   (set-keymap-parent map special-mode-map)
   (define-key map (kbd "g") #'zerostack-board-refresh)
@@ -2867,15 +2874,33 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
       (dolist (span spans)
         (let ((start (point))
               (text (or (plist-get span :text) ""))
-              (face (zerostack--face (or (plist-get span :face) 'zs-normal))))
+              (face (zerostack--face (or (plist-get span :face) 'zs-normal)))
+              (url (plist-get span :url)))
           (insert text)
           (add-text-properties
            start (point)
-           `(face ,face read-only t rear-nonsticky t))))
+           `(face ,face read-only t rear-nonsticky t))
+          (when (and (stringp url) (not (string-empty-p url)))
+            (add-text-properties
+             start (point)
+             `(mouse-face highlight
+                          help-echo ,url
+                          keymap ,zerostack-url-map
+                          follow-link t
+                          zerostack-url ,url)))))
     (let ((start (point)))
       (add-text-properties
        start (point)
        `(face ,fallback-face read-only t rear-nonsticky t)))))
+
+(defun zerostack-open-url-at-point (&optional event)
+  "Open the Markdown URL at point or mouse EVENT."
+  (interactive (list last-nonmenu-event))
+  (when (eventp event)
+    (posn-set-point (event-end event)))
+  (if-let ((url (get-text-property (point) 'zerostack-url)))
+      (browse-url url)
+    (zerostack--append-local-line "no URL at point" 'zs-error)))
 
 (defun zerostack--make-artifact-region (start end artifact)
   "Make text between START and END open ARTIFACT."

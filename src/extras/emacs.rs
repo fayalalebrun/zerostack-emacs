@@ -210,6 +210,7 @@ mod imp {
     struct WireSpan {
         text: String,
         face: &'static str,
+        url: Option<String>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3862,6 +3863,7 @@ mod imp {
                 first.spans.push(WireSpan {
                     text: first.text.clone(),
                     face: first.face,
+                    url: None,
                 });
             } else {
                 first.spans.insert(
@@ -3869,6 +3871,7 @@ mod imp {
                     WireSpan {
                         text: "< ".to_string(),
                         face: "zs-normal",
+                        url: None,
                     },
                 );
             }
@@ -3888,6 +3891,7 @@ mod imp {
         let mut out = Vec::new();
         let mut line = SpanLine::new("zs-normal");
         let mut faces = vec!["zs-normal"];
+        let mut link_url: Option<String> = None;
         let mut list_stack: Vec<Option<u64>> = Vec::new();
         let mut in_code_block = false;
         let mut in_table = false;
@@ -3932,7 +3936,10 @@ mod imp {
                     }
                     MdTag::Emphasis => faces.push("zs-italic"),
                     MdTag::Strong => faces.push("zs-bold"),
-                    MdTag::Link { .. } => faces.push("zs-link"),
+                    MdTag::Link { dest_url, .. } => {
+                        faces.push("zs-link");
+                        link_url = Some(dest_url.into_string());
+                    }
                     MdTag::Table(alignments) => {
                         line.flush(&mut out, cols);
                         in_table = true;
@@ -3975,7 +3982,10 @@ mod imp {
                     MdTagEnd::Item => line.flush(&mut out, cols),
                     MdTagEnd::Emphasis => pop_face(&mut faces, "zs-italic"),
                     MdTagEnd::Strong => pop_face(&mut faces, "zs-bold"),
-                    MdTagEnd::Link => pop_face(&mut faces, "zs-link"),
+                    MdTagEnd::Link => {
+                        pop_face(&mut faces, "zs-link");
+                        link_url = None;
+                    }
                     MdTagEnd::Table => {
                         flush_wire_table(&table_rows, &table_alignments, cols, &mut out);
                         in_table = false;
@@ -4004,7 +4014,11 @@ mod imp {
                         }
                         table_cell.push_str(&value);
                     } else {
-                        line.push(&value, *faces.last().unwrap_or(&"zs-normal"));
+                        line.push_with_url(
+                            &value,
+                            *faces.last().unwrap_or(&"zs-normal"),
+                            link_url.as_deref(),
+                        );
                     }
                 }
                 MdEvent::Code(value) => {
@@ -4124,6 +4138,7 @@ mod imp {
                     vec![WireSpan {
                         text: table_line,
                         face: "zs-table",
+                        url: None,
                     }],
                     "zs-table",
                 ));
@@ -4157,6 +4172,7 @@ mod imp {
             vec![WireSpan {
                 text,
                 face: "zs-table-border",
+                url: None,
             }],
             "zs-table-border",
         ));
@@ -4246,11 +4262,16 @@ mod imp {
         }
 
         fn push(&mut self, text: &str, face: &'static str) {
+            self.push_with_url(text, face, None);
+        }
+
+        fn push_with_url(&mut self, text: &str, face: &'static str, url: Option<&str>) {
             if text.is_empty() {
                 return;
             }
             if let Some(last) = self.spans.last_mut()
                 && last.face == face
+                && last.url.as_deref() == url
             {
                 last.text.push_str(text);
                 return;
@@ -4258,6 +4279,7 @@ mod imp {
             self.spans.push(WireSpan {
                 text: text.to_string(),
                 face,
+                url: url.map(ToOwned::to_owned),
             });
         }
 
@@ -4290,6 +4312,7 @@ mod imp {
                         current.push(WireSpan {
                             text: word.to_string(),
                             face: span.face,
+                            url: span.url.clone(),
                         });
                         width += word_width;
                     }
@@ -5252,7 +5275,19 @@ mod imp {
             "({})",
             spans
                 .iter()
-                .map(|span| format!("(:text {} :face {})", sexp_quote(&span.text), span.face))
+                .map(|span| {
+                    let url = span
+                        .url
+                        .as_deref()
+                        .map(|url| format!(" :url {}", sexp_quote(url)))
+                        .unwrap_or_default();
+                    format!(
+                        "(:text {} :face {}{})",
+                        sexp_quote(&span.text),
+                        span.face,
+                        url
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         )
@@ -5902,6 +5937,35 @@ mod imp {
 
             let code = render_assistant_lines(r"Code `\(not math\)`", 100, false);
             assert!(find_latex_spans(&code).is_empty());
+        }
+
+        #[test]
+        fn rendered_markdown_links_include_destination() {
+            let lines = render_assistant_lines(
+                "Read [the docs](https://example.com/docs) now.",
+                100,
+                false,
+            );
+            let links: Vec<_> = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .filter(|span| span.url.is_some())
+                .collect();
+
+            assert_eq!(
+                links
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>(),
+                "the docs"
+            );
+            assert!(links.iter().all(|span| span.face == "zs-link"));
+            assert!(
+                links
+                    .iter()
+                    .all(|span| span.url.as_deref() == Some("https://example.com/docs"))
+            );
+            assert!(lines_to_sexp(&lines).contains(":url \"https://example.com/docs\""));
         }
 
         #[test]

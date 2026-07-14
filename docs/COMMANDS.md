@@ -266,6 +266,9 @@ attachment is displayed and restored into provider history after resume.
 Assistant markdown is rendered by zerostack and streamed as events like
 `(event :type assistant-render :replace-from N :lines ((:text "< hi" :face zs-normal)))`.
 Emacs should delete from `:replace-from` and insert the provided line batch.
+Markdown link spans include their destination, for example
+`(:text "docs" :face zs-link :url "https://example.com/docs")`, so the client
+can open them with `browse-url`.
 Provider usage events include `:reasoning-tokens` when the provider reports
 thinking token usage, on both `completion-call` and final `done` events. Final
 assistant turns render persisted `thinking:12k` markers, and persisted tool
