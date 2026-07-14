@@ -3872,7 +3872,8 @@ mod imp {
         let options = MdOptions::ENABLE_STRIKETHROUGH
             | MdOptions::ENABLE_TABLES
             | MdOptions::ENABLE_TASKLISTS;
-        let parser = MdParser::new_ext(text, options);
+        let protected = protect_latex_delimiters(text);
+        let parser = MdParser::new_ext(&protected, options);
         let mut out = Vec::new();
         let mut line = SpanLine::new("zs-normal");
         let mut faces = vec!["zs-normal"];
@@ -3985,6 +3986,7 @@ mod imp {
                     _ => {}
                 },
                 MdEvent::Text(value) => {
+                    let value = restore_latex_delimiters(&value);
                     if in_table {
                         if !table_cell.is_empty() {
                             table_cell.push(' ');
@@ -3995,6 +3997,7 @@ mod imp {
                     }
                 }
                 MdEvent::Code(value) => {
+                    let value = restore_latex_delimiters(&value);
                     if in_table {
                         if !table_cell.is_empty() {
                             table_cell.push(' ');
@@ -4023,6 +4026,38 @@ mod imp {
         }
         line.flush(&mut out, cols);
         out
+    }
+
+    fn protect_latex_delimiters(text: &str) -> String {
+        const DELIMITERS: [(&str, char); 4] = [
+            (r"\(", '\u{e000}'),
+            (r"\)", '\u{e001}'),
+            (r"\[", '\u{e002}'),
+            (r"\]", '\u{e003}'),
+        ];
+        let mut out = String::with_capacity(text.len());
+        let mut pos = 0;
+        while pos < text.len() {
+            if let Some((delimiter, replacement)) = DELIMITERS
+                .iter()
+                .find(|(delimiter, _)| text[pos..].starts_with(delimiter) && !is_escaped(text, pos))
+            {
+                out.push(*replacement);
+                pos += delimiter.len();
+            } else {
+                let ch = text[pos..].chars().next().expect("position is in bounds");
+                out.push(ch);
+                pos += ch.len_utf8();
+            }
+        }
+        out
+    }
+
+    fn restore_latex_delimiters(text: &str) -> String {
+        text.replace('\u{e000}', r"\(")
+            .replace('\u{e001}', r"\)")
+            .replace('\u{e002}', r"\[")
+            .replace('\u{e003}', r"\]")
     }
 
     fn flush_wire_table(
@@ -4435,7 +4470,7 @@ mod imp {
         let mut display_start: Option<(usize, usize, String)> = None;
 
         for (line_idx, line) in lines.iter().enumerate() {
-            if line.face == "zs-code" {
+            if matches!(line.face, "zs-code" | "zs-code-block") {
                 continue;
             }
             let text = line.text.as_str();
@@ -4531,7 +4566,105 @@ mod imp {
             }
         }
 
+        find_backslash_latex_spans(lines, &mut spans);
+        spans.retain(|span| !latex_span_overlaps_code(lines, span));
+        spans.sort_by_key(|span| (span.line_start, span.col_start));
         spans
+    }
+
+    fn latex_span_overlaps_code(lines: &[WireLine], span: &LocatedLatexSpan) -> bool {
+        (span.line_start..=span.line_end).any(|line_idx| {
+            let Some(line) = lines.get(line_idx) else {
+                return false;
+            };
+            if matches!(line.face, "zs-code" | "zs-code-block") {
+                return true;
+            }
+            let range_start = if line_idx == span.line_start {
+                span.col_start
+            } else {
+                0
+            };
+            let range_end = if line_idx == span.line_end {
+                span.col_end
+            } else {
+                line.text.chars().count()
+            };
+            let mut col = 0;
+            line.spans.iter().any(|wire_span| {
+                let start = col;
+                col += wire_span.text.chars().count();
+                wire_span.face == "zs-code" && start < range_end && col > range_start
+            })
+        })
+    }
+
+    fn find_backslash_latex_spans(lines: &[WireLine], spans: &mut Vec<LocatedLatexSpan>) {
+        let mut open: Option<(usize, usize, String, &str, bool)> = None;
+        for (line_idx, line) in lines.iter().enumerate() {
+            if matches!(line.face, "zs-code" | "zs-code-block") {
+                continue;
+            }
+            let text = line.text.as_str();
+            let mut pos = 0;
+            if let Some((start_line, start_col, mut source, close, display)) = open.take() {
+                if let Some(end) = find_unescaped(text, close, 0) {
+                    if !source.is_empty() {
+                        source.push('\n');
+                    }
+                    source.push_str(&text[..end]);
+                    push_latex_span(
+                        spans,
+                        source,
+                        display,
+                        start_line,
+                        start_col,
+                        line_idx,
+                        byte_to_char_idx(text, end + close.len()),
+                    );
+                    pos = end + close.len();
+                } else {
+                    if !source.is_empty() {
+                        source.push('\n');
+                    }
+                    source.push_str(text);
+                    open = Some((start_line, start_col, source, close, display));
+                    continue;
+                }
+            }
+            while pos < text.len() {
+                let inline = find_unescaped(text, r"\(", pos);
+                let display = find_unescaped(text, r"\[", pos);
+                let (start, close, is_display) = match (inline, display) {
+                    (Some(a), Some(b)) if a < b => (a, r"\)", false),
+                    (_, Some(b)) => (b, r"\]", true),
+                    (Some(a), None) => (a, r"\)", false),
+                    (None, None) => break,
+                };
+                let source_start = start + 2;
+                if let Some(end) = find_unescaped(text, close, source_start) {
+                    push_latex_span(
+                        spans,
+                        text[source_start..end].to_string(),
+                        is_display,
+                        line_idx,
+                        byte_to_char_idx(text, start),
+                        line_idx,
+                        byte_to_char_idx(text, end + 2),
+                    );
+                    pos = end + 2;
+                } else {
+                    open = Some((
+                        line_idx,
+                        byte_to_char_idx(text, start),
+                        text[source_start..].to_string(),
+                        close,
+                        is_display,
+                    ));
+                    break;
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5709,6 +5842,55 @@ mod imp {
             assert!(spans[1].display);
             assert_eq!(spans[1].line_start, 1);
             assert_eq!(spans[1].line_end, 3);
+        }
+
+        #[test]
+        fn latex_spans_detect_parenthesis_and_bracket_delimiters() {
+            let lines = vec![
+                WireLine::new(r"< Inline \(x^2\) here", "zs-normal"),
+                WireLine::new(r"\[", "zs-normal"),
+                WireLine::new("y = mx + b", "zs-normal"),
+                WireLine::new(r"\]", "zs-normal"),
+            ];
+
+            let spans = find_latex_spans(&lines);
+            assert_eq!(spans.len(), 2);
+            assert_eq!(spans[0].source, "x^2");
+            assert!(!spans[0].display);
+            assert_eq!(spans[1].source, "y = mx + b");
+            assert!(spans[1].display);
+            assert_eq!((spans[1].line_start, spans[1].line_end), (1, 3));
+        }
+
+        #[test]
+        fn latex_spans_ignore_escaped_delimiters_and_code() {
+            let lines = vec![
+                WireLine::new(r"< Escaped \\(not math\\)", "zs-normal"),
+                WireLine::new(r"\(also not math\)", "zs-code"),
+            ];
+
+            assert!(find_latex_spans(&lines).is_empty());
+        }
+
+        #[test]
+        fn backslash_latex_survives_markdown_rendering() {
+            let lines =
+                render_assistant_lines("\\[\nX_i = X_i^{nominal}+\\delta_i\n\\]", 100, false);
+
+            assert!(lines.iter().any(|line| line.text.contains(r"\[")));
+            let spans = find_latex_spans(&lines);
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].source, "X_i = X_i^{nominal}+\\delta_i");
+            assert!(spans[0].display);
+        }
+
+        #[test]
+        fn latex_spans_require_math_delimiters_and_ignore_inline_code() {
+            let plain = render_assistant_lines("[ X_i = X_i^{nominal} ]", 100, false);
+            assert!(find_latex_spans(&plain).is_empty());
+
+            let code = render_assistant_lines(r"Code `\(not math\)`", 100, false);
+            assert!(find_latex_spans(&code).is_empty());
         }
 
         #[test]

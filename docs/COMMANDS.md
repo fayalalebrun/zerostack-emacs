@@ -320,10 +320,11 @@ process exit when the session runtime directory is removed. Crash cleanup is
 best-effort via runtime directory lifetime and stale session sweeping.
 
 Assistant renders may include LaTeX metadata for inline SVG display. Zerostack
-writes ephemeral `.tex` source artifacts, renders them to ephemeral SVG artifacts
-with `latex` and `dvisvgm` when those tools are available, marks the rendered
-line ranges, and emits `latex-preview-ready` after `done` so the Emacs client can
-apply stable inline overlays.
+recognizes inline `$...$` and `\(...\)` math plus display `$$...$$` and
+`\[...\]` math. It writes ephemeral `.tex` source artifacts, renders them to
+ephemeral SVG artifacts with `latex` and `dvisvgm` when those tools are
+available, marks the rendered line ranges, and emits `latex-preview-ready` after
+`done` so the Emacs client can apply stable inline overlays.
 
 ```lisp
 (:text "< Inline $x^2$"
