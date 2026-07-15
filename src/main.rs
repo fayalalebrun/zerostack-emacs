@@ -66,6 +66,7 @@ fn resolve_mode(cli: &cli::Cli, cfg: &config::Config) -> SecurityMode {
 fn build_permission_checker(
     cli: &cli::Cli,
     cfg: &config::Config,
+    skills: &[context::skills::Skill],
 ) -> (
     Option<PermCheck>,
     Option<AskSender>,
@@ -84,7 +85,10 @@ fn build_permission_checker(
 
     let mode = resolve_mode(cli, cfg);
     let permission_modes = cfg.permission_modes.clone();
-    let checker = PermissionChecker::new(&perm_config, mode, None, permission_modes);
+    let mut checker = PermissionChecker::new(&perm_config, mode, None, permission_modes);
+    for skill in skills.iter().filter(|skill| skill.model_visible) {
+        checker.add_session_allowlist("read".to_string(), &skill.location.to_string_lossy());
+    }
     let perm: PermCheck = std::sync::Arc::new(std::sync::Mutex::new(checker));
 
     let (ask_tx, ask_rx) = tokio::sync::mpsc::channel(64);
@@ -366,7 +370,7 @@ async fn main() -> anyhow::Result<()> {
     let status_signals = cli.status_socket.clone().map(StatusSignals::new);
     #[cfg(not(feature = "status-signals"))]
     let status_signals: Option<StatusSignals> = None;
-    let (permission, ask_tx, ask_rx) = build_permission_checker(&cli, &cfg);
+    let (permission, ask_tx, ask_rx) = build_permission_checker(&cli, &cfg, &context.skills);
 
     #[cfg(feature = "advisor")]
     let handoff_rx = {
