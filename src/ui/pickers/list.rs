@@ -37,6 +37,7 @@ const BASE_COMMANDS: &[&str] = &[
     "/sessions",
     "/theme",
     "/thinking",
+    "/timing",
     "/toggle",
     "/tutorial",
     "/undo",

@@ -13,6 +13,7 @@ All slash commands are available from the TUI input prompt.
 | `/sessions` | List recent saved sessions (up to 20). |
 | `/sessions <id-prefix>` | Load a session by its ID prefix. |
 | `/sessions delete <id-prefix>` | Delete a session by its ID prefix. |
+| `/timing` | Show individual command and text-generation block wait times, slowest first. |
 | `/history` | Show global chat history (last 10 entries across sessions). |
 | `/fork [message-index]` | Fork the current conversation into a new session before a selected user message, or before `message-index`. |
 
@@ -220,6 +221,9 @@ type `!<command>` first (it stores the output as an Assistant message), then
 follow up with a normal message asking the agent about it.
 
 ## Native Emacs Protocol
+
+`M-x zerostack-timing` opens a separate buffer with individual commands and
+text-generation blocks for the current session, sorted from slowest to fastest.
 
 `zerostack --emacs` runs one headless zerostack session as a Unix socket server
 and registers it under `$XDG_RUNTIME_DIR/zerostack/sessions/<session-id>/` (or

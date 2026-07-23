@@ -1945,6 +1945,11 @@ LIMIT defaults to 50."
   (interactive)
   (zerostack--send-command 'status :request (zerostack--next-request)))
 
+(defun zerostack-timing ()
+  "Show command and text-generation block wait times for the current session."
+  (interactive)
+  (zerostack--send-command 'timing :request (zerostack--next-request)))
+
 (defun zerostack-attachment-menu ()
   "Choose an attachment action for the current zerostack session."
   (interactive)
@@ -2194,7 +2199,7 @@ When BINARY is non-nil, DATA is written with binary coding."
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
 Zerostack
-_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _t_ thinking  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
+_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _t_ thinking  _i_ timing  _p_ provider  _m_ model  _P_ subagent provider  _S_ subagent model  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2205,6 +2210,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     ("G" zerostack-clear-goal)
     ("l" zerostack-loop)
     ("t" zerostack-thinking-menu)
+    ("i" zerostack-timing)
     ("p" zerostack-provider-menu)
     ("m" zerostack-model-menu)
     ("P" zerostack-subagent-provider-menu)
@@ -2224,7 +2230,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking"
+  (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking" "timing"
                     "provider" "model" "subagent-provider" "subagent-model" "goal"
                     "clear-goal" "tools" "mcp" "view" "artifact" "restart"))
          (choice (completing-read "Zerostack command: " commands nil t)))
@@ -2236,6 +2242,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
       ("redo" (call-interactively #'zerostack-redo))
       ("loop" (call-interactively #'zerostack-loop))
       ("thinking" (call-interactively #'zerostack-thinking-menu))
+      ("timing" (zerostack-timing))
       ("provider" (call-interactively #'zerostack-provider-menu))
       ("model" (call-interactively #'zerostack-model-menu))
       ("subagent-provider" (call-interactively #'zerostack-subagent-provider-menu))
@@ -2422,6 +2429,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     ('error (zerostack--handle-error (cdr form)))
     ('sessions (zerostack--handle-sessions (cdr form)))
     ('status (zerostack--handle-status (cdr form)))
+    ('timing (zerostack--handle-timing (cdr form)))
     ('event (zerostack--handle-event (cdr form)))
     (_ (zerostack--append-local-line (format "unknown form: %S" form) 'zs-error))))
 
@@ -2502,6 +2510,18 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     (if items
         (zerostack--set-notice (format "sessions: %d live" (length items)))
       (zerostack--set-notice "sessions: none"))))
+
+(defun zerostack--handle-timing (plist)
+  "Show timing response PLIST in a separate buffer."
+  (let ((buffer (get-buffer-create
+                 (format "*zerostack timing: %s*" (or zerostack--session "session"))))
+        (message (or (plist-get plist :message) "no timing data")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert message "\n")
+        (special-mode)))
+    (display-buffer buffer)))
 
 (defun zerostack--handle-status (plist)
   "Handle status response PLIST."

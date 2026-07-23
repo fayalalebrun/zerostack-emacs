@@ -731,6 +731,7 @@ mod imp {
             "list-sessions" => handle_list_sessions(&cmd, out).await,
             "dismiss-attention" => handle_dismiss_attention(&server, &cmd, out).await,
             "status" => handle_status(&server, &cmd, out).await,
+            "timing" => handle_timing(&server, &cmd, out).await,
             _ => Err(anyhow::anyhow!("unknown command '{}'", cmd.name)),
         };
 
@@ -2448,6 +2449,24 @@ mod imp {
             format!(" :session {}", sexp_quote(&session_id)),
         )
         .await;
+        Ok(())
+    }
+
+    async fn handle_timing(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let message = {
+            let session = server.session.lock().await;
+            crate::session::timing::format_report(&session)
+        };
+        out.send(format!(
+            "(timing :request {} :message {})",
+            request_arg(cmd).unwrap_or_else(|| "nil".to_string()),
+            sexp_quote(&message),
+        ))
+        .await?;
         Ok(())
     }
 

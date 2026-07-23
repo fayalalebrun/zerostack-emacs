@@ -9,6 +9,7 @@ mod providers;
 pub(crate) mod review;
 pub(crate) mod session;
 pub(crate) mod settings;
+mod timing;
 
 pub(crate) use providers::{quick_model_names_for_provider, warm_model_cache};
 
@@ -383,6 +384,7 @@ pub async fn handle_slash(
         "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"
         | "/rewind" => session::handle(&parts, &mut ctx).await,
         "/goal" => goal::handle(&parts, &mut ctx).await,
+        "/timing" => timing::handle(&mut ctx).await,
         "/help" => {
             help::handle(&parts, &mut ctx);
             Ok(())

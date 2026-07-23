@@ -986,12 +986,13 @@
      (zerostack-permission-answer 42 'allow-always "bash cargo test")
      (zerostack-request-sessions 7)
      (zerostack-request-status)
+     (zerostack-timing)
 
      (let ((forms (zerostack-test--sent-forms sent)))
        (should (equal (mapcar #'car forms)
                       '(hello attach render set-view provider model subagent-provider subagent-model goal goal list-tools mcp thinking prompt compact compact loop-start
                               loop-status loop-stop file-add file-list file-drop-all abort
-                              permission-answer list-sessions status)))
+                              permission-answer list-sessions status timing)))
        (should (equal (nth 0 forms) '(hello :request 1 :protocol 1 :cols 100)))
        (should (equal (nth 1 forms) '(attach :request 2 :cols 100)))
        (should (equal (nth 2 forms) '(render :request 3 :cols 100)))
@@ -1022,7 +1023,27 @@
                       '(permission-answer :request 42 :decision allow-always
                                           :pattern "bash cargo test")))
        (should (equal (nth 24 forms) '(list-sessions :request 24 :limit 7)))
-       (should (equal (nth 25 forms) '(status :request 25)))))))
+       (should (equal (nth 25 forms) '(status :request 25)))
+       (should (equal (nth 26 forms) '(timing :request 26)))))))
+
+(ert-deftest zerostack-test-timing-response-opens-separate-buffer ()
+  (zerostack-test--with-buffer
+   (let ((chat-buffer (current-buffer))
+         (zerostack--session "session-1")
+         shown)
+     (cl-letf (((symbol-function 'display-buffer)
+                (lambda (buffer &rest _)
+                  (setq shown buffer))))
+       (zerostack--handle-form
+        '(timing :request 1 :message "session timing\n  commands: 1.2s total")))
+     (should (buffer-live-p shown))
+     (should (equal (buffer-name shown) "*zerostack timing: session-1*"))
+     (should (eq (buffer-local-value 'major-mode shown) 'special-mode))
+     (should (string-match-p "commands: 1.2s total"
+                             (with-current-buffer shown (buffer-string))))
+     (should-not (string-match-p "commands: 1.2s total"
+                                 (with-current-buffer chat-buffer (buffer-string))))
+     (kill-buffer shown))))
 
 (ert-deftest zerostack-test-send-form-escapes-newlines ()
   (zerostack-test--with-buffer
@@ -1124,7 +1145,7 @@
 (ert-deftest zerostack-test-command-menu-fallback-dispatches-to-protocol ()
   (zerostack-test--with-buffer
    (let (dispatched)
-     (let ((choices '("attach" "compact" "loop" "thinking" "provider" "model" "subagent-provider" "subagent-model" "goal" "clear-goal" "tools" "mcp" "view" "restart")))
+     (let ((choices '("attach" "compact" "loop" "thinking" "timing" "provider" "model" "subagent-provider" "subagent-model" "goal" "clear-goal" "tools" "mcp" "view" "restart")))
        (cl-letf (((symbol-function 'completing-read)
                   (lambda (&rest _) (pop choices)))
                  ((symbol-function 'zerostack-attachment-menu)
@@ -1135,6 +1156,8 @@
                   (lambda () (interactive) (push 'loop dispatched)))
                  ((symbol-function 'zerostack-thinking-menu)
                   (lambda (&optional _) (interactive) (push 'thinking dispatched)))
+                 ((symbol-function 'zerostack-timing)
+                  (lambda () (interactive) (push 'timing dispatched)))
                  ((symbol-function 'zerostack-provider-menu)
                   (lambda (&optional _) (interactive) (push 'provider dispatched)))
                  ((symbol-function 'zerostack-model-menu)
@@ -1155,9 +1178,9 @@
                   (lambda () (interactive) (push 'view dispatched)))
                  ((symbol-function 'zerostack-restart-daemon)
                   (lambda () (interactive) (push 'restart dispatched))))
-         (dotimes (_ 14)
+         (dotimes (_ 15)
            (zerostack--command-menu-fallback))))
-     (should (equal (nreverse dispatched) '(attach compact loop thinking provider model subagent-provider subagent-model goal clear-goal tools mcp view restart))))))
+     (should (equal (nreverse dispatched) '(attach compact loop thinking timing provider model subagent-provider subagent-model goal clear-goal tools mcp view restart))))))
 
 (ert-deftest zerostack-test-restart-daemon-reuses_session_without_closing_buffer ()
   (zerostack-test--with-buffer

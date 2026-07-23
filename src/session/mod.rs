@@ -1,5 +1,6 @@
 pub mod chat_history;
 pub mod storage;
+pub mod timing;
 
 use std::path::{Path, PathBuf};
 
