@@ -493,7 +493,7 @@ Key bindings in `zerostack-board-mode`:
 | --- | ------ |
 | `g` | Refresh the board snapshot. |
 | `RET` | Open the item at point. Projects/worktrees open with `dired`; live sessions connect to their socket; inactive sessions start `zerostack --emacs --session <id>`. Needs-attention rows also have a clickable `dismiss` button. |
-| `c` | Create from the item at point. On a project, prompts for a branch/path/description and runs `git worktree add` from Emacs. On a worktree, starts a new `zerostack --emacs` session with that worktree as `default-directory`. |
+| `c` | Create from the item at point. On a project, prompts for a branch/path/description and runs `git worktree add` from Emacs. The new branch starts at `origin/HEAD`, and the path defaults to `<repo>_<branch>`. On a worktree, starts a new `zerostack --emacs` session with that worktree as `default-directory`. |
 | `p` | Persist a new default provider in zerostack config. The model is reset to that provider's configured/default model. |
 | `m` | Persist a new default model in zerostack config for the current default provider. |
 | `s` | Stop the live session process at point after confirmation. |

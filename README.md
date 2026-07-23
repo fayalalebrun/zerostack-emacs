@@ -224,9 +224,10 @@ sessions, sorted with live sessions first and then by most-recent update; press
 RET on the `show 5 more` row to expand more. Use `j` to jump to a visible board
 item with completion, `o` to choose and open one, and `A` to dismiss and open a
 session from Needs attention. The board keeps actions pragmatic: `c` creates a
-worktree from a project or a new session from a worktree, config buttons update
-the persisted provider/model defaults, `s` stops a live session process, and `x`
-moves a worktree/session to trash after confirmation.
+worktree from a project or a new session from a worktree. New worktree branches
+start at `origin/HEAD`, with a default path named `<repo>_<branch>`. Config
+buttons update the persisted provider/model defaults, `s` stops a live session
+process, and `x` moves a worktree/session to trash after confirmation.
 
 The Nix dev shell includes Emacs with SVG image support plus TeX/dvisvgm.
 LaTeX spans are rendered by zerostack into ephemeral SVG artifacts and displayed

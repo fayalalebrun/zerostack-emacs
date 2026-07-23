@@ -1473,12 +1473,15 @@ Return non-nil when DIRECTORY was newly added."
     (when (string-empty-p branch)
       (user-error "Branch name is required"))
     (let* ((base (file-name-directory (directory-file-name project-path)))
-           (dir-name (zerostack-board--safe-dir-name branch))
+           (repo-name (file-name-nondirectory (directory-file-name project-path)))
+           (dir-name (format "%s_%s" repo-name
+                             (zerostack-board--safe-dir-name branch)))
            (default-path (expand-file-name dir-name base))
            (path (expand-file-name
                   (read-file-name "Worktree path: " base default-path nil dir-name)))
            (description (string-trim (read-string "Branch description: "))))
-      (zerostack-board--call-git project-path "worktree" "add" "-b" branch path)
+      (zerostack-board--call-git project-path "worktree" "add" "-b" branch path
+                                 "origin/HEAD")
       (unless (string-empty-p description)
         (zerostack-board--call-git project-path "config"
                                    (format "branch.%s.description" branch)
