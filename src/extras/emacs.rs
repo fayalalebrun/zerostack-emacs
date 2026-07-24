@@ -211,6 +211,7 @@ mod imp {
         text: String,
         face: &'static str,
         url: Option<String>,
+        image: Option<String>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3883,6 +3884,7 @@ mod imp {
                     text: first.text.clone(),
                     face: first.face,
                     url: None,
+                    image: None,
                 });
             } else {
                 first.spans.insert(
@@ -3891,6 +3893,7 @@ mod imp {
                         text: "< ".to_string(),
                         face: "zs-normal",
                         url: None,
+                        image: None,
                     },
                 );
             }
@@ -3911,6 +3914,7 @@ mod imp {
         let mut line = SpanLine::new("zs-normal");
         let mut faces = vec!["zs-normal"];
         let mut link_url: Option<String> = None;
+        let mut image: Option<(String, String)> = None;
         let mut list_stack: Vec<Option<u64>> = Vec::new();
         let mut in_code_block = false;
         let mut in_table = false;
@@ -3959,6 +3963,9 @@ mod imp {
                         faces.push("zs-link");
                         link_url = Some(dest_url.into_string());
                     }
+                    MdTag::Image { dest_url, .. } => {
+                        image = Some((dest_url.into_string(), String::new()));
+                    }
                     MdTag::Table(alignments) => {
                         line.flush(&mut out, cols);
                         in_table = true;
@@ -4005,6 +4012,11 @@ mod imp {
                         pop_face(&mut faces, "zs-link");
                         link_url = None;
                     }
+                    MdTagEnd::Image => {
+                        if let Some((path, alt)) = image.take() {
+                            line.push_image(&alt, &path);
+                        }
+                    }
                     MdTagEnd::Table => {
                         flush_wire_table(&table_rows, &table_alignments, cols, &mut out);
                         in_table = false;
@@ -4027,7 +4039,9 @@ mod imp {
                 },
                 MdEvent::Text(value) => {
                     let value = restore_latex_delimiters(&value);
-                    if in_table {
+                    if let Some((_, alt)) = image.as_mut() {
+                        alt.push_str(&value);
+                    } else if in_table {
                         if !table_cell.is_empty() {
                             table_cell.push(' ');
                         }
@@ -4158,6 +4172,7 @@ mod imp {
                         text: table_line,
                         face: "zs-table",
                         url: None,
+                        image: None,
                     }],
                     "zs-table",
                 ));
@@ -4192,6 +4207,7 @@ mod imp {
                 text,
                 face: "zs-table-border",
                 url: None,
+                image: None,
             }],
             "zs-table-border",
         ));
@@ -4291,6 +4307,7 @@ mod imp {
             if let Some(last) = self.spans.last_mut()
                 && last.face == face
                 && last.url.as_deref() == url
+                && last.image.is_none()
             {
                 last.text.push_str(text);
                 return;
@@ -4299,6 +4316,16 @@ mod imp {
                 text: text.to_string(),
                 face,
                 url: url.map(ToOwned::to_owned),
+                image: None,
+            });
+        }
+
+        fn push_image(&mut self, alt: &str, path: &str) {
+            self.spans.push(WireSpan {
+                text: if alt.is_empty() { "image" } else { alt }.to_string(),
+                face: "zs-normal",
+                url: None,
+                image: Some(path.to_string()),
             });
         }
 
@@ -4316,6 +4343,16 @@ mod imp {
         let mut current = Vec::new();
         let mut width = 0usize;
         for span in spans {
+            if span.image.is_some() {
+                let span_width = span.text.chars().count();
+                if width > 0 && width + span_width > max {
+                    push_wrapped_line(&mut out, &mut current, line_face);
+                    width = 0;
+                }
+                width += span_width;
+                current.push(span);
+                continue;
+            }
             for part in span.text.split_inclusive('\n') {
                 let (text, newline) = part
                     .strip_suffix('\n')
@@ -4332,6 +4369,7 @@ mod imp {
                             text: word.to_string(),
                             face: span.face,
                             url: span.url.clone(),
+                            image: None,
                         });
                         width += word_width;
                     }
@@ -5300,11 +5338,17 @@ mod imp {
                         .as_deref()
                         .map(|url| format!(" :url {}", sexp_quote(url)))
                         .unwrap_or_default();
+                    let image = span
+                        .image
+                        .as_deref()
+                        .map(|path| format!(" :image {}", sexp_quote(path)))
+                        .unwrap_or_default();
                     format!(
-                        "(:text {} :face {}{})",
+                        "(:text {} :face {}{}{})",
                         sexp_quote(&span.text),
                         span.face,
-                        url
+                        url,
+                        image
                     )
                 })
                 .collect::<Vec<_>>()
@@ -5956,6 +6000,30 @@ mod imp {
 
             let code = render_assistant_lines(r"Code `\(not math\)`", 100, false);
             assert!(find_latex_spans(&code).is_empty());
+        }
+
+        #[test]
+        fn rendered_markdown_images_include_path_and_alt_text() {
+            let lines = render_assistant_lines(
+                "Before ![Denied calibration](artifacts/calibration.png) after.",
+                100,
+                false,
+            );
+            let images: Vec<_> = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .filter(|span| span.image.is_some())
+                .collect();
+
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].text, "Denied calibration");
+            assert_eq!(
+                images[0].image.as_deref(),
+                Some("artifacts/calibration.png")
+            );
+            assert!(lines_to_sexp(&lines).contains(
+                ":text \"Denied calibration\" :face zs-normal :image \"artifacts/calibration.png\""
+            ));
         }
 
         #[test]

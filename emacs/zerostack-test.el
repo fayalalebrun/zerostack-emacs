@@ -1845,6 +1845,43 @@
        (zerostack-open-url-at-point))
      (should (equal opened "https://example.com/docs")))))
 
+(ert-deftest zerostack-test-markdown-image-displays-relative-to-worktree ()
+  (zerostack-test--with-buffer
+   (let ((zerostack--worktree-dir "/repo/") calls)
+     (cl-letf (((symbol-function 'image-type-from-file-name)
+                (lambda (path)
+                  (and (equal path "/repo/artifacts/calibration.png") 'png)))
+               ((symbol-function 'file-readable-p) (lambda (_) t))
+               ((symbol-function 'image-type-available-p) (lambda (type) (eq type 'png)))
+               ((symbol-function 'create-image)
+                (lambda (path type &rest _)
+                  (push (list path type) calls)
+                  '(image :type png))))
+       (zerostack--replace-lines
+        0
+        '((:text "< Denied calibration" :face zs-normal
+                  :spans ((:text "< " :face zs-normal)
+                          (:text "Denied calibration" :face zs-normal
+                                 :image "artifacts/calibration.png"))))))
+     (goto-char (point-min))
+     (search-forward "Denied calibration")
+     (backward-char)
+     (should (equal (get-text-property (point) 'display) '(image :type png)))
+     (should (equal calls '(("/repo/artifacts/calibration.png" png)))))))
+
+(ert-deftest zerostack-test-markdown-image-keeps-alt-text-when-unreadable ()
+  (zerostack-test--with-buffer
+   (cl-letf (((symbol-function 'image-type-from-file-name) (lambda (_) 'png))
+             ((symbol-function 'file-readable-p) (lambda (_) nil))
+             ((symbol-function 'create-image)
+              (lambda (&rest _) (ert-fail "unreadable image must not be decoded"))))
+     (zerostack--replace-lines
+      0
+      '((:text "< missing" :face zs-normal
+                :spans ((:text "< " :face zs-normal)
+                        (:text "missing" :face zs-normal :image "missing.png"))))))
+   (should (string-match-p "< missing" (buffer-string)))))
+
 (ert-deftest zerostack-test-permission-answer-refreshes-visible-board ()
   (zerostack-test--with-buffer
    (let ((refreshes 0))

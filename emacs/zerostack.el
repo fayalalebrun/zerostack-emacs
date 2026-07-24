@@ -2896,9 +2896,10 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
   (if spans
       (dolist (span spans)
         (let ((start (point))
-              (text (or (plist-get span :text) ""))
-              (face (zerostack--face (or (plist-get span :face) 'zs-normal)))
-              (url (plist-get span :url)))
+               (text (or (plist-get span :text) ""))
+               (face (zerostack--face (or (plist-get span :face) 'zs-normal)))
+               (url (plist-get span :url))
+               (image (plist-get span :image)))
           (insert text)
           (add-text-properties
            start (point)
@@ -2909,12 +2910,31 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
              `(mouse-face highlight
                           help-echo ,url
                           keymap ,zerostack-url-map
-                          follow-link t
-                          zerostack-url ,url)))))
+                           follow-link t
+                           zerostack-url ,url)))
+           (when-let ((display (zerostack--markdown-image-display image)))
+             (add-text-properties
+              start (point)
+              `(display ,display help-echo ,image)))))
     (let ((start (point)))
       (add-text-properties
        start (point)
        `(face ,fallback-face read-only t rear-nonsticky t)))))
+
+(defun zerostack--markdown-image-display (path)
+  "Return an inline image descriptor for Markdown image PATH, or nil."
+  (when (and (stringp path) (not (string-empty-p path)))
+    (let* ((base (or zerostack--worktree-dir zerostack--cwd default-directory))
+           (resolved (expand-file-name path base))
+           (type (image-type-from-file-name resolved)))
+      (when (and type
+                 (not (file-remote-p resolved))
+                 (file-readable-p resolved)
+                 (image-type-available-p type))
+        (ignore-errors
+          (create-image resolved type nil
+                        :ascent 'center
+                        :max-width (window-body-width nil t)))))))
 
 (defun zerostack-open-url-at-point (&optional event)
   "Open the Markdown URL at point or mouse EVENT."
