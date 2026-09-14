@@ -609,15 +609,63 @@ The root is resolved with Projectile when available, then `project.el', then
   "Refresh a zerostack board buffer for `revert-buffer'."
   (zerostack-board-refresh))
 
-(defun zerostack-board-refresh ()
-  "Refresh the zerostack board snapshot."
-  (interactive)
+(defvar-local zerostack-board--refresh-process nil)
+
+
+(defun zerostack-board--apply-snapshot (snapshot)
+  "Render SNAPSHOT without moving the board cursor."
+  (unless (eq (car-safe snapshot) 'zerostack-board)
+    (error "Invalid zerostack board snapshot"))
   (let ((line (line-number-at-pos))
-        (column (current-column))
-        (snapshot (zerostack-board--fetch)))
+        (column (current-column)))
     (setq zerostack-board--snapshot snapshot)
     (zerostack-board--render snapshot)
     (zerostack--goto-line-column line column)))
+
+(defun zerostack-board-refresh ()
+  "Refresh the zerostack board snapshot asynchronously."
+  (interactive)
+  (cond
+   (zerostack-board--fetch-function
+    (zerostack-board--apply-snapshot (zerostack-board--fetch)))
+   (zerostack-board--refresh-process nil)
+   (t
+    (let ((board (current-buffer))
+          (output (generate-new-buffer " *zerostack-board-output*")))
+      (condition-case err
+          (setq zerostack-board--refresh-process
+                (make-process
+                 :name "zerostack-board" :buffer output :noquery t
+                 :connection-type 'pipe :coding 'utf-8-unix
+                 :command (list zerostack-command "--emacs-board")
+                 :sentinel (lambda (process _event)
+                             (zerostack-board--refresh-finished process board))))
+        (error
+         (kill-buffer output)
+         (signal (car err) (cdr err))))))))
+
+(defun zerostack-board--refresh-finished (process board)
+  "Apply the completed PROCESS snapshot to BOARD and release its output."
+  (when (memq (process-status process) '(exit signal))
+    (unwind-protect
+        (when (buffer-live-p board)
+          (with-current-buffer board
+            (when (eq process zerostack-board--refresh-process)
+              (setq zerostack-board--refresh-process nil)
+              (condition-case err
+                  (let ((snapshot
+                         (with-current-buffer (process-buffer process)
+                           (unless (zerop (process-exit-status process))
+                             (error "zerostack --emacs-board exited with %s: %s"
+                                    (process-exit-status process)
+                                    (string-trim (buffer-string))))
+                           (goto-char (point-min))
+                           (read (current-buffer)))))
+                    (zerostack-board--apply-snapshot snapshot))
+                (error (message "zerostack board refresh failed: %s"
+                                (error-message-string err)))))))
+      (when (buffer-live-p (process-buffer process))
+        (kill-buffer (process-buffer process))))))
 
 (defun zerostack-board--refresh-if-visible ()
   "Refresh the board buffer when it already exists."

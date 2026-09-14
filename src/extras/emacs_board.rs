@@ -6,7 +6,80 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use crate::config::{self, Config};
-use crate::session::{Session, storage};
+use crate::session::{MessageRole, SessionTokenUsage, storage};
+
+#[derive(Deserialize)]
+struct StoredBoardSession {
+    id: String,
+    name: String,
+    working_dir: String,
+    model: String,
+    provider: String,
+    created_at: String,
+    updated_at: String,
+    total_cost: f64,
+    total_estimated_tokens: u64,
+    context_window: u64,
+    #[serde(default)]
+    calibrated_tokens: u64,
+    #[serde(default)]
+    calibrated_msg_count: usize,
+    #[cfg(feature = "subagents")]
+    #[serde(default)]
+    subagents_enabled: Option<bool>,
+    messages: BoardMessages,
+}
+
+#[derive(Default)]
+struct BoardMessages {
+    count: usize,
+    title: Option<String>,
+    tokens: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for BoardMessages {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MessagesVisitor;
+        impl<'de> serde::de::Visitor<'de> for MessagesVisitor {
+            type Value = BoardMessages;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("session messages")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                #[derive(Deserialize)]
+                struct Message<'a> {
+                    role: MessageRole,
+                    #[serde(borrow)]
+                    content: std::borrow::Cow<'a, str>,
+                    #[serde(default)]
+                    provider_usage: Option<SessionTokenUsage>,
+                }
+                let mut messages = BoardMessages::default();
+                while let Some(message) = seq.next_element::<Message<'de>>()? {
+                    messages.count += 1;
+                    if message.role == MessageRole::User {
+                        messages.title = Some(message.content.chars().take(80).collect());
+                    } else if message.role == MessageRole::Assistant {
+                        if let Some(tokens) = message
+                            .provider_usage
+                            .map(SessionTokenUsage::context_tokens)
+                            .filter(|tokens| *tokens > 0)
+                        {
+                            messages.tokens = Some(tokens);
+                        }
+                    }
+                }
+                Ok(messages)
+            }
+        }
+        deserializer.deserialize_seq(MessagesVisitor)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct BoardProject {
@@ -105,7 +178,8 @@ pub fn print_board() -> anyhow::Result<()> {
 fn collect_board() -> anyhow::Result<BoardSnapshot> {
     let (cfg, _) = config::load();
     let (provider, model, subagent_provider, subagent_model) = board_defaults(&cfg);
-    let sessions = storage::find_all_sessions()?;
+    let sessions: Vec<StoredBoardSession> = storage::read_session_records()?;
+    let mut git_directories = HashMap::new();
     let live = live_sessions_by_id()?;
     let attention = crate::extras::emacs_attention::list()?;
     let mut needs_attention = Vec::new();
@@ -118,11 +192,15 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
             continue;
         }
         let live_meta = live.get(session.id.as_str());
-        let board_session = board_session(&session, live_meta, &cfg);
+        let board_session = board_session(&session, live_meta);
         if attention.contains(session.id.as_str()) {
             needs_attention.push(board_session.clone());
         }
-        let Some(git) = git_session_info(dir) else {
+        let Some(git) = git_directories
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| git_session_info(dir))
+            .as_ref()
+        else {
             loose
                 .entry(workspace_path(dir))
                 .or_default()
@@ -140,7 +218,7 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
         builder.anchors.push(git.worktree.clone());
         builder
             .sessions
-            .entry(git.worktree)
+            .entry(git.worktree.clone())
             .or_default()
             .push(board_session);
     }
@@ -312,14 +390,22 @@ fn project_from_builder(builder: ProjectBuilder) -> BoardProject {
     }
 }
 
-fn board_session(session: &Session, live: Option<&LiveSessionMeta>, cfg: &Config) -> BoardSession {
+fn board_session(session: &StoredBoardSession, live: Option<&LiveSessionMeta>) -> BoardSession {
     #[cfg(feature = "subagents")]
-    let subagents_enabled = session.resolve_subagents_enabled(cfg);
+    let subagents_enabled = session.subagents_enabled.unwrap_or(true);
     #[cfg(not(feature = "subagents"))]
     let subagents_enabled = false;
     BoardSession {
         id: session.id.to_string(),
-        title: session.title(),
+        title: if session.name.is_empty() {
+            session
+                .messages
+                .title
+                .clone()
+                .unwrap_or_else(|| "untitled".to_string())
+        } else {
+            session.name.clone()
+        },
         cwd: session.working_dir.to_string(),
         model: session.model.to_string(),
         provider: session.provider.to_string(),
@@ -328,8 +414,16 @@ fn board_session(session: &Session, live: Option<&LiveSessionMeta>, cfg: &Config
         updated_at: live
             .and_then(|meta| meta.updated_at.clone())
             .unwrap_or_else(|| session.updated_at.to_string()),
-        message_count: session.messages.len(),
-        tokens: session.effective_context_tokens(),
+        message_count: session.messages.count,
+        tokens: session.messages.tokens.unwrap_or_else(|| {
+            if session.calibrated_tokens > 0
+                && session.calibrated_msg_count == session.messages.count
+            {
+                session.calibrated_tokens
+            } else {
+                session.total_estimated_tokens
+            }
+        }),
         context_window: session.context_window,
         cost: session.total_cost,
         alive: live.is_some(),
@@ -730,6 +824,90 @@ fn short_id(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_metadata_matches(session: &crate::session::Session) {
+        let json = serde_json::to_string(session).unwrap();
+        let stored = serde_json::from_str::<StoredBoardSession>(&json).unwrap();
+        let board = board_session(&stored, None);
+        assert_eq!(board.title, session.title());
+        assert_eq!(board.tokens, session.effective_context_tokens());
+        assert_eq!(board.message_count, session.messages.len());
+        assert_eq!(board.id, session.id.as_str());
+        assert_eq!(board.cwd, session.working_dir.as_str());
+        assert_eq!(board.cost, session.total_cost);
+        assert_eq!(board.context_window, session.context_window);
+        #[cfg(feature = "subagents")]
+        assert_eq!(
+            board.subagents_enabled,
+            session.subagents_enabled.unwrap_or(true)
+        );
+    }
+
+    #[test]
+    fn metadata_matches_full_session_titles_and_token_fallbacks() {
+        let mut session = crate::session::Session::new("test", "model", 1000);
+        assert_metadata_matches(&session);
+        session.add_message(MessageRole::User, &"日本語\n\"\\".repeat(100));
+        session.add_message(MessageRole::Assistant, &"large output".repeat(10000));
+        assert_metadata_matches(&session);
+        session.calibrated_tokens = 321;
+        session.calibrated_msg_count = session.messages.len();
+        assert_metadata_matches(&session);
+        session.add_message(MessageRole::User, "latest title");
+        assert_metadata_matches(&session);
+        session.name = "explicit name".into();
+        #[cfg(feature = "subagents")]
+        {
+            session.subagents_enabled = Some(false);
+        }
+        assert_metadata_matches(&session);
+    }
+
+    #[test]
+    fn metadata_preserves_latest_nonzero_assistant_usage_and_live_state() {
+        let mut session = crate::session::Session::new("test", "model", 1000);
+        for tokens in [100, 250, 0] {
+            session.add_message(MessageRole::Assistant, "reply");
+            session.messages.last_mut().unwrap().provider_usage = Some(SessionTokenUsage {
+                input_tokens: tokens,
+                output_tokens: 10,
+                ..Default::default()
+            });
+        }
+        session.add_message(MessageRole::User, "question");
+        session.messages.last_mut().unwrap().provider_usage = Some(SessionTokenUsage {
+            input_tokens: 999,
+            ..Default::default()
+        });
+        assert_metadata_matches(&session);
+        let stored =
+            serde_json::from_str::<StoredBoardSession>(&serde_json::to_string(&session).unwrap())
+                .unwrap();
+        let live = LiveSessionMeta {
+            session_id: session.id.to_string(),
+            pid: 123,
+            socket: "/tmp/test.sock".into(),
+            updated_at: Some("newer".into()),
+        };
+        let board = board_session(&stored, Some(&live));
+        assert!(board.alive);
+        assert_eq!(board.pid, Some(123));
+        assert_eq!(board.socket.as_deref(), Some("/tmp/test.sock"));
+        assert_eq!(board.updated_at, "newer");
+    }
+
+    #[test]
+    fn metadata_rejects_invalid_required_fields() {
+        for json in ["{", "{}", r#"{"messages":null}"#] {
+            assert!(serde_json::from_str::<StoredBoardSession>(json).is_err());
+        }
+        for json in [
+            r#"[{"role":"invalid","content":"x"}]"#,
+            r#"[{"role":"user","content":42}]"#,
+        ] {
+            assert!(serde_json::from_str::<BoardMessages>(json).is_err());
+        }
+    }
 
     fn session(id: &str, updated_at: &str, alive: bool) -> BoardSession {
         BoardSession {

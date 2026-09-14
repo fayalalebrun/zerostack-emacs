@@ -195,6 +195,63 @@
 		  :pid nil
 		  :socket nil))))))
 
+(ert-deftest zerostack-test-board-refresh-does-not-block ()
+  (zerostack-test--with-board-buffer
+   (let* ((script (make-temp-file "zerostack-slow-board-"))
+          (zerostack-command script)
+          (started (float-time)))
+     (unwind-protect
+         (progn
+           (with-temp-file script
+             (insert "#!/bin/sh\nsleep 0.3\nprintf '(zerostack-board :projects nil :loose-workspaces nil)'\n"))
+           (set-file-modes script #o700)
+           (zerostack-board-refresh)
+           (should (< (- (float-time) started) 0.2))
+           (zerostack-test--wait-until
+            (lambda () zerostack-board--snapshot))
+           (should (eq (car zerostack-board--snapshot) 'zerostack-board)))
+       (delete-file script)))))
+
+(ert-deftest zerostack-test-board-refresh-ignores-repeats-and-cleans-up ()
+  (zerostack-test--with-board-buffer
+   (let ((zerostack-command shell-file-name)
+         (original (symbol-function 'make-process))
+         processes)
+     (cl-letf (((symbol-function 'make-process)
+                (lambda (&rest args)
+                  (setq args (plist-put args :command
+                                        (list shell-file-name "-c"
+                                              "sleep 0.1; printf '(zerostack-board)'")))
+                  (let ((process (apply original args)))
+                    (push process processes)
+                    process))))
+       (zerostack-board-refresh)
+       (dotimes (_ 5) (zerostack-board-refresh))
+       (should (= (length processes) 1))
+       (zerostack-test--wait-until
+        (lambda () (not zerostack-board--refresh-process)))
+       (should (= (length processes) 1))
+       (dolist (process processes)
+         (should-not (buffer-live-p (process-buffer process))))))))
+
+(ert-deftest zerostack-test-board-refresh-errors-preserve-snapshot ()
+  (dolist (command '("printf failure; exit 1" "printf '('" "printf '(wrong)'"))
+    (zerostack-test--with-board-buffer
+     (let ((original (symbol-function 'make-process))
+           output)
+       (setq zerostack-board--snapshot zerostack-test--board-snapshot)
+       (cl-letf (((symbol-function 'make-process)
+                  (lambda (&rest args)
+                    (setq output (plist-get args :buffer))
+                    (apply original
+                           (plist-put args :command
+                                      (list shell-file-name "-c" command))))))
+         (zerostack-board-refresh)
+         (zerostack-test--wait-until
+          (lambda () (not zerostack-board--refresh-process)))
+         (should (equal zerostack-board--snapshot zerostack-test--board-snapshot))
+         (should-not (buffer-live-p output)))))))
+
 (ert-deftest zerostack-test-board-refresh-renders-tree ()
   (zerostack-test--with-board-buffer
    (zerostack-test--expand-project "/repo/live")

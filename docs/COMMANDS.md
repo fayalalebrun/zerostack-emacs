@@ -397,9 +397,20 @@ open them explicitly.
 ## Native Emacs Board Snapshot
 
 `zerostack --emacs-board` is a lightweight, non-agent command for Emacs. It
-loads saved session JSON, checks the native Emacs live-session registry, asks Git
+reads saved session JSON, checks the native Emacs live-session registry, asks Git
 for canonical repos and worktrees, prints one S-expression to stdout, and exits
-before provider/client initialization.
+before provider/client initialization. It retains only board metadata and reduces
+messages to their count, latest user title, and latest nonzero assistant usage;
+tool payloads, reasoning, and other unused fields are skipped during parsing.
+The JSON files are still scanned in full, without building full session objects.
+Git repository lookups are cached per working directory for each snapshot,
+including non-repository results; the cache is discarded after the refresh.
+
+The bundled client's board refreshes run asynchronously, including refreshes
+triggered by session events. Refresh requests while a fetch is running are
+ignored; no follow-up fetch is queued. The previous board remains usable until
+the new snapshot arrives; failed refreshes retain it and report an error in
+`*Messages*`.
 
 The snapshot shape is:
 

@@ -217,6 +217,12 @@ pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
 }
 
 pub fn find_all_sessions() -> anyhow::Result<Vec<Session>> {
+    let mut sessions: Vec<Session> = read_session_records()?;
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(sessions)
+}
+
+pub(crate) fn read_session_records<T: serde::de::DeserializeOwned>() -> anyhow::Result<Vec<T>> {
     let dir = session_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -228,12 +234,11 @@ pub fn find_all_sessions() -> anyhow::Result<Vec<Session>> {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json")
             && let Ok(json) = std::fs::read_to_string(&path)
-            && let Ok(session) = serde_json::from_str::<Session>(&json)
+            && let Ok(session) = serde_json::from_str::<T>(&json)
         {
             sessions.push(session);
         }
     }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(sessions)
 }
 
