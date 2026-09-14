@@ -24,6 +24,7 @@ struct RawModel {
     id: String,
     name: String,
     context: Option<u32>,
+    input: Option<u32>,
 }
 
 static CATALOG: LazyLock<HashMap<String, Vec<ModelEntry>>> = LazyLock::new(|| {
@@ -36,7 +37,9 @@ static CATALOG: LazyLock<HashMap<String, Vec<ModelEntry>>> = LazyLock::new(|| {
                 .map(|m| ModelEntry {
                     id: m.id,
                     display: m.name,
-                    context_length: m.context,
+                    context_length: m
+                        .context
+                        .map(|context| m.input.map_or(context, |input| context.min(input))),
                     kind: None,
                 })
                 .collect();
@@ -69,7 +72,14 @@ mod tests {
 
     #[test]
     fn catalog_parses_and_has_expected_providers() {
-        for p in ["anthropic", "deepseek", "openai", "gemini", "openrouter"] {
+        for p in [
+            "anthropic",
+            "deepseek",
+            "openai",
+            "gemini",
+            "opencode-go",
+            "openrouter",
+        ] {
             assert!(
                 !ids(p).is_empty(),
                 "missing or empty baked catalog for: {p}"
@@ -84,6 +94,52 @@ mod tests {
         let ids = ids("deepseek");
         assert!(ids.contains(&"deepseek-v4-flash".to_string()));
         assert!(ids.contains(&"deepseek-v4-pro".to_string()));
+    }
+
+    #[test]
+    fn opencode_go_matches_the_live_catalog_snapshot() {
+        let ids = ids("opencode-go");
+        let expected = [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "longcat-2.0",
+            "kimi-k2.5",
+            "glm-5.2",
+            "glm-5.3-flash",
+            "glm-5.3",
+            "glm-5.1",
+            "glm-5",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "qwen3.7-max",
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus",
+            "mimo-v2-pro",
+            "mimo-v2-omni",
+            "mimo-v2.5-pro",
+            "mimo-v2.5",
+            "hy4-preview",
+            "hy3",
+            "hy3-preview",
+            "gpt-5.6-luna",
+            "grok-4.5",
+            "grok-4.6",
+            "muse-spark-1.3-contributor",
+            "muse-spark-1.2-contributor",
+            "omen-alpha",
+        ];
+        assert_eq!(ids.len(), expected.len());
+        for model in expected {
+            assert!(ids.contains(&model.to_string()), "missing model: {model}");
+        }
     }
 
     #[test]

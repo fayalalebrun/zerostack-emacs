@@ -91,6 +91,15 @@ pub(crate) async fn build_explore_agent(
     let agents_ref = agents.as_deref();
     #[cfg(feature = "archmd")]
     let arch_ref = architecture.as_deref();
+    let go_reasoning_params = |model: &str| {
+        let effort = crate::config::resolve_reasoning_effort(
+            &crate::cli::Cli::default(),
+            cfg,
+            "opencode-go",
+            model,
+        );
+        crate::provider::opencode_go_reasoning_params_for_model(model, true, effort.as_deref())
+    };
     match model {
         AnyModel::OpenRouter(m, extra) => AnyAgent::OpenRouter(build_explore_agent_inner(
             m,
@@ -145,7 +154,54 @@ pub(crate) async fn build_explore_agent(
                 #[cfg(feature = "archmd")]
                 arch_ref,
             )),
+            OpenAiModel::OpenCodeGoResponses(m, model) => {
+                OpenAiAgent::Responses(build_explore_agent_inner(
+                    m,
+                    max_turns,
+                    max_text_file_size,
+                    max_read_lines,
+                    max_grep_results,
+                    max_find_results,
+                    max_list_dir_entries,
+                    go_reasoning_params(&model),
+                    agents_ref,
+                    #[cfg(feature = "archmd")]
+                    arch_ref,
+                ))
+            }
+            OpenAiModel::OpenCodeGoCompletions(m, model) => {
+                OpenAiAgent::OpenCodeGoCompletions(build_explore_agent_inner(
+                    m,
+                    max_turns,
+                    max_text_file_size,
+                    max_read_lines,
+                    max_grep_results,
+                    max_find_results,
+                    max_list_dir_entries,
+                    go_reasoning_params(&model),
+                    agents_ref,
+                    #[cfg(feature = "archmd")]
+                    arch_ref,
+                ))
+            }
         }),
+        AnyModel::OpenCodeGoMessages(m, model) => {
+            let mut agent = build_explore_agent_inner(
+                m,
+                max_turns,
+                max_text_file_size,
+                max_read_lines,
+                max_grep_results,
+                max_find_results,
+                max_list_dir_entries,
+                go_reasoning_params(&model),
+                agents_ref,
+                #[cfg(feature = "archmd")]
+                arch_ref,
+            );
+            agent.max_tokens = Some(crate::cli::Cli::default().resolve_max_tokens(cfg));
+            AnyAgent::Anthropic(agent)
+        }
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(build_explore_agent_inner(
             m,
             max_turns,

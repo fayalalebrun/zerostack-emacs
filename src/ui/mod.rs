@@ -1730,8 +1730,25 @@ pub async fn run_interactive(
                                             crate::config::resolve_temperature(cli, cfg, &session.model);
                                         let extra_body =
                                             crate::config::resolve_extra_body(cfg, &session.model);
+                                        let reasoning_effort = session.reasoning_effort.clone().or_else(|| {
+                                            crate::config::resolve_reasoning_effort(
+                                                cli,
+                                                cfg,
+                                                &session.provider,
+                                                &session.model,
+                                            )
+                                        });
                                         let btw_agent = crate::provider::build_btw_agent(
-                                            model, cli, cfg, context, &permission, &ask_tx, reasoning_enabled, temperature, extra_body,
+                                            model,
+                                            cli,
+                                            cfg,
+                                            context,
+                                            &permission,
+                                            &ask_tx,
+                                            reasoning_enabled,
+                                            reasoning_effort.as_deref(),
+                                            temperature,
+                                            extra_body,
                                         );
                                         let runner = btw_agent.spawn_btw(
                                             btw_text.to_string(), snapshot, btw_tx.clone(), id,

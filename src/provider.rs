@@ -30,6 +30,7 @@ use crate::sandbox::Sandbox;
 use crate::session::SessionMessage;
 
 const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 pub struct ProviderConfig {
@@ -55,7 +56,7 @@ pub fn resolve_provider_config(
     }
     let kind = ProviderKind::from_name(name).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: '{}'. Supported: openrouter, openai, openai-codex, deepseek, anthropic, gemini, ollama",
+            "Unknown provider: '{}'. Supported: openrouter, openai, openai-codex, opencode-go, deepseek, anthropic, gemini, ollama",
             name
         )
     })?;
@@ -106,6 +107,7 @@ pub(crate) fn default_model_for_provider(
         "anthropic" => "claude-sonnet-4-6",
         "openai" => "gpt-5.1",
         "openai-codex" | "codex" => "gpt-5.5",
+        "opencode-go" => "kimi-k2.7-code",
         "deepseek" => "deepseek-v4-pro",
         "gemini" | "google" => "gemini-2.5-pro",
         "openrouter" => "openrouter/auto", // OpenRouter's always-valid auto-router
@@ -152,13 +154,210 @@ pub enum OpenAiModel {
     Responses(openai::responses_api::ResponsesCompletionModel),
     Completions(openai::completion::CompletionModel),
     Codex(openai::responses_api::ResponsesCompletionModel<CodexHttpClient>),
+    OpenCodeGoResponses(openai::responses_api::ResponsesCompletionModel, String),
+    OpenCodeGoCompletions(
+        openai::completion::CompletionModel<OpenCodeGoHttpClient>,
+        String,
+    ),
 }
 
 #[derive(Clone)]
 pub enum OpenAiAgent {
     Responses(Agent<openai::responses_api::ResponsesCompletionModel>),
     Completions(Agent<openai::completion::CompletionModel>),
+    OpenCodeGoCompletions(Agent<openai::completion::CompletionModel<OpenCodeGoHttpClient>>),
     Codex(Agent<openai::responses_api::ResponsesCompletionModel<CodexHttpClient>>),
+}
+
+#[derive(Clone)]
+pub struct OpenCodeGoClient {
+    completions: openai::CompletionsClient<OpenCodeGoHttpClient>,
+    responses: openai::Client,
+    messages: anthropic::Client,
+    models_url: String,
+    http_client: reqwest::Client,
+    api_key: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenCodeGoApi {
+    Completions,
+    Responses,
+    Messages,
+}
+
+fn opencode_go_api(model: &str) -> OpenCodeGoApi {
+    match model {
+        "gpt-5.6-luna"
+        | "grok-4.6"
+        | "muse-spark-1.3-contributor"
+        | "muse-spark-1.2-contributor" => OpenCodeGoApi::Responses,
+        "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.8-max" | "qwen3.8-flash"
+        | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus" | "qwen3.5-plus" => {
+            OpenCodeGoApi::Messages
+        }
+        _ => OpenCodeGoApi::Completions,
+    }
+}
+
+fn parse_opencode_go_models(body: &str) -> anyhow::Result<Vec<ModelEntry>> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        data: Vec<Model>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Model {
+        id: String,
+    }
+
+    Ok(serde_json::from_str::<Response>(body)?
+        .data
+        .into_iter()
+        .map(|model| ModelEntry {
+            display: model.id.clone(),
+            context_length: crate::models_catalog::catalog_entries("opencode-go")
+                .and_then(|models| models.iter().find(|entry| entry.id == model.id))
+                .and_then(|entry| entry.context_length),
+            id: model.id,
+            kind: None,
+        })
+        .collect())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OpenCodeGoHttpClient {
+    inner: reqwest::Client,
+}
+
+impl OpenCodeGoHttpClient {
+    fn new(inner: reqwest::Client) -> Self {
+        Self { inner }
+    }
+
+    fn patch_reasoning_content(body: bytes::Bytes) -> http_client::Result<bytes::Bytes> {
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+            return Ok(body);
+        };
+        let Some(object) = value.as_object_mut() else {
+            return Ok(body);
+        };
+        if !object
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|model| model.starts_with("deepseek-"))
+        {
+            return Ok(body);
+        }
+        let Some(messages) = object
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(body);
+        };
+        for message in messages {
+            let Some(message) = message.as_object_mut() else {
+                continue;
+            };
+            if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant") {
+                message
+                    .entry("reasoning_content")
+                    .or_insert_with(|| serde_json::Value::String(String::new()));
+            }
+        }
+        serde_json::to_vec(&value)
+            .map(bytes::Bytes::from)
+            .map_err(|error| http_client::Error::Instance(Box::new(error)))
+    }
+}
+
+impl OpenCodeGoClient {
+    fn completion_model(&self, name: String) -> AnyModel {
+        match opencode_go_api(&name) {
+            OpenCodeGoApi::Completions => AnyModel::OpenAI(OpenAiModel::OpenCodeGoCompletions(
+                self.completions.completion_model(name.clone()),
+                name,
+            )),
+            OpenCodeGoApi::Responses => AnyModel::OpenAI(OpenAiModel::OpenCodeGoResponses(
+                self.responses.completion_model(name.clone()),
+                name,
+            )),
+            OpenCodeGoApi::Messages => AnyModel::OpenCodeGoMessages(
+                self.messages
+                    .completion_model(name.clone())
+                    .with_prompt_caching(),
+                name,
+            ),
+        }
+    }
+
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
+        let body = self
+            .http_client
+            .get(&self.models_url)
+            .headers(self.responses.headers().clone())
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        parse_opencode_go_models(&body)
+    }
+}
+
+impl HttpClientExt for OpenCodeGoHttpClient {
+    fn send<T, U>(
+        &self,
+        req: http_client::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + Send
+    + 'static
+    where
+        T: Into<bytes::Bytes> + Send,
+        U: From<bytes::Bytes> + Send + 'static,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        let body = body.into();
+        async move {
+            let body = Self::patch_reasoning_content(body)?;
+            parts.headers.remove(reqwest::header::CONTENT_LENGTH);
+            this.inner
+                .send(http_client::Request::from_parts(parts, body))
+                .await
+        }
+    }
+
+    fn send_multipart<U>(
+        &self,
+        req: http_client::Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + Send
+    + 'static
+    where
+        U: From<bytes::Bytes> + Send + 'static,
+    {
+        self.inner.send_multipart(req)
+    }
+
+    fn send_streaming<T>(
+        &self,
+        req: http_client::Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>> + Send
+    where
+        T: Into<bytes::Bytes> + Send,
+    {
+        let this = self.clone();
+        let (mut parts, body) = req.into_parts();
+        let body = body.into();
+        async move {
+            let body = Self::patch_reasoning_content(body)?;
+            parts.headers.remove(reqwest::header::CONTENT_LENGTH);
+            this.inner
+                .send_streaming(http_client::Request::from_parts(parts, body))
+                .await
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -442,6 +641,7 @@ pub(crate) struct TestClient {
 pub enum AnyClient {
     OpenRouter(openrouter::Client),
     OpenAI(OpenAiClient),
+    OpenCodeGo(OpenCodeGoClient),
     Anthropic(anthropic::Client),
     Gemini(gemini::Client),
     Ollama(ollama::Client),
@@ -503,6 +703,9 @@ pub(crate) fn supported_reasoning_efforts(provider: &str, model: &str) -> &'stat
     if provider == "demo-openai" && model == "zerostack-demo-random" {
         return STANDARD;
     }
+    if provider == "opencode-go" {
+        return opencode_go_reasoning_efforts(&model);
+    }
     if provider != "openai" {
         return &[];
     }
@@ -514,6 +717,72 @@ pub(crate) fn supported_reasoning_efforts(provider: &str, model: &str) -> &'stat
         STANDARD
     } else {
         &[]
+    }
+}
+
+fn opencode_go_reasoning_efforts(model: &str) -> &'static [&'static str] {
+    const LOW_HIGH: &[&str] = &["low", "high"];
+    const LOW_MEDIUM_HIGH: &[&str] = &["low", "medium", "high"];
+    const LOW_HIGH_MAX: &[&str] = &["low", "high", "max"];
+    const LOW_MEDIUM_XHIGH: &[&str] = &["low", "medium", "xhigh"];
+    const HIGH_MAX: &[&str] = &["high", "max"];
+    const NONE_LOW_HIGH: &[&str] = &["none", "low", "high"];
+    const NONE_HIGH: &[&str] = &["none", "high"];
+    const FULL: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+    const MUSE: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+
+    match model {
+        "gpt-5.6-luna" => FULL,
+        "grok-4.5" => LOW_MEDIUM_HIGH,
+        "grok-4.6" => &["low", "medium", "high", "xhigh"],
+        "glm-5.2" | "deepseek-v4-pro" => HIGH_MAX,
+        "glm-5.3" | "glm-5.3-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => {
+            LOW_HIGH_MAX
+        }
+        "kimi-k3" => &["max"],
+        "qwen3.8-max" | "qwen3.8-flash" => LOW_MEDIUM_XHIGH,
+        "hy3" => NONE_LOW_HIGH,
+        "hy4-preview" => NONE_HIGH,
+        "omen-alpha" => LOW_HIGH,
+        "muse-spark-1.2-contributor" | "muse-spark-1.3-contributor" => MUSE,
+        _ => &[],
+    }
+}
+
+pub(crate) fn opencode_go_reasoning_params_for_model(
+    model: &str,
+    reasoning_enabled: bool,
+    effort: Option<&str>,
+) -> Option<serde_json::Value> {
+    opencode_go_reasoning_params(opencode_go_api(model), model, reasoning_enabled, effort)
+}
+
+fn opencode_go_reasoning_params(
+    api: OpenCodeGoApi,
+    model: &str,
+    reasoning_enabled: bool,
+    effort: Option<&str>,
+) -> Option<serde_json::Value> {
+    if !reasoning_enabled {
+        return (api == OpenCodeGoApi::Messages && model == "minimax-m3")
+            .then(|| serde_json::json!({ "thinking": { "type": "disabled" } }));
+    }
+    let effort = effort.filter(|effort| opencode_go_reasoning_efforts(model).contains(effort));
+    match api {
+        OpenCodeGoApi::Completions => {
+            effort.map(|effort| serde_json::json!({ "reasoning_effort": effort }))
+        }
+        OpenCodeGoApi::Responses => effort.map(|effort| {
+            serde_json::json!({
+                "reasoning": { "effort": effort }
+            })
+        }),
+        OpenCodeGoApi::Messages => effort
+            .map(|effort| serde_json::json!({ "effort": effort }))
+            .or_else(|| {
+                (model == "minimax-m3")
+                    .then(|| serde_json::json!({ "thinking": { "type": "adaptive" } }))
+            }),
     }
 }
 
@@ -568,6 +837,7 @@ impl AnyClient {
             AnyClient::OpenAI(OpenAiClient::Codex(_)) => "openai-codex",
             AnyClient::OpenAI(OpenAiClient::DeepSeek(_)) => "deepseek",
             AnyClient::OpenAI(_) => "openai",
+            AnyClient::OpenCodeGo(_) => "opencode-go",
             AnyClient::Anthropic(_) => "anthropic",
             AnyClient::Gemini(_) => "gemini",
             AnyClient::Ollama(_) => "ollama",
@@ -584,6 +854,7 @@ impl AnyClient {
                 AnyModel::OpenRouter(c.completion_model(name).with_prompt_caching(), extra)
             }
             AnyClient::OpenAI(c) => AnyModel::OpenAI(c.completion_model(name)),
+            AnyClient::OpenCodeGo(c) => c.completion_model(name),
             AnyClient::Anthropic(c) => {
                 AnyModel::Anthropic(c.completion_model(name).with_prompt_caching())
             }
@@ -702,6 +973,7 @@ impl AnyClient {
                 return Ok(catalog_model_entries("deepseek"));
             }
             AnyClient::OpenAI(OpenAiClient::Codex(_)) => return Ok(codex_model_entries()),
+            AnyClient::OpenCodeGo(c) => return c.list_models().await,
             #[cfg(test)]
             AnyClient::Test(_) => return Ok(Vec::new()),
         };
@@ -778,7 +1050,10 @@ async fn summarize_with_model(
             OpenAiModel::Responses(m) => run_summarizer(m, prompt).await,
             OpenAiModel::Completions(m) => run_summarizer(m, prompt).await,
             OpenAiModel::Codex(m) => run_summarizer(m, prompt).await,
+            OpenAiModel::OpenCodeGoResponses(m, _) => run_summarizer(m, prompt).await,
+            OpenAiModel::OpenCodeGoCompletions(m, _) => run_summarizer(m, prompt).await,
         },
+        AnyModel::OpenCodeGoMessages(m, _) => run_summarizer(m, prompt).await,
         AnyModel::Anthropic(m) => run_summarizer(m, prompt).await,
         AnyModel::Gemini(m) => run_summarizer(m, prompt).await,
         AnyModel::Ollama(m) => run_summarizer(m, prompt).await,
@@ -897,6 +1172,7 @@ pub enum AnyModel {
         Option<serde_json::Value>,
     ),
     OpenAI(OpenAiModel),
+    OpenCodeGoMessages(anthropic::completion::CompletionModel, String),
     Anthropic(anthropic::completion::CompletionModel),
     Gemini(gemini::completion::CompletionModel),
     Ollama(ollama::CompletionModel),
@@ -938,6 +1214,9 @@ impl AnyAgent {
                 OpenAiAgent::Completions(a) => {
                     runner::run_print(a, prompt, max_turns, pure_stdout).await
                 }
+                OpenAiAgent::OpenCodeGoCompletions(a) => {
+                    runner::run_print(a, prompt, max_turns, pure_stdout).await
+                }
                 OpenAiAgent::Codex(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
             },
             AnyAgent::Anthropic(a) => runner::run_print(a, prompt, max_turns, pure_stdout).await,
@@ -973,6 +1252,9 @@ impl AnyAgent {
                 OpenAiAgent::Completions(a) => {
                     runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
                 }
+                OpenAiAgent::OpenCodeGoCompletions(a) => {
+                    runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
+                }
                 OpenAiAgent::Codex(a) => {
                     runner::run_subagent(a, prompt, max_turns, event_tx, limits).await
                 }
@@ -997,6 +1279,7 @@ impl AnyAgent {
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => runner::spawn_agent(a, prompt, history),
                 OpenAiAgent::Completions(a) => runner::spawn_agent(a, prompt, history),
+                OpenAiAgent::OpenCodeGoCompletions(a) => runner::spawn_agent(a, prompt, history),
                 OpenAiAgent::Codex(a) => runner::spawn_agent(a, prompt, history),
             },
             AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history),
@@ -1019,6 +1302,9 @@ impl AnyAgent {
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
                 OpenAiAgent::Completions(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
+                OpenAiAgent::OpenCodeGoCompletions(a) => {
+                    runner::spawn_btw(a, prompt, history, event_tx, id)
+                }
                 OpenAiAgent::Codex(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
             },
             AnyAgent::Anthropic(a) => runner::spawn_btw(a, prompt, history, event_tx, id),
@@ -1178,14 +1464,14 @@ pub fn create_client(
     api_key: Option<&str>,
     custom_providers: &HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&HashMap<String, String>>,
-    codex_prompt_cache_key: Option<&str>,
+    session_id: Option<&str>,
 ) -> anyhow::Result<AnyClient> {
     create_client_inner(
         provider_name,
         api_key,
         custom_providers,
         config_api_keys,
-        codex_prompt_cache_key,
+        session_id,
         false,
     )
 }
@@ -1195,14 +1481,14 @@ pub fn create_client_allow_missing_api_key(
     api_key: Option<&str>,
     custom_providers: &HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&HashMap<String, String>>,
-    codex_prompt_cache_key: Option<&str>,
+    session_id: Option<&str>,
 ) -> anyhow::Result<AnyClient> {
     create_client_inner(
         provider_name,
         api_key,
         custom_providers,
         config_api_keys,
-        codex_prompt_cache_key,
+        session_id,
         true,
     )
 }
@@ -1212,7 +1498,7 @@ fn create_client_inner(
     api_key: Option<&str>,
     custom_providers: &HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&HashMap<String, String>>,
-    codex_prompt_cache_key: Option<&str>,
+    session_id: Option<&str>,
     allow_missing_api_key: bool,
 ) -> anyhow::Result<AnyClient> {
     let config = resolve_provider_config(provider_name, custom_providers)?;
@@ -1224,7 +1510,7 @@ fn create_client_inner(
             build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
         return Ok(AnyClient::OpenAI(build_codex_client(
             http_client,
-            codex_prompt_cache_key,
+            session_id,
         )?));
     }
 
@@ -1271,6 +1557,17 @@ fn create_client_inner(
                 .build()?;
             Ok(AnyClient::OpenAI(OpenAiClient::DeepSeek(client)))
         }
+        ProviderKind::OpenCodeGo => {
+            let custom = custom_providers.get(provider_name);
+            let http_client =
+                build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+            Ok(AnyClient::OpenCodeGo(build_opencode_go_client(
+                &key,
+                base_url.as_deref(),
+                http_client,
+                session_id,
+            )?))
+        }
         ProviderKind::Anthropic => build_anthropic_client(&key, base_url.as_deref()),
         ProviderKind::Gemini => build_gemini_client(&key, base_url.as_deref()),
         ProviderKind::Ollama => build_ollama_client(&key, base_url.as_deref()),
@@ -1292,6 +1589,53 @@ fn build_codex_client(
         ))
         .build()?;
     Ok(OpenAiClient::Codex(client))
+}
+
+fn build_opencode_go_client(
+    key: &str,
+    base_url: Option<&str>,
+    http_client: reqwest::Client,
+    session_id: Option<&str>,
+) -> anyhow::Result<OpenCodeGoClient> {
+    let session_id = session_id
+        .filter(|id| !id.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut headers = HeaderMap::new();
+    headers.insert("x-opencode-session", HeaderValue::from_str(&session_id)?);
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        HeaderValue::from_static(concat!("zerostack/", env!("CARGO_PKG_VERSION"))),
+    );
+    let openai_base_url = base_url
+        .unwrap_or(OPENCODE_GO_BASE_URL)
+        .trim_end_matches('/');
+    let messages_base_url = openai_base_url
+        .strip_suffix("/v1")
+        .unwrap_or(openai_base_url);
+    Ok(OpenCodeGoClient {
+        models_url: format!("{openai_base_url}/models"),
+        http_client: http_client.clone(),
+        api_key: key.to_string(),
+        completions: openai::CompletionsClient::builder()
+            .api_key(key)
+            .base_url(openai_base_url)
+            .http_headers(headers.clone())
+            .http_client(OpenCodeGoHttpClient::new(http_client.clone()))
+            .build()?,
+        responses: openai::Client::builder()
+            .api_key(key)
+            .base_url(openai_base_url)
+            .http_headers(headers.clone())
+            .http_client(http_client.clone())
+            .build()?,
+        messages: anthropic::Client::builder()
+            .api_key(key)
+            .base_url(messages_base_url)
+            .http_headers(headers)
+            .http_client(http_client)
+            .build()?,
+    })
 }
 
 macro_rules! build_provider_client {
@@ -1417,6 +1761,56 @@ async fn build_openai_agent(
             )
             .await,
         ),
+        OpenAiModel::OpenCodeGoResponses(m, model) => OpenAiAgent::Responses(
+            builder::build_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                sandbox,
+                reasoning_enabled,
+                temperature,
+                merge_extra_body(
+                    opencode_go_reasoning_params(
+                        OpenCodeGoApi::Responses,
+                        &model,
+                        reasoning_enabled,
+                        reasoning_effort,
+                    ),
+                    extra_body,
+                ),
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        OpenAiModel::OpenCodeGoCompletions(m, model) => OpenAiAgent::OpenCodeGoCompletions(
+            builder::build_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                sandbox,
+                reasoning_enabled,
+                temperature,
+                merge_extra_body(
+                    opencode_go_reasoning_params(
+                        OpenCodeGoApi::Completions,
+                        &model,
+                        reasoning_enabled,
+                        reasoning_effort,
+                    ),
+                    extra_body,
+                ),
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
     }
 }
 
@@ -1466,6 +1860,31 @@ pub async fn build_agent(
                 reasoning_effort,
                 temperature,
                 extra_body,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        AnyModel::OpenCodeGoMessages(m, model) => AnyAgent::Anthropic(
+            builder::build_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                sandbox.clone(),
+                reasoning_enabled,
+                temperature,
+                merge_extra_body(
+                    opencode_go_reasoning_params(
+                        OpenCodeGoApi::Messages,
+                        &model,
+                        reasoning_enabled,
+                        reasoning_effort,
+                    ),
+                    extra_body,
+                ),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -1585,6 +2004,7 @@ pub fn build_btw_agent(
     permission: &Option<PermCheck>,
     ask_tx: &Option<AskSender>,
     reasoning_enabled: bool,
+    reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
 ) -> AnyAgent {
@@ -1636,7 +2056,70 @@ pub fn build_btw_agent(
                 temperature,
                 None,
             )),
+            OpenAiModel::OpenCodeGoResponses(m, model) => {
+                OpenAiAgent::Responses(builder::build_btw_agent_inner(
+                    m,
+                    cli,
+                    cfg,
+                    context,
+                    permission,
+                    ask_tx,
+                    reasoning_enabled,
+                    temperature,
+                    merge_extra_body(
+                        opencode_go_reasoning_params(
+                            OpenCodeGoApi::Responses,
+                            &model,
+                            reasoning_enabled,
+                            reasoning_effort,
+                        ),
+                        extra_body,
+                    ),
+                ))
+            }
+            OpenAiModel::OpenCodeGoCompletions(m, model) => {
+                OpenAiAgent::OpenCodeGoCompletions(builder::build_btw_agent_inner(
+                    m,
+                    cli,
+                    cfg,
+                    context,
+                    permission,
+                    ask_tx,
+                    reasoning_enabled,
+                    temperature,
+                    merge_extra_body(
+                        opencode_go_reasoning_params(
+                            OpenCodeGoApi::Completions,
+                            &model,
+                            reasoning_enabled,
+                            reasoning_effort,
+                        ),
+                        extra_body,
+                    ),
+                ))
+            }
         }),
+        AnyModel::OpenCodeGoMessages(m, model) => {
+            AnyAgent::Anthropic(builder::build_btw_agent_inner(
+                m,
+                cli,
+                cfg,
+                context,
+                permission,
+                ask_tx,
+                reasoning_enabled,
+                temperature,
+                merge_extra_body(
+                    opencode_go_reasoning_params(
+                        OpenCodeGoApi::Messages,
+                        &model,
+                        reasoning_enabled,
+                        reasoning_effort,
+                    ),
+                    extra_body,
+                ),
+            ))
+        }
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(builder::build_btw_agent_inner(
             m,
             cli,
@@ -1679,10 +2162,15 @@ pub fn build_btw_agent(
 }
 
 #[cfg(test)]
+mod opencode_go_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
-        ensure_codex_instructions, normalize_reasoning_effort_value, openrouter_anthropic_routing,
-        supported_reasoning_efforts, supports_reasoning_effort_value,
+        OpenCodeGoApi, OpenCodeGoHttpClient, ensure_codex_instructions,
+        normalize_reasoning_effort_value, opencode_go_api, opencode_go_reasoning_params,
+        openrouter_anthropic_routing, parse_opencode_go_models, supported_reasoning_efforts,
+        supports_reasoning_effort_value,
     };
     use bytes::Bytes;
     use serde_json::json;
@@ -1698,6 +2186,186 @@ mod tests {
             assert_eq!(extra["provider"]["order"][0], "Anthropic");
             assert_eq!(extra["provider"]["allow_fallbacks"], true);
         }
+    }
+
+    #[test]
+    fn opencode_go_routes_models_to_their_documented_api() {
+        for model in [
+            "grok-4.5",
+            "glm-5.3-flash",
+            "glm-5.2",
+            "kimi-k3",
+            "longcat-2.0",
+            "omen-alpha",
+            "kimi-k2.7-code",
+            "deepseek-v4-pro",
+            "mimo-v2.5-pro",
+            "hy3",
+        ] {
+            assert_eq!(opencode_go_api(model), OpenCodeGoApi::Completions);
+        }
+        for model in [
+            "gpt-5.6-luna",
+            "grok-4.6",
+            "muse-spark-1.3-contributor",
+            "muse-spark-1.2-contributor",
+        ] {
+            assert_eq!(opencode_go_api(model), OpenCodeGoApi::Responses);
+        }
+        for model in [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus",
+        ] {
+            assert_eq!(opencode_go_api(model), OpenCodeGoApi::Messages);
+        }
+    }
+
+    #[test]
+    fn opencode_go_reasoning_matches_the_source_metadata() {
+        assert_eq!(
+            supported_reasoning_efforts("opencode-go", "glm-5.3-flash"),
+            &["low", "high", "max"]
+        );
+        assert_eq!(
+            supported_reasoning_efforts("opencode-go", "gpt-5.6-luna"),
+            &["none", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            supported_reasoning_efforts("opencode-go", "qwen3.8-max"),
+            &["low", "medium", "xhigh"]
+        );
+        assert!(supported_reasoning_efforts("opencode-go", "minimax-m2.7").is_empty());
+    }
+
+    #[test]
+    fn opencode_go_reasoning_uses_the_endpoint_specific_body() {
+        assert_eq!(
+            opencode_go_reasoning_params(
+                OpenCodeGoApi::Completions,
+                "glm-5.3-flash",
+                true,
+                Some("high"),
+            ),
+            Some(json!({ "reasoning_effort": "high" }))
+        );
+        assert_eq!(
+            opencode_go_reasoning_params(
+                OpenCodeGoApi::Responses,
+                "gpt-5.6-luna",
+                true,
+                Some("xhigh"),
+            ),
+            Some(json!({ "reasoning": { "effort": "xhigh" } }))
+        );
+        assert_eq!(
+            opencode_go_reasoning_params(
+                OpenCodeGoApi::Messages,
+                "qwen3.8-max",
+                true,
+                Some("medium"),
+            ),
+            Some(json!({ "effort": "medium" }))
+        );
+        assert_eq!(
+            opencode_go_reasoning_params(OpenCodeGoApi::Messages, "minimax-m3", true, None),
+            Some(json!({ "thinking": { "type": "adaptive" } }))
+        );
+        assert_eq!(
+            opencode_go_reasoning_params(OpenCodeGoApi::Messages, "minimax-m3", false, None),
+            Some(json!({ "thinking": { "type": "disabled" } }))
+        );
+        assert_eq!(
+            opencode_go_reasoning_params(
+                OpenCodeGoApi::Completions,
+                "glm-5.3-flash",
+                true,
+                Some("medium"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_go_replays_empty_deepseek_reasoning_on_assistant_turns() {
+        let body = Bytes::from(
+            json!({
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    { "role": "user", "content": "inspect" },
+                    { "role": "assistant", "content": null },
+                    { "role": "assistant", "content": "done", "reasoning_content": "kept" }
+                ]
+            })
+            .to_string(),
+        );
+
+        let patched = OpenCodeGoHttpClient::patch_reasoning_content(body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert!(value["messages"][0].get("reasoning_content").is_none());
+        assert_eq!(value["messages"][1]["reasoning_content"], "");
+        assert_eq!(value["messages"][2]["reasoning_content"], "kept");
+    }
+
+    #[test]
+    fn opencode_go_leaves_other_chat_completion_bodies_unchanged() {
+        let body = Bytes::from(
+            json!({
+                "model": "glm-5.3-flash",
+                "messages": [{ "role": "assistant", "content": "done" }]
+            })
+            .to_string(),
+        );
+
+        let patched = OpenCodeGoHttpClient::patch_reasoning_content(body).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert!(value["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn parses_live_opencode_go_model_listing() {
+        let models = parse_opencode_go_models(
+            r#"{"object":"list","data":[
+                {"id":"glm-5.3-flash","object":"model"},
+                {"id":"minimax-m2.5","object":"model"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "glm-5.3-flash");
+        assert_eq!(models[1].display, "minimax-m2.5");
+    }
+
+    #[test]
+    fn opencode_go_live_listing_retains_catalog_context_limits() {
+        let body = json!({"data": [
+            {"id": "glm-5.3-flash"}, {"id": "kimi-k2.7-code"},
+            {"id": "gpt-5.6-luna"}, {"id": "hy3"}, {"id": "unknown-model"}
+        ]})
+        .to_string();
+        let models = parse_opencode_go_models(&body).unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.context_length).collect::<Vec<_>>(),
+            vec![
+                Some(1_000_000),
+                Some(262_144),
+                Some(922_000),
+                Some(192_000),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_opencode_go_model_listing() {
+        assert!(parse_opencode_go_models(r#"{"data":[{}]}"#).is_err());
     }
 
     #[test]

@@ -1,17 +1,20 @@
 # Providers
 
-zerostack supports five built-in providers and allows custom provider
-definitions for OpenAI-compatible endpoints.
+zerostack supports built-in providers and custom provider definitions for
+OpenAI-compatible endpoints.
 
 ## Built-in Providers
 
-| Provider   | Config name         | Default env var for API key |
-| ---------- | ------------------- | --------------------------- |
-| OpenRouter | `openrouter`        | `OPENROUTER_API_KEY`        |
-| OpenAI     | `openai`            | `OPENAI_API_KEY`            |
-| Anthropic  | `anthropic`         | `ANTHROPIC_API_KEY`         |
-| Gemini     | `gemini` / `google` | `GEMINI_API_KEY`            |
-| Ollama     | `ollama`            | (no key required)           |
+| Provider | Config name | Default env var for API key |
+| --- | --- | --- |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| OpenAI | `openai` | `OPENAI_API_KEY` |
+| OpenAI Codex | `openai-codex` / `codex` | ChatGPT subscription auth |
+| OpenCode Go | `opencode-go` | `OPENCODE_GO_API_KEY` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` |
+| Gemini | `gemini` / `google` | `GEMINI_API_KEY` |
+| Ollama | `ollama` | (no key required) |
 
 Select a provider via the config file, the `--provider` CLI flag, or the
 `ZS_PROVIDER` environment variable:
@@ -25,6 +28,78 @@ The model is set with `--model` or `ZS_MODEL`:
 ```
 zerostack --provider openai --model gpt-4o
 ```
+
+## OpenCode Go
+
+Subscribe to OpenCode Go, copy its API key, then set `OPENCODE_GO_API_KEY` or
+store it locally:
+
+```bash
+zerostack auth set-key opencode-go <key>
+zerostack --provider opencode-go --model kimi-k2.7-code
+```
+
+zerostack sends `User-Agent: zerostack/<version>` and `x-opencode-session` on
+all Go API requests, including model refreshes. The session header uses the
+conversation's persisted ID; auxiliary clients without a session ID get a
+UUID retained across requests and client clones.
+
+OpenCode Go serves some models through OpenAI Chat Completions, OpenAI
+Responses, or Anthropic Messages. zerostack selects the documented API style
+for each bundled model automatically. The embedded 35-model snapshot combines
+the published endpoint table with the live catalog and is used at startup; run
+`/models refresh` in the TUI to replace it with the current
+live `/models` catalog. The snapshot is also available with:
+
+```bash
+zerostack config models opencode-go
+```
+
+`reasoning-effort` is passed only when the selected Go model declares that
+level. For example, GLM-5.3-Flash supports `low`, `high`, and `max`; GPT 5.6
+Luna supports `none`, `low`, `medium`, `high`, `xhigh`, and `max` (not `minimal`);
+and models without an effort control do not receive an unsupported request
+parameter. Go subagents honor per-model `reasoning-effort` overrides; Messages
+subagents also receive the configured `max_tokens` limit.
+
+### Context limits
+
+All 35 bundled Go models include context metadata from
+[Models.dev](https://models.dev/api.json). The legacy `hy3-preview` entry uses
+Tencent TokenHub's 256,000-token preview limit because Go no longer publishes
+metadata for that alias. These are provider-specific limits, not limits borrowed
+from similarly named OpenAI, Codex, or OpenRouter models.
+
+| Model | Effective context budget (tokens) |
+| --- | ---: |
+| GLM 5.2 / 5.3 / 5.3 Flash | 1,000,000 |
+| GLM 5 / 5.1 | 202,752 |
+| Kimi K2.5 / K2.6 / K2.7 Code | 262,144 |
+| Kimi K3 | 1,048,576 |
+| GPT 5.6 Luna | 922,000 |
+| Qwen 3.6 Plus / 3.7 / 3.8 | 1,000,000 |
+| Qwen 3.5 Plus | 262,144 |
+| DeepSeek V4 Pro / Flash / Flash Vision Exp | 1,000,000 |
+| MiniMax M3 | 1,000,000 |
+| MiniMax M2.5 / M2.7 | 204,800 |
+| Hy3 / Hy3 Preview / Hy4 Preview | 192,000 / 256,000 / 1,024,000 |
+| Grok 4.5 / 4.6 / Omen Alpha | 500,000 |
+| Muse Spark 1.2 / 1.3 Contributor | 1,048,576 |
+| MiMo V2.5 / V2.5 Pro / V2 Pro / V2 Omni | 1,000,000 / 1,048,576 / 1,048,576 / 262,144 |
+| LongCat 2.0 | 1,000,000 |
+
+The catalog stores total `context` and, when published, a separate `input`
+ceiling. zerostack uses the smaller value for budgeting: Luna's total window is
+1,050,000 but its input ceiling is 922,000; Hy3's are 256,000 and 192,000.
+The configured response reserve is still subtracted before auto-compaction.
+An explicit `context_window` configuration overrides catalog lookup.
+
+`/models refresh` retains these limits for known models; unknown IDs still use
+the 128,000-token fallback unless configured explicitly. Restart and resume
+an existing Go session to replace its old fallback with the catalog limit.
+`scripts/gen-models-catalog.sh` refreshes limits for the curated Go IDs without
+removing legacy aliases or unrelated provider entries; test it with
+`bash scripts/test-models-catalog.sh`.
 
 ## Custom Providers
 
@@ -52,7 +127,7 @@ the `custom_providers` key in the config file:
 
 | Field                         | Type    | Description                                                                                                                                                                   |
 | ----------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider_type`               | string  | Must be one of the built-in provider types (`openrouter`, `openai`, `anthropic`, `gemini`, `ollama`).                                                                         |
+| `provider_type`               | string  | Must be one of the built-in provider config names shown above.                                                                                                                |
 | `base_url`                    | string  | The API base URL.                                                                                                                                                             |
 | `api_key_env`                 | string  | Optional. Name of an environment variable holding the API key. Falls back to the provider-kind default if not set.                                                            |
 | `api_style`                   | string  | Optional. For OpenAI-based providers: `"responses"` (Responses API, default when no `base_url` is set) or `"completions"` (Chat Completions, default when `base_url` is set). |

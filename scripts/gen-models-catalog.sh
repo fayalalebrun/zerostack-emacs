@@ -46,7 +46,7 @@ api="$(curl -fsSL --max-time 120 "$SRC")"
 #               mirroring crate::provider::is_agent_model's denylist, and keep only
 #               models that can output text.
 #  - emits keys by *zerostack* provider name (gemini <- models.dev "google").
-echo "$api" | jq --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
+catalog="$(echo "$api" | jq --slurpfile old "$OUT" --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
   def deny: [
     "embedding","embed-","text-embedding","gemini-embedding","whisper","transcribe",
     "tts","-audio","realtime","speech","dall-e","gpt-image","image-generation",
@@ -61,7 +61,14 @@ echo "$api" | jq --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
     | recent($c);
   def entry: {id: .value.id, name: .value.name, context: (.value.limit.context // null)};
   def models_of($p; $c): ($p.models // {}) | to_entries | map(chat($c) | entry) | sort_by(.id);
-  {
+  . as $api | $old[0] + {
+    "opencode-go": ($old[0]["opencode-go"] | map(
+      . as $model | $api["opencode-go"].models[$model.id].limit as $limit
+      | if $limit.context != null then
+          .context = $limit.context
+          | if $limit.input != null then .input = $limit.input else del(.input) end
+        else . end
+    )),
     anthropic:  models_of(.anthropic; ($cut.anthropic  // "0000-00-00")),
     openai:     models_of(.openai;    ($cut.openai     // "0000-00-00")),
     gemini:     models_of(.google;    ($cut.gemini     // "0000-00-00")),
@@ -73,7 +80,8 @@ echo "$api" | jq --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
       | sort_by(.id)
     )
   }
-' > "$OUT"
+')"
+printf '%s\n' "$catalog" > "$OUT"
 
 echo "Wrote $OUT" >&2
 jq -r 'to_entries[] | "  \(.key): \(.value | length) models"' "$OUT" >&2

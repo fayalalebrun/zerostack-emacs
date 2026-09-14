@@ -10,6 +10,7 @@ const BUILTIN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
     "openai-codex",
+    "opencode-go",
     "deepseek",
     "gemini",
     "openrouter",
@@ -146,6 +147,7 @@ pub fn canonical_provider_name(provider: &str) -> String {
         Some(ProviderKind::OpenRouter) => "openrouter".to_string(),
         Some(ProviderKind::OpenAI) => "openai".to_string(),
         Some(ProviderKind::OpenAICodex) => "openai-codex".to_string(),
+        Some(ProviderKind::OpenCodeGo) => "opencode-go".to_string(),
         Some(ProviderKind::DeepSeek) => "deepseek".to_string(),
         Some(ProviderKind::Anthropic) => "anthropic".to_string(),
         Some(ProviderKind::Gemini) => "gemini".to_string(),
@@ -203,6 +205,18 @@ mod tests {
     }
 
     #[test]
+    fn set_provider_selects_opencode_go_coding_model() {
+        let mut cfg = Config::default();
+
+        let (provider, model) = set_default_provider(&mut cfg, "opencode-go").unwrap();
+
+        assert_eq!(provider, "opencode-go");
+        assert_eq!(model, "kimi-k2.7-code");
+        assert_eq!(cfg.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(cfg.model.as_deref(), Some("kimi-k2.7-code"));
+    }
+
+    #[test]
     fn set_provider_accepts_direct_deepseek_without_changing_quick_default() {
         let mut cfg = Config::default();
 
@@ -227,6 +241,14 @@ mod tests {
 
         assert_eq!(provider, "local");
         assert_eq!(model, "llama-local");
+    }
+
+    #[test]
+    fn model_ids_for_opencode_go_include_each_api_style() {
+        let ids = model_ids_for_provider("opencode-go");
+        for model in ["kimi-k2.7-code", "gpt-5.6-luna", "minimax-m3"] {
+            assert!(ids.iter().any(|id| id == model));
+        }
     }
 
     #[test]

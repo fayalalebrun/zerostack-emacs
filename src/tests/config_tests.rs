@@ -170,6 +170,102 @@ fn resolve_context_window_prefers_config_pin_over_catalog() {
 }
 
 #[test]
+fn opencode_go_context_limits_cover_every_bundled_model() {
+    let groups: &[(u64, &[&str])] = &[
+        (
+            1_000_000,
+            &[
+                "glm-5.2",
+                "glm-5.3",
+                "glm-5.3-flash",
+                "longcat-2.0",
+                "mimo-v2.5",
+                "minimax-m3",
+                "qwen3.8-max",
+                "qwen3.8-flash",
+                "qwen3.7-max",
+                "qwen3.7-plus",
+                "qwen3.6-plus",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "deepseek-v4-flash-vision-exp",
+            ],
+        ),
+        (
+            1_048_576,
+            &[
+                "kimi-k3",
+                "mimo-v2-pro",
+                "mimo-v2.5-pro",
+                "muse-spark-1.2-contributor",
+                "muse-spark-1.3-contributor",
+            ],
+        ),
+        (
+            262_144,
+            &[
+                "kimi-k2.5",
+                "kimi-k2.6",
+                "kimi-k2.7-code",
+                "mimo-v2-omni",
+                "qwen3.5-plus",
+            ],
+        ),
+        (204_800, &["minimax-m2.5", "minimax-m2.7"]),
+        (202_752, &["glm-5", "glm-5.1"]),
+        (500_000, &["grok-4.5", "grok-4.6", "omen-alpha"]),
+        (1_024_000, &["hy4-preview"]),
+        (256_000, &["hy3-preview"]),
+        (192_000, &["hy3"]),
+        (922_000, &["gpt-5.6-luna"]),
+    ];
+    let cfg = Config::default();
+    let catalog = crate::models_catalog::catalog_entries("opencode-go").unwrap();
+    assert_eq!(
+        catalog.len(),
+        groups.iter().map(|(_, models)| models.len()).sum::<usize>()
+    );
+    for &(window, models) in groups {
+        for model in models {
+            assert_eq!(
+                Config::catalog_context_window("opencode-go", model),
+                Some(window),
+                "{model}"
+            );
+            assert_eq!(
+                cfg.resolve_context_window("opencode-go", model),
+                window,
+                "{model}"
+            );
+        }
+    }
+}
+
+#[test]
+fn opencode_go_context_override_and_unknown_model_fallback() {
+    let pinned = Config {
+        context_window: Some(64_000),
+        ..Config::default()
+    };
+    assert_eq!(
+        pinned.resolve_context_window("opencode-go", "gpt-5.6-luna"),
+        64_000
+    );
+    assert_eq!(
+        pinned.resolve_context_window("opencode-go", "unknown-model"),
+        64_000
+    );
+    assert_eq!(
+        Config::default().resolve_context_window("opencode-go", "unknown-model"),
+        128_000
+    );
+    assert_eq!(
+        Config::catalog_context_window("opencode-go", "unknown-model"),
+        None
+    );
+}
+
+#[test]
 fn openai_codex_gpt_55_uses_codex_input_window() {
     let cfg = Config::default();
     assert_eq!(cfg.resolve_context_window("openai", "gpt-5.5"), 1_050_000);

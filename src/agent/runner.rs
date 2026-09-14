@@ -1576,6 +1576,35 @@ mod tests {
     }
 
     #[test]
+    fn streamed_text_reasoning_without_an_id_is_preserved_for_replay() {
+        let content = StreamedAssistantContent::<()>::Reasoning(Reasoning::new_with_signature(
+            "hidden chain of thought",
+            Some("signature".to_string()),
+        ));
+
+        let stored = streamed_provider_reasoning(&content).unwrap();
+        assert!(stored.id.is_empty());
+        assert_eq!(
+            stored.content,
+            vec![ProviderReasoningContent::Text {
+                text: "hidden chain of thought".to_string(),
+                signature: Some("signature".to_string()),
+            }]
+        );
+
+        let replay = crate::session::assistant_message_with_reasoning("answer", &[stored]);
+        let Message::Assistant { content, .. } = replay else {
+            panic!("expected assistant message");
+        };
+        assert!(
+            matches!(content.first(), AssistantContent::Reasoning(reasoning)
+            if reasoning.id.is_none()
+                && matches!(reasoning.content.first(), Some(ReasoningContent::Text { text, signature })
+                    if text == "hidden chain of thought" && signature.as_deref() == Some("signature")))
+        );
+    }
+
+    #[test]
     fn convert_history_replays_tool_events_as_native_messages() {
         let mut session = Session::new("openai", "gpt-5.1", 128000);
         session.add_message(MessageRole::User, "inspect it");

@@ -145,6 +145,10 @@ impl From<crate::event::TokenUsage> for SessionTokenUsage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ProviderReasoningContent {
+    Text {
+        text: String,
+        signature: Option<String>,
+    },
     Summary(String),
     Encrypted(String),
     Redacted(String),
@@ -158,11 +162,16 @@ pub struct ProviderReasoning {
 
 impl ProviderReasoning {
     pub fn from_rig(reasoning: &Reasoning) -> Option<Self> {
-        let id = reasoning.id.clone()?;
         let content = reasoning
             .content
             .iter()
             .filter_map(|item| match item {
+                ReasoningContent::Text { text, signature } => {
+                    Some(ProviderReasoningContent::Text {
+                        text: text.clone(),
+                        signature: signature.clone(),
+                    })
+                }
                 ReasoningContent::Summary(text) => {
                     Some(ProviderReasoningContent::Summary(text.clone()))
                 }
@@ -172,19 +181,28 @@ impl ProviderReasoning {
                 ReasoningContent::Redacted { data } => {
                     Some(ProviderReasoningContent::Redacted(data.clone()))
                 }
-                ReasoningContent::Text { .. } => None,
                 _ => None,
             })
             .collect::<Vec<_>>();
-        (!content.is_empty()).then_some(Self { id, content })
+        (!content.is_empty()).then_some(Self {
+            id: reasoning.id.clone().unwrap_or_default(),
+            content,
+        })
     }
 
     fn to_rig(&self) -> Reasoning {
-        let mut reasoning = Reasoning::summaries(Vec::new()).with_id(self.id.clone());
+        let mut reasoning = Reasoning::summaries(Vec::new());
+        if !self.id.is_empty() {
+            reasoning = reasoning.with_id(self.id.clone());
+        }
         reasoning.content = self
             .content
             .iter()
             .map(|item| match item {
+                ProviderReasoningContent::Text { text, signature } => ReasoningContent::Text {
+                    text: text.clone(),
+                    signature: signature.clone(),
+                },
                 ProviderReasoningContent::Summary(text) => ReasoningContent::Summary(text.clone()),
                 ProviderReasoningContent::Encrypted(data) => {
                     ReasoningContent::Encrypted(data.clone())
