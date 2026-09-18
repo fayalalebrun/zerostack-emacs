@@ -250,6 +250,8 @@ fn serialize_multiple_roles() {
                 name: CompactString::new("read"),
                 attachments: Vec::new(),
                 loaded_context: Vec::new(),
+                output_path: None,
+                display_path: None,
                 duration_ms: 0,
             }),
         },

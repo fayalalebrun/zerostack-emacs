@@ -300,9 +300,11 @@ assistant turns render persisted `thinking:12k` markers, and persisted tool
 results include elapsed execution time on the output line, e.g.
 `◈ result (12 chars) [1.2s]:`.
 
-Reasoning chunks and final tool outputs are written to files inside the live
-session runtime directory instead of being sent inline. Events include an
-artifact plist:
+Reasoning chunks and short tool outputs are written to files inside the live
+session runtime directory instead of being sent inline. Long tool outputs and
+display patches are stored under the persistent session data directory, with
+their paths recorded in session JSON so reopened sessions use the same artifact
+renderer and links. Events include an artifact plist:
 
 ```lisp
 (event :type tool-result
@@ -343,9 +345,9 @@ running:
 The final `tool-result` still reports the exact text given back to the agent.
 The Emacs client opens `live-tool-output` artifacts with tail auto-revert when
 available so the file updates live without streaming output chunks over the
-protocol. Artifacts are not persisted in session JSON and disappear on normal
-process exit when the session runtime directory is removed. Crash cleanup is
-best-effort via runtime directory lifetime and stale session sweeping.
+protocol. Live-output, reasoning, and LaTeX artifacts disappear when the session
+process exits. Persisted tool-output and display-artifact links remain valid
+across restarts and are removed when their session is deleted.
 
 Assistant renders may include LaTeX metadata for inline SVG display. Zerostack
 recognizes inline `$...$` and `\(...\)` math plus display `$$...$$` and

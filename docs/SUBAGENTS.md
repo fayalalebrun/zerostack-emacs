@@ -177,5 +177,6 @@ and timeout. Opening
 running connects to the child process's Unix socket and streams its real-time
 updates. The attachment is read-only so it cannot start a competing turn or
 mutate the child session. On completion, the child's model response is attached
-to the parent transcript as a clickable text artifact. After the child exits,
-reopening the session link uses the persisted transcript.
+to the parent transcript as a clickable text artifact. Reopening the parent uses
+the same artifact renderer, while reopening the child session link uses its
+persisted transcript.

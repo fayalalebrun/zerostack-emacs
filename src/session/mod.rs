@@ -91,6 +91,10 @@ pub struct SessionToolResult {
     pub attachments: Vec<SessionAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loaded_context: Vec<CompactString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<CompactString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_path: Option<CompactString>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub duration_ms: u64,
 }
@@ -751,7 +755,7 @@ impl Session {
         loaded_context: Vec<String>,
         duration_ms: u64,
     ) -> String {
-        let content = self.tool_result_content(name, output);
+        let (content, output_path) = self.tool_result_content(name, output);
         let tokens = Self::estimate_tokens(&content);
         self.messages.push(SessionMessage {
             role: MessageRole::ToolResult,
@@ -767,6 +771,8 @@ impl Session {
                 name: CompactString::new(name),
                 attachments: Vec::new(),
                 loaded_context: loaded_context.into_iter().map(CompactString::new).collect(),
+                output_path: output_path.map(|path| path.to_string_lossy().into_owned().into()),
+                display_path: None,
                 duration_ms,
             }),
         });
@@ -775,16 +781,22 @@ impl Session {
         content
     }
 
-    fn tool_result_content(&self, name: &str, output: &str) -> String {
+    fn tool_result_content(&self, name: &str, output: &str) -> (String, Option<PathBuf>) {
         let output_chars = output.chars().count();
         if output_chars <= TOOL_RESULT_SAVE_THRESHOLD {
-            return format!("{name}:\n{output}");
+            return (format!("{name}:\n{output}"), None);
         }
 
         match storage::save_tool_output(&self.id, name, output) {
-            Ok(path) => format_truncated_tool_result(name, output, output_chars, &path),
-            Err(err) => format!(
-                "{name}:\n{output}\n\n[failed to save long tool output separately; kept full output in session to avoid data loss: {err}]"
+            Ok(path) => (
+                format_truncated_tool_result(name, output, output_chars, &path),
+                Some(path),
+            ),
+            Err(err) => (
+                format!(
+                    "{name}:\n{output}\n\n[failed to save long tool output separately; kept full output in session to avoid data loss: {err}]"
+                ),
+                None,
             ),
         }
     }

@@ -204,6 +204,13 @@ mod imp {
         mime: &'static str,
         bytes: usize,
         preview: String,
+        ephemeral: bool,
+    }
+
+    struct RenderedToolResult {
+        lines: Vec<WireLine>,
+        artifact: Option<ArtifactInfo>,
+        content: String,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -857,6 +864,7 @@ mod imp {
                 mime,
                 bytes: contents.len(),
                 preview: preview_text(contents),
+                ephemeral: true,
             })
         }
     }
@@ -1125,6 +1133,7 @@ mod imp {
                 &context,
                 cols,
                 Some(&server),
+                true,
             )
             .await;
             let unchanged =
@@ -2718,61 +2727,30 @@ mod imp {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        let content = {
+        let message = {
             let mut session = server.session.lock().await;
-            let content = session.add_tool_result_for_latest_unresolved_call(
-                "bash",
-                &output,
-                Vec::new(),
-                duration_ms,
-            );
-            if content.is_some() && !server.cli.no_session {
+            if session
+                .add_tool_result_for_latest_unresolved_call(
+                    "bash",
+                    &output,
+                    Vec::new(),
+                    duration_ms,
+                )
+                .is_none()
+            {
+                return Ok(false);
+            }
+            if !server.cli.no_session {
                 crate::session::storage::save_session(&session)?;
             }
-            content
+            session
+                .messages
+                .last()
+                .expect("tool result was added")
+                .clone()
         };
-        let Some(content) = content else {
-            return Ok(false);
-        };
-        let safe = sanitize_output(&content);
         let turn = server.mutable.lock().await.turn;
-        let artifact = match server
-            .create_artifact(turn, "tool-output", "bash", &safe)
-            .await
-        {
-            Ok(artifact) => Some(artifact),
-            Err(e) => {
-                tracing::warn!("failed to write interrupted Emacs tool output artifact: {e}");
-                None
-            }
-        };
-        server
-            .append_lines(
-                "tool-render",
-                turn,
-                render_tool_result_lines(
-                    Some("bash"),
-                    &safe,
-                    artifact.clone(),
-                    None,
-                    &[],
-                    duration_ms,
-                ),
-            )
-            .await;
-        server
-            .broadcast_event(
-                "tool-result",
-                format!(
-                    " :turn {} :name {} :chars {} :preview {}{}",
-                    turn,
-                    sexp_quote("bash"),
-                    safe.chars().count(),
-                    sexp_quote(&preview_text(&safe)),
-                    artifact_field(artifact.as_ref()),
-                ),
-            )
-            .await;
+        emit_tool_result_message(server, turn, &message).await;
         Ok(true)
     }
 
@@ -3512,18 +3490,9 @@ mod imp {
                     if name == "bash" {
                         server.mutable.lock().await.active_live_output = None;
                     }
-                    let loaded_lines = loaded_context
-                        .iter()
-                        .map(|path| {
-                            WireLine::new(
-                                format!("  loaded context: {}", sanitize_output(path)),
-                                "zs-muted",
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let safe = {
+                    let message = {
                         let mut session = server.session.lock().await;
-                        let content = session.add_tool_result_structured_with_context(
+                        session.add_tool_result_structured_with_context(
                             &name,
                             &output,
                             &id,
@@ -3552,115 +3521,33 @@ mod imp {
                                     )?);
                             }
                         }
-                        let content = sanitize_output(&content);
+                        if let Some(display) = display_artifact
+                            && let Ok(path) = crate::session::storage::save_tool_output(
+                                &session.id,
+                                &format!(
+                                    "{}-{}-{}",
+                                    display.kind, display.label, display.extension
+                                ),
+                                &display.contents,
+                            )
+                            && let Some(result) = session
+                                .messages
+                                .last_mut()
+                                .and_then(|message| message.tool_result.as_mut())
+                        {
+                            result.display_path = Some(path.to_string_lossy().into_owned().into());
+                        }
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
                         }
                         assistant_index = session.messages.len();
-                        content
+                        session
+                            .messages
+                            .last()
+                            .expect("tool result was added")
+                            .clone()
                     };
-                    if name == "task" {
-                        let response = task_response_from_output(&output);
-                        let safe_response = sanitize_output(response);
-                        let artifact = match server
-                            .create_artifact(
-                                turn,
-                                "subagent-response",
-                                "subagent-response",
-                                &safe_response,
-                            )
-                            .await
-                        {
-                            Ok(artifact) => Some(artifact),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "failed to write Emacs subagent response artifact: {e}"
-                                );
-                                None
-                            }
-                        };
-                        let lines = render_subagent_response_lines(
-                            &safe_response,
-                            artifact.clone(),
-                            duration_ms,
-                        );
-                        server.append_lines("tool-render", turn, lines).await;
-                        server
-                            .broadcast_event(
-                                "tool-result",
-                                format!(
-                                    " :turn {} :name {} :chars {} :preview {}{}",
-                                    turn,
-                                    sexp_quote(&name),
-                                    safe_response.chars().count(),
-                                    sexp_quote(&preview_text(&safe_response)),
-                                    artifact_field(artifact.as_ref()),
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                    let artifact = match server
-                        .create_artifact(turn, "tool-output", &name, &safe)
-                        .await
-                    {
-                        Ok(artifact) => Some(artifact),
-                        Err(e) => {
-                            tracing::warn!("failed to write Emacs tool output artifact: {e}");
-                            None
-                        }
-                    };
-                    let display_artifact = match display_artifact {
-                        Some(display) => {
-                            let filename = format!(
-                                "{}-{}.{}",
-                                safe_filename(&display.kind),
-                                safe_filename(&display.label),
-                                safe_filename(&display.extension)
-                            );
-                            match server
-                                .write_artifact_file_with_mime(
-                                    turn,
-                                    "display-artifact",
-                                    &filename,
-                                    &display.contents,
-                                    "text/x-diff",
-                                )
-                                .await
-                            {
-                                Ok(artifact) => Some(artifact),
-                                Err(e) => {
-                                    tracing::warn!("failed to write Emacs display artifact: {e}");
-                                    None
-                                }
-                            }
-                        }
-                        None => None,
-                    };
-                    let mut lines = loaded_lines;
-                    lines.extend(render_tool_result_lines(
-                        Some(&name),
-                        &safe,
-                        artifact.clone(),
-                        display_artifact.clone(),
-                        &[],
-                        duration_ms,
-                    ));
-                    server.append_lines("tool-render", turn, lines).await;
-                    let preview = preview_text(&safe);
-                    server
-                        .broadcast_event(
-                            "tool-result",
-                            format!(
-                                " :turn {} :name {} :chars {} :preview {}{}",
-                                turn,
-                                sexp_quote(&name),
-                                safe.chars().count(),
-                                sexp_quote(&preview),
-                                artifact_field(artifact.as_ref()),
-                            ),
-                        )
-                        .await;
+                    emit_tool_result_message(&server, turn, &message).await;
                 }
                 AgentEvent::Retry {
                     attempt,
@@ -4235,9 +4122,16 @@ mod imp {
         let session = server.session.lock().await.clone();
         let assistant_index = session.messages.len();
         let context = server.context.lock().await.clone();
-        let mut lines =
-            render_session_lines_for(&session, &server.cli, &server.cfg, &context, cols, None)
-                .await;
+        let mut lines = render_session_lines_for(
+            &session,
+            &server.cli,
+            &server.cfg,
+            &context,
+            cols,
+            Some(server),
+            false,
+        )
+        .await;
         let active_response = server.mutable.lock().await.active_response.clone();
         if let Some((_, response)) = active_response
             && !response.is_empty()
@@ -4258,6 +4152,7 @@ mod imp {
         context: &ContextFiles,
         cols: usize,
         server: Option<&Arc<Server>>,
+        include_latex: bool,
     ) -> Vec<WireLine> {
         let mut out = Vec::new();
         if context.agents.is_some() {
@@ -4289,24 +4184,20 @@ mod imp {
             out.push(blank_line());
         }
         for (message_index, msg) in session.messages.iter().enumerate() {
-            if (msg.role == MessageRole::ToolCall
+            if msg.role == MessageRole::ToolCall
                 && msg
                     .tool_call
                     .as_ref()
-                    .is_some_and(|call| call.name == "task"))
-                || (msg.role == MessageRole::ToolResult
-                    && msg
-                        .tool_result
-                        .as_ref()
-                        .is_some_and(|result| result.name == "task"))
+                    .is_some_and(|call| call.name == "task")
             {
                 continue;
             }
             match msg.role {
                 MessageRole::ToolResult => {
                     out.extend(
-                        render_tool_result_message_lines(msg, server)
+                        render_tool_result_message(msg, server, message_index as u64)
                             .await
+                            .lines
                             .into_iter()
                             .map(|line| line.with_source(message_index, msg.role)),
                     );
@@ -4319,7 +4210,8 @@ mod imp {
                         msg.provider_usage,
                         cols,
                     );
-                    if msg.role == MessageRole::Assistant
+                    if include_latex
+                        && msg.role == MessageRole::Assistant
                         && let Some(server) = server
                     {
                         attach_latex_metadata(
@@ -4382,7 +4274,7 @@ mod imp {
             MessageRole::Assistant => render_assistant_final_lines(content, provider_usage, cols),
             MessageRole::System => render_compaction_summary_lines(content),
             MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
-            MessageRole::ToolResult => render_tool_result_lines(None, content, None, None, &[], 0),
+            MessageRole::ToolResult => unreachable!("tool results use render_tool_result_message"),
             MessageRole::SubagentToolCall => {
                 let lines = markdown_to_wire_lines(content, cols);
                 if lines
@@ -4397,34 +4289,125 @@ mod imp {
         }
     }
 
-    async fn render_tool_result_message_lines(
+    async fn emit_tool_result_message(
+        server: &Arc<Server>,
+        turn: u64,
         msg: &crate::session::SessionMessage,
-        server: Option<&Arc<Server>>,
-    ) -> Vec<WireLine> {
+    ) {
+        let rendered = render_tool_result_message(msg, Some(server), turn).await;
+        server
+            .append_lines("tool-render", turn, rendered.lines)
+            .await;
         let name = msg
             .tool_result
             .as_ref()
             .map(|result| result.name.as_str())
+            .unwrap_or("tool");
+        server
+            .broadcast_event(
+                "tool-result",
+                format!(
+                    " :turn {} :name {} :chars {} :preview {}{}",
+                    turn,
+                    sexp_quote(name),
+                    rendered.content.chars().count(),
+                    sexp_quote(&preview_text(&rendered.content)),
+                    artifact_field(rendered.artifact.as_ref()),
+                ),
+            )
+            .await;
+    }
+
+    async fn render_tool_result_message(
+        msg: &crate::session::SessionMessage,
+        server: Option<&Arc<Server>>,
+        turn: u64,
+    ) -> RenderedToolResult {
+        let result = msg.tool_result.as_ref();
+        let name = result
+            .map(|result| result.name.as_str())
             .or_else(|| msg.content.split_once(":\n").map(|(name, _)| name));
-        let loaded_context = msg
-            .tool_result
-            .as_ref()
+        let loaded_context = result
             .map(|result| result.loaded_context.as_slice())
             .unwrap_or(&[]);
         let safe = sanitize_output(&msg.content);
-        let artifact = match (server, name) {
-            (Some(server), Some(name)) => server
-                .create_artifact(0, "tool-output", name, &safe)
+        let output = safe
+            .split_once(":\n")
+            .map(|(_, output)| output)
+            .unwrap_or(&safe);
+        let content = if name == Some("task") {
+            sanitize_output(task_response_from_output(output))
+        } else {
+            safe.clone()
+        };
+        let artifact_kind = if name == Some("task") {
+            "subagent-response"
+        } else {
+            "tool-output"
+        };
+        let output_path = result
+            .and_then(|result| result.output_path.as_deref())
+            .map(PathBuf::from)
+            .or_else(|| legacy_tool_output_path(&safe));
+        let artifact = output_path
+            .as_deref()
+            .and_then(|path| persistent_artifact(artifact_kind, path, &content));
+        let artifact = match (artifact, server, name) {
+            (Some(artifact), _, _) => Some(artifact),
+            (None, Some(server), Some(name)) => server
+                .create_artifact(turn, artifact_kind, name, &content)
                 .await
                 .ok(),
             _ => None,
         };
-        let duration_ms = msg
-            .tool_result
-            .as_ref()
-            .map(|result| result.duration_ms)
-            .unwrap_or(0);
-        render_tool_result_lines(name, &safe, artifact, None, loaded_context, duration_ms)
+        let display_path = result
+            .and_then(|result| result.display_path.as_deref())
+            .map(PathBuf::from);
+        let display_artifact = display_path
+            .as_deref()
+            .and_then(|path| persistent_artifact("display-artifact", path, "patch"));
+        let duration_ms = result.map(|result| result.duration_ms).unwrap_or(0);
+        let lines = if name == Some("task") {
+            render_subagent_response_lines(&content, artifact.clone(), duration_ms)
+        } else {
+            render_tool_result_lines(
+                name,
+                &safe,
+                artifact.clone(),
+                display_artifact,
+                loaded_context,
+                duration_ms,
+            )
+        };
+        RenderedToolResult {
+            lines,
+            artifact,
+            content: content.to_string(),
+        }
+    }
+
+    fn legacy_tool_output_path(content: &str) -> Option<PathBuf> {
+        content.lines().find_map(|line| {
+            line.strip_prefix("[full output saved to: ")
+                .and_then(|rest| rest.split_once(';'))
+                .map(|(path, _)| PathBuf::from(path.trim()))
+        })
+    }
+
+    fn persistent_artifact(kind: &'static str, path: &Path, preview: &str) -> Option<ArtifactInfo> {
+        let bytes = std::fs::metadata(path).ok()?.len().try_into().ok()?;
+        Some(ArtifactInfo {
+            kind,
+            path: path.to_path_buf(),
+            mime: if kind == "display-artifact" {
+                "text/x-diff"
+            } else {
+                "text/plain; charset=utf-8"
+            },
+            bytes,
+            preview: preview_text(preview),
+            ephemeral: false,
+        })
     }
 
     fn render_compaction_summary_lines(content: &str) -> Vec<WireLine> {
@@ -5333,6 +5316,7 @@ mod imp {
             mime: "image/svg+xml",
             bytes: svg.len(),
             preview,
+            ephemeral: true,
         })
     }
 
@@ -6162,12 +6146,18 @@ mod imp {
 
     fn artifact_to_sexp(artifact: &ArtifactInfo) -> String {
         format!(
-            "(:kind {} :path {} :mime {} :bytes {} :preview {} :ephemeral t :expires process-exit)",
+            "(:kind {} :path {} :mime {} :bytes {} :preview {} :ephemeral {} :expires {})",
             artifact.kind,
             sexp_quote(artifact.path.to_string_lossy().as_ref()),
             sexp_quote(artifact.mime),
             artifact.bytes,
             sexp_quote(&artifact.preview),
+            bool_atom(artifact.ephemeral),
+            if artifact.ephemeral {
+                "process-exit"
+            } else {
+                "nil"
+            },
         )
     }
 
@@ -6554,7 +6544,8 @@ mod imp {
             let cli = Cli::default();
             let cfg = Config::default();
             let context = crate::context::load(true);
-            let lines = render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await;
+            let lines =
+                render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await;
             let encoded = lines_to_sexp(&lines);
 
             assert!(encoded.contains(":message-index 0 :role user"));
@@ -6594,7 +6585,7 @@ mod imp {
             let cfg = Config::default();
             let context = crate::context::load(true);
             let encoded = lines_to_sexp(
-                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await,
+                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await,
             );
 
             assert!(encoded.contains("thinking:12k"));
@@ -6611,7 +6602,7 @@ mod imp {
             let cfg = Config::default();
             let context = crate::context::load(true);
             let encoded = lines_to_sexp(
-                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await,
+                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await,
             );
 
             assert!(encoded.contains("── compacted history ──"));
@@ -6636,7 +6627,7 @@ mod imp {
             let cfg = Config::default();
             let context = crate::context::load(true);
             let encoded = lines_to_sexp(
-                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None).await,
+                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await,
             );
 
             assert!(encoded.contains(":role tool-call"));
@@ -6648,6 +6639,71 @@ mod imp {
             assert!(encoded.contains(":url"));
         }
 
+        #[tokio::test]
+        async fn initial_and_live_tool_result_rendering_share_persistent_artifacts() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, _listener) = test_server(prompts);
+            let output_path = registration.dir.join("full-output.txt");
+            let display_path = registration.dir.join("patch.diff");
+            std::fs::write(&output_path, "complete output").unwrap();
+            std::fs::write(&display_path, "--- old\n+++ new\n").unwrap();
+            let message = {
+                let mut session = server.session.lock().await;
+                session.add_tool_result("bash", "partial output");
+                let message = session.messages.last_mut().unwrap();
+                let result = message.tool_result.as_mut().unwrap();
+                result.output_path = Some(output_path.to_string_lossy().into_owned().into());
+                result.display_path = Some(display_path.to_string_lossy().into_owned().into());
+                message.clone()
+            };
+
+            let live = render_tool_result_message(&message, Some(&server), 1).await;
+            let initial = render_session_lines(&server, 100).await;
+            let live_output = live
+                .lines
+                .iter()
+                .find(|line| line.text.contains("output:"))
+                .unwrap();
+            let initial_output = initial
+                .iter()
+                .find(|line| line.text.contains("output:"))
+                .unwrap();
+
+            assert_eq!(initial_output.text, live_output.text);
+            assert_eq!(initial_output.artifact, live_output.artifact);
+            assert_eq!(initial_output.artifact.as_ref().unwrap().path, output_path);
+            assert!(!initial_output.artifact.as_ref().unwrap().ephemeral);
+            let encoded = lines_to_sexp(&initial);
+            assert!(encoded.contains("patch: bash"));
+            assert!(encoded.contains(":ephemeral nil :expires nil"));
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn legacy_truncated_tool_result_reuses_saved_full_output() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, _listener) = test_server(prompts);
+            let output_path = registration.dir.join("legacy-full-output.txt");
+            std::fs::write(&output_path, "complete legacy output").unwrap();
+            let message = {
+                let mut session = server.session.lock().await;
+                session.add_tool_result("bash", "partial");
+                let message = session.messages.last_mut().unwrap();
+                message.content = format!(
+                    "bash:\npartial\n\n[full output saved to: {}; use the read tool]",
+                    output_path.display()
+                )
+                .into();
+                message.clone()
+            };
+
+            let rendered = render_tool_result_message(&message, Some(&server), 0).await;
+
+            assert_eq!(rendered.artifact.as_ref().unwrap().path, output_path);
+            assert!(!rendered.artifact.as_ref().unwrap().ephemeral);
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
         #[test]
         fn tool_result_lines_use_artifact_summary_when_available() {
             let artifact = ArtifactInfo {
@@ -6656,6 +6712,7 @@ mod imp {
                 mime: "text/plain; charset=utf-8",
                 bytes: 8,
                 preview: "bash: hi".to_string(),
+                ephemeral: true,
             };
             let lines = render_tool_result_lines(
                 Some("bash"),
@@ -6926,6 +6983,7 @@ mod imp {
                 mime: "text/plain; charset=utf-8",
                 bytes: 12,
                 preview: "hello world".to_string(),
+                ephemeral: true,
             };
             let lines = vec![WireLine::with_artifact(
                 "  output: bash (12 B)",
@@ -7113,6 +7171,7 @@ mod imp {
                 mime: "text/x-tex; charset=utf-8",
                 bytes: 120,
                 preview: "\\documentclass{article}".to_string(),
+                ephemeral: true,
             };
             let svg_artifact = ArtifactInfo {
                 kind: "latex-svg",
@@ -7120,6 +7179,7 @@ mod imp {
                 mime: "image/svg+xml",
                 bytes: 240,
                 preview: "<svg".to_string(),
+                ephemeral: true,
             };
             let latex = LatexInfo {
                 id: "turn-2-latex-1".to_string(),
@@ -7243,6 +7303,7 @@ mod imp {
                     mime: "text/x-tex; charset=utf-8",
                     bytes: 1,
                     preview: String::new(),
+                    ephemeral: true,
                 },
                 svg_artifact: None,
                 error: Some("latex exited with status 1".to_string()),
@@ -7439,6 +7500,32 @@ mod imp {
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
 
+        #[tokio::test]
+        async fn resumed_task_result_uses_shared_artifact_renderer() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, _listener) = test_server(prompts);
+            server.session.lock().await.add_tool_result(
+                "task",
+                "Implemented the fix.\n\nSession: child-id\nWorkspace: /tmp/work\n",
+            );
+
+            let lines = render_session_lines(&server, 100).await;
+            let response = lines
+                .iter()
+                .find(|line| line.text.contains("subagent response"))
+                .unwrap();
+
+            assert_eq!(
+                response.artifact.as_ref().unwrap().kind,
+                "subagent-response"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&response.artifact.as_ref().unwrap().path).unwrap(),
+                "Implemented the fix."
+            );
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
         #[test]
         fn task_result_extracts_and_renders_response_artifact() {
             let output = "Implemented the fix.\n\nSession: child-id\nWorkspace: /tmp/work\nTranscript: /tmp/session.json\nSocket: /tmp/sock\n";
@@ -7450,6 +7537,7 @@ mod imp {
                 mime: "text/plain; charset=utf-8",
                 bytes: 20,
                 preview: "Implemented the fix.".to_string(),
+                ephemeral: true,
             };
             let lines = render_subagent_response_lines("Implemented the fix.", Some(artifact), 42);
             assert_eq!(lines[0].text, "  subagent response (20 B) [42ms]");

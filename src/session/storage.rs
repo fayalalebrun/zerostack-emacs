@@ -165,6 +165,10 @@ pub fn delete_session(id: &str) -> anyhow::Result<()> {
     if media.exists() {
         std::fs::remove_dir_all(media)?;
     }
+    let tool_outputs = tool_output_dir(id);
+    if tool_outputs.exists() {
+        std::fs::remove_dir_all(tool_outputs)?;
+    }
     delete_subagent_workspace(id)?;
     Ok(())
 }

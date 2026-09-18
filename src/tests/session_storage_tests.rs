@@ -102,14 +102,17 @@ fn find_sessions_by_prefix_no_match() {
 }
 
 #[test]
-fn delete_session_removes_file() {
+fn delete_session_removes_file_and_tool_outputs() {
     let env = setup_test_env();
     let s = Session::new("openai", "gpt-4", 128000);
     save_session(&s).unwrap();
+    let output = crate::session::storage::save_tool_output(&s.id, "bash", "output").unwrap();
 
     delete_session(&s.id).unwrap();
+
     let found = find_sessions_by_prefix(&s.id[..8].to_string()).unwrap();
     assert!(found.is_empty());
+    assert!(!output.exists());
     drop(env);
 }
 
@@ -281,6 +284,7 @@ fn save_session_preserves_tool_messages() {
     s.add_message(MessageRole::User, "question");
     s.add_tool_call("read", &serde_json::json!({ "path": "src/main.rs" }));
     s.add_tool_result("read", "file contents");
+    s.messages[2].tool_result.as_mut().unwrap().display_path = Some("/tmp/read.patch".into());
     s.add_subagent_tool_call("task", &serde_json::json!({ "prompts": ["find x"] }));
     s.add_message(MessageRole::Assistant, "answer");
     save_session(&s).unwrap();
@@ -298,6 +302,7 @@ fn save_session_preserves_tool_messages() {
     let result = found[0].messages[2].tool_result.as_ref().unwrap();
     assert_eq!(result.name, "read");
     assert_eq!(result.id, call.id);
+    assert_eq!(result.display_path.as_deref(), Some("/tmp/read.patch"));
     assert_eq!(found[0].messages[3].role, MessageRole::SubagentToolCall);
     drop(env);
 }
@@ -363,6 +368,23 @@ fn long_tool_result_is_saved_and_truncated_in_session() {
         .unwrap();
     assert!(Path::new(path).starts_with(&env.dir));
     assert_eq!(std::fs::read_to_string(path).unwrap(), output);
+    assert_eq!(
+        s.messages[0]
+            .tool_result
+            .as_ref()
+            .and_then(|result| result.output_path.as_deref()),
+        Some(path)
+    );
+
+    save_session(&s).unwrap();
+    let loaded = find_sessions_by_prefix(&s.id[..8]).unwrap();
+    assert_eq!(
+        loaded[0].messages[0]
+            .tool_result
+            .as_ref()
+            .and_then(|result| result.output_path.as_deref()),
+        Some(path)
+    );
     drop(env);
 }
 
