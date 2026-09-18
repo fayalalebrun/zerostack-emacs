@@ -114,6 +114,83 @@ fn delete_session_removes_file() {
 }
 
 #[test]
+fn delete_session_removes_copied_subagent_workspace() {
+    let env = setup_test_env();
+    let session = Session::new("openai", "gpt-4", 128000);
+    save_session(&session).unwrap();
+    let root = env.dir.join("subagents").join(session.id.as_str());
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    std::fs::write(root.join("workspace/file.txt"), "content").unwrap();
+
+    delete_session(&session.id).unwrap();
+
+    assert!(!root.exists());
+}
+
+#[cfg(feature = "subagents")]
+#[test]
+fn delete_session_removes_subagent_git_worktree() {
+    use std::process::Command;
+
+    let env = setup_test_env();
+    let repo = env.dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@example.com"],
+        &["config", "user.name", "Test"],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-m", "base"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let session = Session::new("openai", "gpt-4", 128000);
+    save_session(&session).unwrap();
+    let workspace = crate::extras::subagents::workspace::create(&repo, &session.id).unwrap();
+    assert!(workspace.exists());
+
+    delete_session(&session.id).unwrap();
+
+    assert!(!workspace.exists());
+    assert!(!env.dir.join("subagents").join(session.id.as_str()).exists());
+    let listed = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains(&workspace.to_string_lossy().to_string())
+    );
+}
+
+#[test]
 fn save_session_atomically_replaces_existing_file() {
     let env = setup_test_env();
     let mut session = Session::new("openai", "gpt-4", 128000);

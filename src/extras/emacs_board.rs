@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -187,6 +187,25 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
     let (provider, model, subagent_provider, subagent_model, subagent_models) =
         board_defaults(&cfg);
     let sessions: Vec<StoredBoardSession> = storage::read_session_records()?;
+    let session_directories = sessions
+        .iter()
+        .map(|session| (session.id.clone(), session.working_dir.clone()))
+        .collect::<HashMap<_, _>>();
+    let subagent_workspaces = sessions
+        .iter()
+        .filter(|session| {
+            owns_subagent_workspace(
+                session.parent_session_id.as_deref(),
+                session.subagent_access.as_deref(),
+            )
+        })
+        .map(|session| {
+            let dir = Path::new(session.working_dir.as_str());
+            git_session_info(dir)
+                .map(|git| git.worktree)
+                .unwrap_or_else(|| workspace_path(dir))
+        })
+        .collect::<HashSet<_>>();
     let mut git_directories = HashMap::new();
     let live = live_sessions_by_id()?;
     let attention = crate::extras::emacs_attention::list()?;
@@ -195,7 +214,13 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
     let mut loose: HashMap<PathBuf, Vec<BoardSession>> = HashMap::new();
 
     for session in sessions {
-        let dir = Path::new(session.working_dir.as_str());
+        let dir = session
+            .parent_session_id
+            .as_ref()
+            .and_then(|parent| session_directories.get(parent))
+            .map(String::as_str)
+            .unwrap_or(session.working_dir.as_str());
+        let dir = Path::new(dir);
         if !session_directory_exists(dir) {
             continue;
         }
@@ -233,7 +258,7 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
 
     let mut projects = projects
         .into_values()
-        .map(project_from_builder)
+        .map(|builder| project_from_builder(builder, &subagent_workspaces))
         .collect::<Vec<_>>();
     sort_projects(&mut projects);
     let mut loose_workspaces = loose
@@ -333,7 +358,14 @@ fn workspace_path(dir: &Path) -> PathBuf {
     canonicalize_existing(dir).unwrap_or_else(|| dir.to_path_buf())
 }
 
-fn project_from_builder(builder: ProjectBuilder) -> BoardProject {
+fn owns_subagent_workspace(parent_session_id: Option<&str>, access: Option<&str>) -> bool {
+    parent_session_id.is_some() && access == Some("write")
+}
+
+fn project_from_builder(
+    builder: ProjectBuilder,
+    hidden_worktrees: &HashSet<PathBuf>,
+) -> BoardProject {
     let mut worktrees = builder
         .anchors
         .first()
@@ -367,7 +399,9 @@ fn project_from_builder(builder: ProjectBuilder) -> BoardProject {
 
     let mut worktrees = worktrees
         .into_iter()
-        .filter(|worktree| worktree.path.exists())
+        .filter(|worktree| {
+            worktree.path.exists() && !hidden_worktrees.contains(&workspace_path(&worktree.path))
+        })
         .map(|worktree| {
             let mut sessions = builder
                 .sessions
@@ -983,6 +1017,13 @@ mod tests {
             pid: alive.then_some(123),
             socket: alive.then_some("/tmp/sock".to_string()),
         }
+    }
+
+    #[test]
+    fn only_write_subagents_own_hidden_workspaces() {
+        assert!(owns_subagent_workspace(Some("parent"), Some("write")));
+        assert!(!owns_subagent_workspace(Some("parent"), Some("read")));
+        assert!(!owns_subagent_workspace(None, Some("write")));
     }
 
     #[test]

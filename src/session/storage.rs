@@ -165,6 +165,32 @@ pub fn delete_session(id: &str) -> anyhow::Result<()> {
     if media.exists() {
         std::fs::remove_dir_all(media)?;
     }
+    delete_subagent_workspace(id)?;
+    Ok(())
+}
+
+fn delete_subagent_workspace(id: &str) -> anyhow::Result<()> {
+    if uuid::Uuid::parse_str(id).is_err() {
+        return Ok(());
+    }
+    let root = data_dir().join("subagents").join(id);
+    let workspace = root.join("workspace");
+    if workspace.exists() {
+        let removed = workspace.join(".git").exists()
+            && std::process::Command::new("git")
+                .arg("-C")
+                .arg(&workspace)
+                .args(["worktree", "remove", "--force"])
+                .arg(&workspace)
+                .status()
+                .is_ok_and(|status| status.success());
+        if !removed && workspace.exists() {
+            std::fs::remove_dir_all(&workspace)?;
+        }
+    }
+    if root.exists() {
+        std::fs::remove_dir_all(root)?;
+    }
     Ok(())
 }
 

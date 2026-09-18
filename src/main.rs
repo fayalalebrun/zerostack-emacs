@@ -161,6 +161,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(session_id) = &cli.emacs_delete_session {
+        session::storage::delete_session(session_id)?;
+        return Ok(());
+    }
+
     if cli.resume && cli.session.is_none() {
         print_sessions();
         return Ok(());

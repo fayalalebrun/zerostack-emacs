@@ -167,9 +167,13 @@ The older in-process read agent builder remains for narrow goal evaluation.
 ## Emacs
 
 Child sessions are persisted with their parent session ID and access mode. The
-Emacs board nests them under the parent session and shows write workspaces in
-the tree. During a task call, Emacs renders a clickable child-session link that
-lists the model, provider, thinking level, access mode, and timeout. Opening
+Emacs board nests them under the parent session in a list that starts collapsed;
+it does not expose isolated write workspaces as separate board rows. Opening a
+child session sets its workspace as `default-directory`, so normal `find-file`
+access stays scoped to that session. Deleting the child session also removes its
+Git worktree or copied workspace. During a task call, Emacs renders a clickable
+child-session link that lists the model, provider, thinking level, access mode,
+and timeout. Opening
 running connects to the child process's Unix socket and streams its real-time
 updates. The attachment is read-only so it cannot start a competing turn or
 mutate the child session. On completion, the child's model response is attached

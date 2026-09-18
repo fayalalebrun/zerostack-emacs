@@ -46,6 +46,9 @@ pub struct Cli {
     )]
     pub emacs_dismiss_attention: Option<String>,
 
+    #[arg(long = "emacs-delete-session", hide = true)]
+    pub emacs_delete_session: Option<String>,
+
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
 

@@ -399,7 +399,7 @@
 	:pid ,(and alive 123)
 	:socket ,(and alive (format "/tmp/%s.sock" id))))
 
-(ert-deftest zerostack-test-board-nests-subagent-session-and-workspace ()
+(ert-deftest zerostack-test-board-subagents-start-collapsed-without-workspace-row ()
   (zerostack-test--with-board-buffer
    (let* ((parent (zerostack-test--session-plist
                    "parent-session" "Parent session" "2026-06-14T00:00:00Z"))
@@ -422,10 +422,32 @@
      (zerostack-board--render snapshot)
      (let ((text (buffer-string)))
        (should (string-match-p "Parent session" text))
-       (should (string-match-p "write workspace /tmp/subagent-workspace" text))
+       (should (string-match-p "+ show 1 subagent" text))
+       (should-not (string-match-p "write workspace" text))
+       (should-not (string-match-p "Child session" text)))
+     (goto-char (point-min))
+     (search-forward "+ show 1 subagent")
+     (backward-char)
+     (zerostack-board-open-at-point)
+     (let ((text (buffer-string)))
        (should (string-match-p "Child session" text))
+       (should-not (string-match-p "write workspace" text))
        (should (< (string-match "Parent session" text)
                   (string-match "Child session" text)))))))
+
+(ert-deftest zerostack-test-opening-subagent-session-uses-its-workspace-directory ()
+  (let (opened-directory opened-worktree)
+    (cl-letf (((symbol-function 'zerostack)
+               (lambda (_args &optional _title _cwd worktree _session-id)
+                 (setq opened-directory default-directory
+                       opened-worktree worktree))))
+      (zerostack-board--open-session
+       '(:id "child-session"
+         :title "Child session"
+         :cwd "/tmp/subagent-workspace"
+         :worktree-path "/tmp/subagent-workspace")))
+    (should (equal opened-directory "/tmp/subagent-workspace/"))
+    (should (equal opened-worktree "/tmp/subagent-workspace"))))
 
 (ert-deftest zerostack-test-board-paginates-session-lists ()
   (zerostack-test--with-board-buffer
@@ -1030,7 +1052,7 @@
    (zerostack-test--expand-project "/repo/live")
    (zerostack-board--render zerostack-test--board-snapshot)
    (let ((process-environment (cons "ZS_DATA_DIR=/data" process-environment))
-         trashed git-calls refreshes)
+         trashed git-calls deleted-sessions refreshes)
      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
                ((symbol-function 'file-directory-p)
                 (lambda (path) (member path '("/repo/live-wt" "/repo/live"))))
@@ -1041,6 +1063,8 @@
                ((symbol-function 'zerostack-board--call-git)
                 (lambda (dir &rest args)
                   (push (cons dir args) git-calls)))
+               ((symbol-function 'zerostack-board--delete-session-id)
+                (lambda (id) (push id deleted-sessions)))
                ((symbol-function 'zerostack-board-refresh)
                 (lambda () (setq refreshes (1+ (or refreshes 0))))))
        (goto-char (point-min))
@@ -1056,7 +1080,8 @@
        (search-forward "Dead session")
        (beginning-of-line)
        (zerostack-board-trash-at-point)
-       (should (member "/data/sessions/dead-session.json" trashed))
+       (should (member "dead-session" deleted-sessions))
+       (should-not (member "/data/sessions/dead-session.json" trashed))
        (should (= refreshes 2))))))
 
 (ert-deftest zerostack-test-board-set-branch-description ()

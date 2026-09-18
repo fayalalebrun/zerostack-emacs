@@ -1187,20 +1187,41 @@ The root is resolved with Projectile when available, then `project.el', then
     (insert "\n")
     (zerostack-board--insert-subagent-children session worktree-path indent)))
 
-(defun zerostack-board--insert-subagent-children (session worktree-path indent)
-  "Insert child subagent sessions below SESSION."
-  (dolist (child (zerostack-board--subagent-children (plist-get session :id)))
-    (let* ((child-workspace (or (plist-get child :cwd) worktree-path))
-           (child-indent (concat indent "  "))
-           (access (or (plist-get child :subagent-access) "read")))
-      (when (and child-workspace
-                 (not (equal child-workspace worktree-path)))
+(defun zerostack-board--insert-subagent-children (session _worktree-path indent)
+  "Insert collapsed child subagent sessions below SESSION."
+  (let* ((children (zerostack-board--subagent-children (plist-get session :id)))
+         (key (format "subagents:%s" (plist-get session :id)))
+         (expanded (zerostack-board--session-limit-set-p key))
+         (limit (zerostack-board--session-limit key))
+         (shown (and expanded
+                     (cl-subseq children 0 (min limit (length children)))))
+         (child-indent (concat indent "  ")))
+    (if expanded
+        (progn
+          (dolist (child shown)
+            (let ((workspace (plist-get child :cwd)))
+              (zerostack-board--insert-session
+               child workspace nil child-indent)))
+          (when (> (length children) limit)
+            (zerostack-board--insert-row
+             (format "%s+ show 5 more subagents (%d remaining)"
+                     child-indent (- (length children) limit))
+             'zerostack-link-face
+             (list :type 'load-more
+                   :key key
+                   :total (length children)
+                   :shown limit))))
+      (when children
         (zerostack-board--insert-row
-         (format "%s%s workspace %s" child-indent access child-workspace)
-         'zerostack-board-worktree-face
-         (list :type 'workspace :path child-workspace)))
-      (zerostack-board--insert-session
-       child child-workspace nil (concat child-indent "  ")))))
+         (format "%s+ show %d subagent%s"
+                 child-indent
+                 (length children)
+                 (if (= (length children) 1) "" "s"))
+         'zerostack-link-face
+         (list :type 'load-more
+               :key key
+               :total (length children)
+               :shown 0))))))
 
 (defun zerostack-board--session-face (session &optional buffer)
   "Return board face for SESSION, considering live BUFFER state."
@@ -1569,11 +1590,11 @@ Return non-nil when DIRECTORY was newly added."
       ('session
        (if (plist-get item :attention)
            (zerostack-board--dismiss-attention item)
-         (let ((title (or (plist-get item :title) (plist-get item :id))))
-           (when (yes-or-no-p (format "Move session %s to trash? " title))
-             (zerostack-board--trash-session item)))))
-      (_
-       (message "Press x on a worktree or session to move it to trash")))))
+          (let ((title (or (plist-get item :title) (plist-get item :id))))
+            (when (yes-or-no-p (format "Delete session %s and its workspace? " title))
+              (zerostack-board--trash-session item)))))
+       (_
+        (message "Press x on a worktree to trash it or a session to delete it")))))
 
 (defun zerostack-board--stop-session (session)
   "Stop a live SESSION process, close its chat buffer, and refresh the board."
@@ -1726,14 +1747,23 @@ Return non-nil when DIRECTORY was newly added."
     (zerostack-board-refresh)))
 
 (defun zerostack-board--trash-session (session)
-  "Move SESSION's persisted JSON file to trash."
+  "Delete SESSION and its isolated subagent workspace."
   (let* ((id (plist-get session :id))
          (path (zerostack-board--session-file id)))
     (unless (and path (file-exists-p path))
       (user-error "Session file does not exist: %s" path))
-    (zerostack-board--trash-path path)
-    (message "Moved session to trash: %s" id)
+    (zerostack-board--delete-session-id id)
+    (message "Deleted session: %s" id)
     (zerostack-board-refresh)))
+
+(defun zerostack-board--delete-session-id (id)
+  "Delete session ID and its owned workspace through zerostack."
+  (with-temp-buffer
+    (let ((status (call-process zerostack-command nil t nil
+                                "--emacs-delete-session" id)))
+      (unless (zerop status)
+        (user-error "Failed to delete session %s: %s"
+                    id (string-trim (buffer-string)))))))
 
 (defun zerostack-board--safe-dir-name (value)
   "Return VALUE sanitized for use as a worktree directory name."
