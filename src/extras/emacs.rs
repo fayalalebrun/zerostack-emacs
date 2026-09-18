@@ -39,6 +39,7 @@ mod imp {
     const EVENT_BUFFER: usize = 512;
     const ARTIFACT_PREVIEW_CHARS: usize = 240;
     const STREAM_RENDER_INTERVAL: Duration = Duration::from_millis(33);
+    const SUBAGENT_FINALIZE_PROMPT: &str = "Time is nearly exhausted. Stop all new work now. Use this one final turn only to verify and save the work already completed, then return a concise final response stating what was completed, what was verified, and what remains. Do not start additional tasks or broad investigations.";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SessionMeta {
@@ -89,6 +90,7 @@ mod imp {
         mcp_manager: Mutex<Option<crate::extras::mcp::McpClientManager>>,
         events: broadcast::Sender<String>,
         mutable: Mutex<MutableState>,
+        read_only: bool,
         registry_dir: PathBuf,
         socket_path: PathBuf,
     }
@@ -115,6 +117,13 @@ mod imp {
         last_event_at: Option<String>,
         active_live_output: Option<ActiveLiveOutput>,
         active_response: Option<(u64, String)>,
+        last_error: Option<String>,
+        finalizing: bool,
+    }
+
+    enum SubagentInitialOutcome {
+        Done(Option<String>),
+        Finalize,
     }
 
     struct CompactionOutcome {
@@ -387,45 +396,19 @@ mod imp {
         sandbox: Sandbox,
         status_signals: Option<StatusSignals>,
     ) -> anyhow::Result<()> {
-        let initial_reasoning_enabled = session.reasoning_enabled;
-        let initial_reasoning_effort = session.reasoning_effort.clone();
-        let (registration, listener) = Registration::create(&session)?;
-        crate::startup_profile::mark("emacs:socket_ready");
-        let (events, _) = broadcast::channel(EVENT_BUFFER);
-        let server = Arc::new(Server {
-            client: Mutex::new(client),
+        let (server, registration, listener) = create_server(
+            client,
             cli,
             cfg,
-            context: Mutex::new(context),
-            session: Mutex::new(session),
+            context,
+            session,
             permission,
             ask_tx,
             sandbox,
             status_signals,
-            #[cfg(feature = "mcp")]
-            mcp_manager: Mutex::new(None),
-            events,
-            mutable: Mutex::new(MutableState {
-                seq: 0,
-                cols: DEFAULT_COLS,
-                line_count: 0,
-                running: false,
-                reasoning_enabled: initial_reasoning_enabled,
-                reasoning_effort: initial_reasoning_effort,
-                abort_handle: None,
-                turn: 0,
-                #[cfg(feature = "loop")]
-                loop_state: None,
-                next_artifact_id: 1,
-                next_permission_id: 1,
-                pending_permissions: HashMap::new(),
-                last_event_at: None,
-                active_live_output: None,
-                active_response: None,
-            }),
-            registry_dir: registration.dir.clone(),
-            socket_path: registration.socket_path.clone(),
-        });
+            false,
+        )?;
+        crate::startup_profile::mark("emacs:socket_ready");
         if let Some(permission) = &server.permission {
             let session = server.session.lock().await;
             permission
@@ -451,6 +434,193 @@ mod imp {
             let (stream, _) = listener.accept().await?;
             tokio::spawn(handle_client(server.clone(), stream));
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn serve_subagent(
+        client: AnyClient,
+        cli: Cli,
+        cfg: Config,
+        context: ContextFiles,
+        mut session: Session,
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+        ask_rx: Option<AskReceiver>,
+        sandbox: Sandbox,
+        status_signals: Option<StatusSignals>,
+        prompt: String,
+    ) -> anyhow::Result<()> {
+        session.name = format!("subagent: {}", prompt.chars().take(64).collect::<String>()).into();
+        let finalize_after = cli.subagent_finalize_at_unix_ms.map(|deadline| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            Duration::from_millis(deadline.saturating_sub(now.min(u64::MAX as u128) as u64))
+        });
+        let (server, _registration, listener) = create_server(
+            client,
+            cli,
+            cfg,
+            context,
+            session,
+            permission,
+            ask_tx,
+            sandbox,
+            status_signals,
+            true,
+        )?;
+        if let Some(permission) = &server.permission {
+            let session = server.session.lock().await;
+            permission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .allow_session_tool_outputs(&session.id);
+        }
+        if let Some(ask_rx) = ask_rx {
+            tokio::spawn(permission_pump(server.clone(), ask_rx));
+        }
+        let (live_output_tx, live_output_rx) = mpsc::channel::<BashLiveOutputRequest>(16);
+        set_bash_live_output_sender(Some(live_output_tx));
+        tokio::spawn(live_output_pump(server.clone(), live_output_rx));
+
+        let accept_server = server.clone();
+        let accept_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(handle_client(accept_server.clone(), stream));
+            }
+        });
+        {
+            let mut mutable = server.mutable.lock().await;
+            mutable.running = true;
+            mutable.turn = 1;
+        }
+        let response = run_subagent_prompt(server.clone(), prompt, finalize_after).await?;
+        accept_task.abort();
+        match response {
+            Some(response) => {
+                println!("{response}");
+                Ok(())
+            }
+            None => {
+                let error = server
+                    .mutable
+                    .lock()
+                    .await
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "subagent agent loop stopped before completion".to_string());
+                anyhow::bail!(error)
+            }
+        }
+    }
+
+    async fn run_subagent_prompt(
+        server: Arc<Server>,
+        prompt: String,
+        finalize_after: Option<Duration>,
+    ) -> anyhow::Result<Option<String>> {
+        let initial = match finalize_after {
+            Some(duration) => {
+                let initial = run_prompt_once(server.clone(), prompt, 1, false);
+                tokio::pin!(initial);
+                tokio::select! {
+                    result = &mut initial => SubagentInitialOutcome::Done(result.1),
+                    _ = tokio::time::sleep(duration) => SubagentInitialOutcome::Finalize,
+                }
+            }
+            None => {
+                let (_, response) = run_prompt_once(server.clone(), prompt, 1, false).await;
+                SubagentInitialOutcome::Done(response)
+            }
+        };
+        match initial {
+            SubagentInitialOutcome::Done(response) => Ok(response),
+            SubagentInitialOutcome::Finalize => {
+                interrupt_running_prompt(&server, false).await?;
+                server
+                    .broadcast_event(
+                        "subagent-finalizing",
+                        format!(
+                            " :message {}",
+                            sexp_quote("time limit 80% reached; finalizing")
+                        ),
+                    )
+                    .await;
+                {
+                    let mut mutable = server.mutable.lock().await;
+                    mutable.running = true;
+                    mutable.turn = 2;
+                    mutable.last_error = None;
+                    mutable.finalizing = true;
+                }
+                let (_, response) =
+                    run_prompt_once(server, SUBAGENT_FINALIZE_PROMPT.to_string(), 2, false).await;
+                Ok(response)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_server(
+        client: AnyClient,
+        cli: Cli,
+        cfg: Config,
+        context: ContextFiles,
+        session: Session,
+        permission: Option<PermCheck>,
+        ask_tx: Option<AskSender>,
+        sandbox: Sandbox,
+        status_signals: Option<StatusSignals>,
+        read_only: bool,
+    ) -> anyhow::Result<(Arc<Server>, Registration, UnixListener)> {
+        let initial_reasoning_enabled = session.reasoning_enabled;
+        let initial_reasoning_effort = session.reasoning_effort.clone();
+        let (registration, listener) = Registration::create(&session)?;
+        let socket_path = registration.socket_path.clone();
+        let registry_dir = registration.dir.clone();
+        let server = Arc::new(Server {
+            client: Mutex::new(client),
+            cli,
+            cfg,
+            context: Mutex::new(context),
+            session: Mutex::new(session),
+            permission,
+            ask_tx,
+            sandbox,
+            status_signals,
+            #[cfg(feature = "mcp")]
+            mcp_manager: Mutex::new(None),
+            events: broadcast::channel(EVENT_BUFFER).0,
+            mutable: Mutex::new(MutableState {
+                seq: 0,
+                cols: DEFAULT_COLS,
+                line_count: 0,
+                running: false,
+                reasoning_enabled: initial_reasoning_enabled,
+                reasoning_effort: initial_reasoning_effort,
+                abort_handle: None,
+                turn: 0,
+                #[cfg(feature = "loop")]
+                loop_state: None,
+                next_artifact_id: 1,
+                next_permission_id: 1,
+                pending_permissions: HashMap::new(),
+                last_event_at: None,
+                active_live_output: None,
+                active_response: None,
+                last_error: None,
+                finalizing: false,
+            }),
+            read_only,
+            registry_dir,
+            socket_path,
+        });
+        Ok((server, registration, listener))
+    }
+
+    pub fn session_socket_path(session_id: &str) -> PathBuf {
+        sessions_root().join(session_id).join("sock")
     }
 
     pub fn print_sessions() -> anyhow::Result<()> {
@@ -799,6 +969,27 @@ mod imp {
     }
 
     async fn handle_command(server: Arc<Server>, cmd: Command, out: &mpsc::Sender<String>) {
+        if server.read_only
+            && !matches!(
+                cmd.name.as_str(),
+                "hello"
+                    | "attach"
+                    | "render"
+                    | "set-view"
+                    | "list-sessions"
+                    | "dismiss-attention"
+                    | "status"
+                    | "timing"
+            )
+        {
+            send_error(
+                out,
+                request_arg(&cmd),
+                "running subagent attachments are read-only",
+            )
+            .await;
+            return;
+        }
         let result = match cmd.name.as_str() {
             "hello" => handle_hello(&server, &cmd, out).await,
             "attach" | "render" => handle_attach(&server, &cmd, out).await,
@@ -816,6 +1007,7 @@ mod imp {
             "subagents" => handle_subagents(&server, &cmd, out).await,
             "subagent-provider" => handle_subagent_provider(&server, &cmd, out).await,
             "subagent-model" => handle_subagent_model(&server, &cmd, out).await,
+            "subagent-models" => handle_subagent_models(&server, &cmd, out).await,
             "list-tools" | "tools" => handle_list_tools(&server, &cmd, out).await,
             "goal" => handle_goal(&server, &cmd, out).await,
             "mcp" => handle_mcp(&server, &cmd, out).await,
@@ -1535,6 +1727,12 @@ mod imp {
 
         ensure_idle_for_switch(server, "subagent provider").await?;
         subagents::set_client_and_model(client, provider.clone(), model.clone());
+        subagents::set_model_options(vec![subagents::ModelOption {
+            name: model.clone(),
+            provider: provider.clone(),
+            model: model.clone(),
+        }]);
+        subagents::mark_runtime_model_override();
 
         let message = format!("switched subagent provider: {provider} (model: {model})");
         send_ok(
@@ -1593,6 +1791,12 @@ mod imp {
 
         ensure_idle_for_switch(server, "subagent model").await?;
         subagents::set_client_and_model(client, provider.clone(), model.clone());
+        subagents::set_model_options(vec![subagents::ModelOption {
+            name: model.clone(),
+            provider: provider.clone(),
+            model: model.clone(),
+        }]);
+        subagents::mark_runtime_model_override();
 
         let message = format!("switched subagent model: {model}");
         send_ok(
@@ -1607,6 +1811,69 @@ mod imp {
         )
         .await;
         Ok(())
+    }
+
+    #[cfg(feature = "subagents")]
+    async fn handle_subagent_models(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        use crate::extras::subagents;
+
+        ensure_idle_for_switch(server, "subagent models").await?;
+        let models = string_list_arg(cmd, "models").context("subagent-models requires :models")?;
+        let fallback_provider = subagents::current_provider_model()
+            .map(|(provider, _)| provider)
+            .unwrap_or_else(|| config::commands::default_provider_name(&server.cfg));
+        let options =
+            subagents::resolve_named_model_options(&server.cfg, &fallback_provider, &models);
+        let default = options
+            .first()
+            .context("at least one subagent model is required")?;
+        let client = crate::provider::create_client(
+            &default.provider,
+            server.cli.api_key.as_deref(),
+            &server.cfg.custom_providers_map(),
+            server.cfg.api_keys.as_ref(),
+            None,
+        )?;
+        let provider = default.provider.clone();
+        let model = default.model.clone();
+        ensure_idle_for_switch(server, "subagent models").await?;
+        subagents::set_client_and_model(client, provider.clone(), model.clone());
+        subagents::set_model_options(options);
+        subagents::mark_runtime_model_override();
+        let model_list = format!(
+            "({})",
+            models
+                .iter()
+                .map(|model| sexp_quote(model))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :subagent-provider {} :subagent-model {} :subagent-models {} :message {}",
+                sexp_quote(&provider),
+                sexp_quote(&model),
+                model_list,
+                sexp_quote(&format!("permitted subagent models: {}", models.join(", "))),
+            ),
+        )
+        .await;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "subagents"))]
+    async fn handle_subagent_models(
+        _server: &Arc<Server>,
+        _cmd: &Command,
+        _out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("subagents support not enabled")
     }
 
     #[cfg(not(feature = "subagents"))]
@@ -1679,7 +1946,10 @@ mod imp {
     ) {
         use crate::extras::subagents;
 
-        if server.cfg.subagent_model.is_some() {
+        if server.cfg.subagent_model.is_some()
+            || server.cfg.subagent_models.is_some()
+            || !subagents::follows_main_model()
+        {
             return;
         }
 
@@ -1697,7 +1967,16 @@ mod imp {
             .to_string();
 
         if sub_provider == client.provider_name() {
-            subagents::set_client_and_model(client.clone(), sub_provider, sub_model);
+            subagents::set_client_and_model(
+                client.clone(),
+                sub_provider.clone(),
+                sub_model.clone(),
+            );
+            subagents::set_model_options(vec![subagents::ModelOption {
+                name: sub_model.clone(),
+                provider: sub_provider,
+                model: sub_model,
+            }]);
             return;
         }
 
@@ -1708,7 +1987,14 @@ mod imp {
             server.cfg.api_keys.as_ref(),
             None,
         ) {
-            Ok(client) => subagents::set_client_and_model(client, sub_provider, sub_model),
+            Ok(client) => {
+                subagents::set_client_and_model(client, sub_provider.clone(), sub_model.clone());
+                subagents::set_model_options(vec![subagents::ModelOption {
+                    name: sub_model.clone(),
+                    provider: sub_provider,
+                    model: sub_model,
+                }]);
+            }
             Err(e) => tracing::warn!(
                 "Could not propagate Emacs provider/model switch to subagent provider '{}' ({}); keeping previous subagent config",
                 sub_provider,
@@ -1988,6 +2274,7 @@ mod imp {
                 anyhow::bail!("loop is active; stop it before sending a one-off prompt");
             }
             mutable.running = true;
+            mutable.last_error = None;
             mutable.turn = mutable.turn.saturating_add(1);
             mutable.turn
         };
@@ -2489,26 +2776,25 @@ mod imp {
         Ok(true)
     }
 
-    async fn handle_abort(
+    async fn interrupt_running_prompt(
         server: &Arc<Server>,
-        cmd: &Command,
-        out: &mpsc::Sender<String>,
-    ) -> anyhow::Result<()> {
-        stop_loop_state(server, false).await;
-        let (aborted, partial_response) = {
+        broadcast_abort: bool,
+    ) -> anyhow::Result<bool> {
+        let (aborted, abort_handle, partial_response) = {
             let mut mutable = server.mutable.lock().await;
             let was_running = mutable.running;
-            if let Some(handle) = mutable.abort_handle.take() {
-                handle.abort();
-            }
+            let abort_handle = mutable.abort_handle.take();
             mutable.running = false;
             let partial_response = mutable
                 .active_response
                 .take()
                 .map(|(_, response)| response)
                 .unwrap_or_default();
-            (was_running, partial_response)
+            (was_running, abort_handle, partial_response)
         };
+        if let Some(handle) = abort_handle {
+            handle.abort();
+        }
         server.sandbox.kill_active();
         if aborted {
             let _ = persist_interrupted_live_output(server).await?;
@@ -2516,8 +2802,20 @@ mod imp {
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
-            server.broadcast_event("aborted", "".to_string()).await;
+            if broadcast_abort {
+                server.broadcast_event("aborted", "".to_string()).await;
+            }
         }
+        Ok(aborted)
+    }
+
+    async fn handle_abort(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        stop_loop_state(server, false).await;
+        let aborted = interrupt_running_prompt(server, true).await?;
         send_ok(
             out,
             request_arg(cmd),
@@ -2754,7 +3052,9 @@ mod imp {
         let response = match run_prompt_inner(server.clone(), text, turn).await {
             Ok(response) => response,
             Err(e) => {
-                let message = format!("error: {}", sanitize_output(&e.to_string()));
+                let error = e.to_string();
+                server.mutable.lock().await.last_error = Some(error.clone());
+                let message = format!("error: {}", sanitize_output(&error));
                 server
                     .append_lines(
                         "error-render",
@@ -2763,7 +3063,7 @@ mod imp {
                     )
                     .await;
                 server
-                    .broadcast_event("error", format!(" :message {}", sexp_quote(&e.to_string())))
+                    .broadcast_event("error", format!(" :message {}", sexp_quote(&error)))
                     .await;
                 None
             }
@@ -2928,7 +3228,14 @@ mod imp {
             };
             (temperature, extra_body, reasoning_effort)
         };
-        let reasoning_enabled = server.mutable.lock().await.reasoning_enabled;
+        let (reasoning_enabled, finalizing) = {
+            let mutable = server.mutable.lock().await;
+            (mutable.reasoning_enabled, mutable.finalizing)
+        };
+        let mut turn_cli = server.cli.clone();
+        if finalizing {
+            turn_cli.no_tools = true;
+        }
         let context = server.context.lock().await;
         let agent = {
             #[cfg(feature = "mcp")]
@@ -2948,7 +3255,7 @@ mod imp {
 
             build_agent(
                 model,
-                &server.cli,
+                &turn_cli,
                 &server.cfg,
                 &context,
                 server.permission.clone(),
@@ -3136,28 +3443,30 @@ mod imp {
                     response_buf.clear();
                     response_start_line = None;
                     stream_render.reset(Instant::now());
-                    server
-                        .append_lines(
-                            "tool-render",
-                            turn,
-                            vec![WireLine::new(
-                                format!("◈ {}", sanitize_output(&summary)),
-                                "zs-tool",
-                            )],
-                        )
-                        .await;
-                    server
-                        .broadcast_event(
-                            "tool-call",
-                            format!(
-                                " :turn {} :name {} :summary {} :args {}",
+                    if name != "task" {
+                        server
+                            .append_lines(
+                                "tool-render",
                                 turn,
-                                sexp_quote(&name),
-                                sexp_quote(&summary),
-                                sexp_quote(&args.to_string()),
-                            ),
-                        )
-                        .await;
+                                vec![WireLine::new(
+                                    format!("◈ {}", sanitize_output(&summary)),
+                                    "zs-tool",
+                                )],
+                            )
+                            .await;
+                        server
+                            .broadcast_event(
+                                "tool-call",
+                                format!(
+                                    " :turn {} :name {} :summary {} :args {}",
+                                    turn,
+                                    sexp_quote(&name),
+                                    sexp_quote(&summary),
+                                    sexp_quote(&args.to_string()),
+                                ),
+                            )
+                            .await;
+                    }
                 }
                 AgentEvent::SubagentToolCall { name, args } => {
                     let summary = format_tool_call_summary(&name, &args);
@@ -3168,16 +3477,15 @@ mod imp {
                             crate::session::storage::save_session(&session)?;
                         }
                     }
-                    server
-                        .append_lines(
-                            "tool-render",
-                            turn,
+                    let lines = subagent_session_link(&name, &args)
+                        .map(|line| vec![line])
+                        .unwrap_or_else(|| {
                             vec![WireLine::new(
                                 format!("⌥ {}", sanitize_output(&summary)),
                                 "zs-tool",
-                            )],
-                        )
-                        .await;
+                            )]
+                        });
+                    server.append_lines("tool-render", turn, lines).await;
                     server
                         .broadcast_event(
                             "subagent-tool-call",
@@ -3251,6 +3559,47 @@ mod imp {
                         assistant_index = session.messages.len();
                         content
                     };
+                    if name == "task" {
+                        let response = task_response_from_output(&output);
+                        let safe_response = sanitize_output(response);
+                        let artifact = match server
+                            .create_artifact(
+                                turn,
+                                "subagent-response",
+                                "subagent-response",
+                                &safe_response,
+                            )
+                            .await
+                        {
+                            Ok(artifact) => Some(artifact),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "failed to write Emacs subagent response artifact: {e}"
+                                );
+                                None
+                            }
+                        };
+                        let lines = render_subagent_response_lines(
+                            &safe_response,
+                            artifact.clone(),
+                            duration_ms,
+                        );
+                        server.append_lines("tool-render", turn, lines).await;
+                        server
+                            .broadcast_event(
+                                "tool-result",
+                                format!(
+                                    " :turn {} :name {} :chars {} :preview {}{}",
+                                    turn,
+                                    sexp_quote(&name),
+                                    safe_response.chars().count(),
+                                    sexp_quote(&preview_text(&safe_response)),
+                                    artifact_field(artifact.as_ref()),
+                                ),
+                            )
+                            .await;
+                        continue;
+                    }
                     let artifact = match server
                         .create_artifact(turn, "tool-output", &name, &safe)
                         .await
@@ -3620,6 +3969,7 @@ mod imp {
                 AgentEvent::Error { message, reasoning } => {
                     {
                         let mut mutable = server.mutable.lock().await;
+                        mutable.last_error = Some(message.to_string());
                         if mutable
                             .active_response
                             .as_ref()
@@ -3883,8 +4233,22 @@ mod imp {
 
     async fn render_session_lines(server: &Arc<Server>, cols: usize) -> Vec<WireLine> {
         let session = server.session.lock().await.clone();
+        let assistant_index = session.messages.len();
         let context = server.context.lock().await.clone();
-        render_session_lines_for(&session, &server.cli, &server.cfg, &context, cols, None).await
+        let mut lines =
+            render_session_lines_for(&session, &server.cli, &server.cfg, &context, cols, None)
+                .await;
+        let active_response = server.mutable.lock().await.active_response.clone();
+        if let Some((_, response)) = active_response
+            && !response.is_empty()
+        {
+            lines.extend(with_source_lines(
+                render_assistant_lines(&response, cols, false),
+                assistant_index,
+                MessageRole::Assistant,
+            ));
+        }
+        lines
     }
 
     async fn render_session_lines_for(
@@ -3925,6 +4289,19 @@ mod imp {
             out.push(blank_line());
         }
         for (message_index, msg) in session.messages.iter().enumerate() {
+            if (msg.role == MessageRole::ToolCall
+                && msg
+                    .tool_call
+                    .as_ref()
+                    .is_some_and(|call| call.name == "task"))
+                || (msg.role == MessageRole::ToolResult
+                    && msg
+                        .tool_result
+                        .as_ref()
+                        .is_some_and(|result| result.name == "task"))
+            {
+                continue;
+            }
             match msg.role {
                 MessageRole::ToolResult => {
                     out.extend(
@@ -4006,7 +4383,17 @@ mod imp {
             MessageRole::System => render_compaction_summary_lines(content),
             MessageRole::ToolCall => render_prefixed_lines("◈", content, "zs-tool"),
             MessageRole::ToolResult => render_tool_result_lines(None, content, None, None, &[], 0),
-            MessageRole::SubagentToolCall => render_prefixed_lines("⌥", content, "zs-tool"),
+            MessageRole::SubagentToolCall => {
+                let lines = markdown_to_wire_lines(content, cols);
+                if lines
+                    .iter()
+                    .any(|line| line.spans.iter().any(|span| span.url.is_some()))
+                {
+                    lines
+                } else {
+                    render_prefixed_lines("⌥", content, "zs-tool")
+                }
+            }
         }
     }
 
@@ -4051,6 +4438,96 @@ mod imp {
         out.push(WireLine::new("───────────────────────", "zs-muted"));
         out.push(blank_line());
         out
+    }
+
+    fn subagent_session_link(name: &str, args: &serde_json::Value) -> Option<WireLine> {
+        if name != "session" {
+            return None;
+        }
+        let id = args.get("session_id")?.as_str()?;
+        let workspace = args.get("workspace")?.as_str()?;
+        let socket = args.get("socket").and_then(serde_json::Value::as_str);
+        let model = args
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let resolved_model = args
+            .get("resolved_model")
+            .and_then(serde_json::Value::as_str)
+            .filter(|resolved| *resolved != model)
+            .map(|resolved| format!("{model}->{resolved}"))
+            .unwrap_or_else(|| model.to_string());
+        let provider = args
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let reasoning = args
+            .get("reasoning")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let access = args
+            .get("access")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("read");
+        let timeout = args
+            .get("timeout")
+            .and_then(serde_json::Value::as_u64)
+            .map(|seconds| format!(", timeout={seconds}s"))
+            .unwrap_or_default();
+        let label = format!(
+            "subagent session {} [model={}, provider={}, thinking={}, access={}{}]",
+            id.get(..8).unwrap_or(id),
+            resolved_model,
+            provider,
+            reasoning,
+            access,
+            timeout,
+        );
+        let mut url = format!("zerostack-session:{id}?workspace={workspace}");
+        if let Some(socket) = socket {
+            url.push_str("&socket=");
+            url.push_str(socket);
+        }
+        Some(WireLine::with_spans(
+            vec![WireSpan {
+                text: label,
+                face: "zs-link",
+                url: Some(url),
+                image: None,
+            }],
+            "zs-tool",
+        ))
+    }
+
+    fn task_response_from_output(output: &str) -> &str {
+        output
+            .rsplit_once("\n\nSession: ")
+            .map(|(response, _)| response)
+            .unwrap_or(output)
+            .trim()
+    }
+
+    fn render_subagent_response_lines(
+        response: &str,
+        artifact: Option<ArtifactInfo>,
+        duration_ms: u64,
+    ) -> Vec<WireLine> {
+        let duration = tool_duration_suffix(duration_ms);
+        match artifact {
+            Some(artifact) => vec![
+                WireLine::with_artifact(
+                    format!(
+                        "  subagent response ({}){}",
+                        format_bytes(artifact.bytes),
+                        duration,
+                    ),
+                    "zs-link",
+                    artifact,
+                ),
+                blank_line(),
+            ],
+            None => render_prefixed_lines("◈", response, "zs-muted"),
+        }
     }
 
     fn render_prefixed_lines(prefix: &str, content: &str, face: &'static str) -> Vec<WireLine> {
@@ -5601,6 +6078,19 @@ mod imp {
         }
     }
 
+    fn string_list_arg(cmd: &Command, key: &str) -> Option<Vec<String>> {
+        match cmd.args.get(key)? {
+            Sexp::List(values) => values
+                .iter()
+                .map(|value| match value {
+                    Sexp::Str(value) | Sexp::Atom(value) if value != "nil" => Some(value.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+
     fn atom_arg(cmd: &Command, key: &str) -> Option<String> {
         match cmd.args.get(key)? {
             Sexp::Atom(s) if s != "nil" => Some(s.clone()),
@@ -6135,7 +6625,13 @@ mod imp {
             let mut session = Session::new("openai", "gpt", 1000);
             session.add_tool_call("bash", &serde_json::json!({ "command": "echo hi" }));
             session.add_tool_result("bash", "hi\n");
-            session.add_subagent_tool_call("task", &serde_json::json!({ "prompts": ["find x"] }));
+            session.add_subagent_tool_call(
+                "session",
+                &serde_json::json!({
+                    "session_id": "12345678-1234-1234-1234-123456789abc",
+                    "workspace": "/tmp/subagent workspace"
+                }),
+            );
             let cli = Cli::default();
             let cfg = Config::default();
             let context = crate::context::load(true);
@@ -6148,7 +6644,8 @@ mod imp {
             assert!(encoded.contains(":role tool-result"));
             assert!(encoded.contains("hi"));
             assert!(encoded.contains(":role subagent-tool-call"));
-            assert!(encoded.contains("⌥"));
+            assert!(encoded.contains("zerostack-session:12345678-1234-1234-1234-123456789abc"));
+            assert!(encoded.contains(":url"));
         }
 
         #[test]
@@ -6262,6 +6759,8 @@ mod imp {
                 last_event_at: None,
                 active_live_output: None,
                 active_response: None,
+                last_error: None,
+                finalizing: false,
             };
 
             assert!(!should_report_agent_ended(&mutable, 1));
@@ -6331,9 +6830,19 @@ mod imp {
                 Some("deepseek/deepseek-chat-v3.1")
             );
 
-            let thinking = parse_command("(thinking :request 9 :level off)").unwrap();
+            let subagent_models = parse_command(
+                "(subagent-models :request 9 :models (\"deepseek-v4-pro\" \"gpt-5.5\"))",
+            )
+            .unwrap();
+            assert_eq!(subagent_models.name, "subagent-models");
+            assert_eq!(
+                string_list_arg(&subagent_models, "models"),
+                Some(vec!["deepseek-v4-pro".to_string(), "gpt-5.5".to_string()])
+            );
+
+            let thinking = parse_command("(thinking :request 10 :level off)").unwrap();
             assert_eq!(thinking.name, "thinking");
-            assert_eq!(request_arg(&thinking).as_deref(), Some("9"));
+            assert_eq!(request_arg(&thinking).as_deref(), Some("10"));
             assert_eq!(atom_arg(&thinking, "level").as_deref(), Some("off"));
         }
 
@@ -6930,8 +7439,237 @@ mod imp {
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
 
+        #[test]
+        fn task_result_extracts_and_renders_response_artifact() {
+            let output = "Implemented the fix.\n\nSession: child-id\nWorkspace: /tmp/work\nTranscript: /tmp/session.json\nSocket: /tmp/sock\n";
+            assert_eq!(task_response_from_output(output), "Implemented the fix.");
+
+            let artifact = ArtifactInfo {
+                kind: "subagent-response",
+                path: PathBuf::from("/tmp/subagent-response.txt"),
+                mime: "text/plain; charset=utf-8",
+                bytes: 20,
+                preview: "Implemented the fix.".to_string(),
+            };
+            let lines = render_subagent_response_lines("Implemented the fix.", Some(artifact), 42);
+            assert_eq!(lines[0].text, "  subagent response (20 B) [42ms]");
+            assert_eq!(
+                lines[0].artifact.as_ref().map(|item| item.kind),
+                Some("subagent-response")
+            );
+        }
+
+        #[test]
+        fn task_result_without_metadata_keeps_full_response() {
+            assert_eq!(
+                task_response_from_output("plain response"),
+                "plain response"
+            );
+        }
+
+        #[test]
+        fn subagent_link_contains_live_socket() {
+            let line = subagent_session_link(
+                "session",
+                &serde_json::json!({
+                    "session_id": "child-id",
+                    "workspace": "/tmp/workspace",
+                    "socket": "/tmp/runtime/child-id/sock",
+                    "model": "fast",
+                    "provider": "openrouter",
+                    "resolved_model": "vendor/fast",
+                    "reasoning": "high",
+                    "access": "write",
+                    "timeout": 120,
+                }),
+            )
+            .unwrap();
+            assert_eq!(
+                line.spans[0].url.as_deref(),
+                Some(
+                    "zerostack-session:child-id?workspace=/tmp/workspace&socket=/tmp/runtime/child-id/sock"
+                )
+            );
+            assert_eq!(
+                line.text,
+                "subagent session child-id [model=fast->vendor/fast, provider=openrouter, thinking=high, access=write, timeout=120s]"
+            );
+        }
+
+        #[tokio::test]
+        async fn attaching_mid_turn_includes_existing_streamed_response() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server_mode(prompts, true);
+            drop(listener);
+            server
+                .session
+                .lock()
+                .await
+                .add_message(MessageRole::User, "question");
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.active_response = Some((1, "already streamed".to_string()));
+            }
+            let (out_tx, mut out_rx) = mpsc::channel(4);
+            let cmd = parse_command("(attach :request 1 :cols 80)").unwrap();
+
+            handle_attach(&server, &cmd, &out_tx).await.unwrap();
+
+            assert!(out_rx.recv().await.unwrap().contains("already streamed"));
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn live_subagent_socket_streams_same_process_turn() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server_mode(prompts, true);
+            let socket_path = registration.socket_path.clone();
+            let accept_server = server.clone();
+            let accept_task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                handle_client(accept_server, stream).await;
+            });
+            let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader).lines();
+            let ready = read_until(&mut reader, "ready", Duration::from_secs(1)).await;
+            assert!(ready.contains(&format!(":pid {}", std::process::id())));
+            writer
+                .write_all(b"(attach :request 1 :cols 80)\n")
+                .await
+                .unwrap();
+            let _ = read_until(&mut reader, "session-render", Duration::from_secs(1)).await;
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.turn = 1;
+            }
+            let prompt_server = server.clone();
+            let prompt_task = tokio::spawn(async move {
+                run_prompt_once(prompt_server, "live".to_string(), 1, false).await
+            });
+
+            let done = read_until(&mut reader, ":type done", Duration::from_secs(1)).await;
+            assert!(done.contains(":turn 1"));
+            assert_eq!(
+                prompt_task.await.unwrap().1.as_deref(),
+                Some("received live")
+            );
+            drop(writer);
+            accept_task.abort();
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn subagent_force_finalizes_at_soft_deadline() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server_mode(prompts.clone(), true);
+            drop(listener);
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.turn = 1;
+            }
+
+            let response = run_subagent_prompt(
+                server.clone(),
+                "sleep".to_string(),
+                Some(Duration::from_millis(10)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                response,
+                Some(format!("received {SUBAGENT_FINALIZE_PROMPT}"))
+            );
+            assert_eq!(
+                prompts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+                &["sleep".to_string(), SUBAGENT_FINALIZE_PROMPT.to_string()]
+            );
+            let session = server.session.lock().await;
+            assert!(
+                session
+                    .messages
+                    .iter()
+                    .any(|message| message.content == SUBAGENT_FINALIZE_PROMPT)
+            );
+            drop(session);
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn subagent_does_not_finalize_when_work_finishes_early() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server_mode(prompts.clone(), true);
+            drop(listener);
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.turn = 1;
+            }
+
+            let response =
+                run_subagent_prompt(server, "quick".to_string(), Some(Duration::from_secs(1)))
+                    .await
+                    .unwrap();
+
+            assert_eq!(response.as_deref(), Some("received quick"));
+            assert_eq!(
+                prompts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+                &["quick".to_string()]
+            );
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn live_subagent_preserves_provider_error() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server_mode(prompts, true);
+            drop(listener);
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.turn = 1;
+            }
+
+            let (_, response) =
+                run_prompt_once(server.clone(), "error".to_string(), 1, false).await;
+
+            assert!(response.is_none());
+            assert_eq!(
+                server.mutable.lock().await.last_error.as_deref(),
+                Some("test provider error")
+            );
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn read_only_server_rejects_prompt() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server_mode(prompts.clone(), true);
+            drop(listener);
+            let (out_tx, mut out_rx) = mpsc::channel(4);
+            let cmd = parse_command("(prompt :request 7 :text \"no\")").unwrap();
+
+            handle_command(server, cmd, &out_tx).await;
+
+            let response = out_rx.recv().await.unwrap();
+            assert!(response.contains("read-only"));
+            assert!(prompts.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
         fn test_server(
             prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        ) -> (Arc<Server>, Registration, UnixListener) {
+            test_server_mode(prompts, false)
+        }
+
+        fn test_server_mode(
+            prompts: Arc<std::sync::Mutex<Vec<String>>>,
+            read_only: bool,
         ) -> (Arc<Server>, Registration, UnixListener) {
             let client = AnyClient::Test(crate::provider::TestClient { prompts });
             let session = Session::new("test", "test", 0);
@@ -6973,7 +7711,10 @@ mod imp {
                     last_event_at: None,
                     active_live_output: None,
                     active_response: None,
+                    last_error: None,
+                    finalizing: false,
                 }),
+                read_only,
                 registry_dir: registration.dir.clone(),
                 socket_path,
             });
@@ -7038,7 +7779,7 @@ mod imp {
 }
 
 #[cfg(unix)]
-pub use imp::{print_sessions, serve};
+pub use imp::{print_sessions, serve, serve_subagent, session_socket_path};
 
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
@@ -7055,6 +7796,29 @@ pub async fn serve(
     _status_signals: Option<crate::extras::status_signals::StatusSignals>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("native Emacs protocol requires Unix sockets")
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_subagent(
+    _client: crate::provider::AnyClient,
+    _cli: crate::cli::Cli,
+    _cfg: crate::config::Config,
+    _context: crate::context::ContextFiles,
+    _session: crate::session::Session,
+    _permission: Option<crate::permission::checker::PermCheck>,
+    _ask_tx: Option<crate::permission::ask::AskSender>,
+    _ask_rx: Option<crate::permission::ask::AskReceiver>,
+    _sandbox: crate::sandbox::Sandbox,
+    _status_signals: Option<crate::extras::status_signals::StatusSignals>,
+    _prompt: String,
+) -> anyhow::Result<()> {
+    anyhow::bail!("live subagent attachment requires Unix sockets")
+}
+
+#[cfg(not(unix))]
+pub fn session_socket_path(_session_id: &str) -> std::path::PathBuf {
+    std::path::PathBuf::new()
 }
 
 #[cfg(not(unix))]

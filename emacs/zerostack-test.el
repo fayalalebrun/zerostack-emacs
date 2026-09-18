@@ -99,6 +99,7 @@
     :model "gpt-5.5"
     :subagent-provider "openrouter"
     :subagent-model "deepseek/deepseek-chat-v3.1"
+    :subagent-models ("deepseek-v4-pro" "gpt-5.5")
     :subagents-enabled t
     :projects
     ((:name "live-repo"
@@ -397,6 +398,34 @@
 	:alive ,alive
 	:pid ,(and alive 123)
 	:socket ,(and alive (format "/tmp/%s.sock" id))))
+
+(ert-deftest zerostack-test-board-nests-subagent-session-and-workspace ()
+  (zerostack-test--with-board-buffer
+   (let* ((parent (zerostack-test--session-plist
+                   "parent-session" "Parent session" "2026-06-14T00:00:00Z"))
+          (child (zerostack-test--session-plist
+                  "child-session" "Child session" "2026-06-14T00:01:00Z"))
+          (child (plist-put child :parent-session-id "parent-session"))
+          (child (plist-put child :subagent-access "write"))
+          (child (plist-put child :cwd "/tmp/subagent-workspace"))
+          (snapshot `(zerostack-board
+                      :version 1
+                      :projects
+                      ((:name "repo" :path "/repo/many" :repo "/repo/many/.git"
+                              :alive nil :updated-at "2026-06-14T00:01:00Z"
+                              :worktrees
+                              ((:path "/repo/many" :branch "main" :description ""
+                                      :alive nil :sessions (,child ,parent)))))
+                      :loose-workspaces nil)))
+     (zerostack-test--expand-project "/repo/many")
+     (setq-local zerostack-board--snapshot snapshot)
+     (zerostack-board--render snapshot)
+     (let ((text (buffer-string)))
+       (should (string-match-p "Parent session" text))
+       (should (string-match-p "write workspace /tmp/subagent-workspace" text))
+       (should (string-match-p "Child session" text))
+       (should (< (string-match "Parent session" text)
+                  (string-match "Child session" text)))))))
 
 (ert-deftest zerostack-test-board-paginates-session-lists ()
   (zerostack-test--with-board-buffer
@@ -1084,12 +1113,14 @@
 
 (ert-deftest zerostack-test-board-default-provider-model-actions ()
   (zerostack-test--with-board-buffer
-   (let ((choices '("openai-codex" "gpt-5.5" "openrouter" "deepseek/deepseek-chat-v3.1"))
+   (let ((choices '("openai-codex" "gpt-5.5" "openrouter"))
          calls
          (refreshes 0))
      (setq-local zerostack-board--snapshot zerostack-test--board-snapshot)
      (cl-letf (((symbol-function 'completing-read)
                 (lambda (&rest _) (pop choices)))
+               ((symbol-function 'zerostack--read-subagent-models)
+                (lambda (&rest _) '("deepseek-v4-pro" "gpt-5.5")))
                ((symbol-function 'zerostack-board-refresh)
                 (lambda () (cl-incf refreshes))))
        (let ((zerostack--config-command-function
@@ -1103,12 +1134,12 @@
                   ('("set-model" "gpt-5.5") "provider openai-codex\nmodel gpt-5.5\n")
                   ('("set-subagent-provider" "openrouter") "subagent_provider openrouter\nsubagent_model deepseek/deepseek-chat-v3.1\n")
                   ('("set-subagents" "false") "subagents_enabled false\n")
-                  ('("set-subagent-model" "deepseek/deepseek-chat-v3.1") "subagent_provider openrouter\nsubagent_model deepseek/deepseek-chat-v3.1\n")
+                  ('("set-subagent-models" "deepseek-v4-pro" "gpt-5.5") "subagent_models deepseek-v4-pro,gpt-5.5\n")
                   (_ (error "unexpected config args: %S" args))))))
          (zerostack-board-set-default-provider)
          (zerostack-board-set-default-model)
          (zerostack-board-set-default-subagent-provider)
-         (zerostack-board-set-default-subagent-model)
+         (zerostack-board-set-default-subagent-models)
          (zerostack-board-set-default-subagents)))
      (should (equal (nreverse calls)
                     '(("providers")
@@ -1117,8 +1148,7 @@
                       ("set-model" "gpt-5.5")
                       ("providers")
                       ("set-subagent-provider" "openrouter")
-                      ("models" "openrouter")
-                      ("set-subagent-model" "deepseek/deepseek-chat-v3.1")
+                      ("set-subagent-models" "deepseek-v4-pro" "gpt-5.5")
                       ("set-subagents" "false"))))
      (should (= refreshes 5)))))
 
@@ -1133,7 +1163,7 @@
    (should (search-forward "Subagents: " nil t))
    (should (search-forward "on" nil t))
    (should (search-forward "openrouter" nil t))
-   (should (search-forward "deepseek/deepseek-chat-v3.1" nil t))))
+   (should (search-forward "models [deepseek-v4-pro, gpt-5.5]" nil t))))
 
 (ert-deftest zerostack-test-sends-all-protocol-commands ()
   (zerostack-test--with-buffer
@@ -1148,7 +1178,7 @@
      (zerostack-provider-menu "openai-codex")
      (zerostack-model-menu "gpt-5.5")
      (zerostack-subagent-provider-menu "openrouter")
-     (zerostack-subagent-model-menu "deepseek/deepseek-chat-v3.1")
+     (zerostack-subagent-models-menu '("deepseek-v4-pro" "gpt-5.5"))
      (zerostack-goal)
      (zerostack-clear-goal)
      (zerostack-list-tools)
@@ -1172,7 +1202,7 @@
 
      (let ((forms (zerostack-test--sent-forms sent)))
        (should (equal (mapcar #'car forms)
-                      '(hello attach render set-view provider model subagent-provider subagent-model goal goal list-tools mcp thinking prompt compact compact loop-start
+                      '(hello attach render set-view provider model subagent-provider subagent-models goal goal list-tools mcp thinking prompt compact compact loop-start
                               loop-status loop-stop file-add file-list file-drop-all abort
                               permission-answer list-sessions status timing)))
        (should (equal (nth 0 forms) '(hello :request 1 :protocol 1 :cols 100)))
@@ -1182,7 +1212,7 @@
        (should (equal (nth 4 forms) '(provider :request 5 :provider "openai-codex")))
        (should (equal (nth 5 forms) '(model :request 6 :model "gpt-5.5")))
        (should (equal (nth 6 forms) '(subagent-provider :request 7 :provider "openrouter")))
-       (should (equal (nth 7 forms) '(subagent-model :request 8 :model "deepseek/deepseek-chat-v3.1")))
+       (should (equal (nth 7 forms) '(subagent-models :request 8 :models ("deepseek-v4-pro" "gpt-5.5"))))
        (should (equal (nth 8 forms) '(goal :request 9 :action show)))
        (should (equal (nth 9 forms) '(goal :request 10 :action clear)))
        (should (equal (nth 10 forms) '(list-tools :request 11)))
@@ -1394,7 +1424,7 @@
                   (lambda (&optional _) (interactive) (push 'model dispatched)))
                  ((symbol-function 'zerostack-subagent-provider-menu)
                   (lambda (&optional _) (interactive) (push 'subagent-provider dispatched)))
-                 ((symbol-function 'zerostack-subagent-model-menu)
+                 ((symbol-function 'zerostack-subagent-models-menu)
                   (lambda (&optional _) (interactive) (push 'subagent-model dispatched)))
                   ((symbol-function 'zerostack-goal)
                    (lambda (&optional _) (interactive) (push 'goal dispatched)))
@@ -2076,6 +2106,39 @@
                 (lambda (url &rest _) (setq opened url))))
        (zerostack-open-url-at-point))
      (should (equal opened "https://example.com/docs")))))
+
+(ert-deftest zerostack-test-subagent-link-opens-child-session ()
+  (zerostack-test--with-buffer
+   (let (opened)
+     (zerostack--replace-lines
+      0
+      '((:text "subagent session" :face zs-link
+                :spans ((:text "subagent session" :face zs-link
+                               :url "zerostack-session:child-id?workspace=/tmp/child%20workspace&socket=/tmp/runtime/child.sock")))))
+     (goto-char (point-min))
+     (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t))
+               ((symbol-function 'zerostack-board--open-session)
+                (lambda (item) (setq opened item))))
+       (zerostack-open-url-at-point))
+     (should (equal (plist-get opened :id) "child-id"))
+     (should (equal (plist-get opened :cwd) "/tmp/child workspace"))
+     (should (equal (plist-get opened :socket) "/tmp/runtime/child.sock")))))
+
+(ert-deftest zerostack-test-subagent-link-falls-back-after-child-exits ()
+  (zerostack-test--with-buffer
+   (let (opened)
+     (zerostack--replace-lines
+      0
+      '((:text "subagent session" :face zs-link
+                :spans ((:text "subagent session" :face zs-link
+                               :url "zerostack-session:child-id?workspace=/tmp/child&socket=/tmp/dead.sock")))))
+     (goto-char (point-min))
+     (cl-letf (((symbol-function 'file-exists-p) (lambda (_) nil))
+               ((symbol-function 'zerostack-board--open-session)
+                (lambda (item) (setq opened item))))
+       (zerostack-open-url-at-point))
+     (should (equal (plist-get opened :id) "child-id"))
+     (should-not (plist-get opened :socket)))))
 
 (ert-deftest zerostack-test-markdown-image-displays-relative-to-worktree ()
   (zerostack-test--with-buffer

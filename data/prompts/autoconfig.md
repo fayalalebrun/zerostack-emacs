@@ -70,7 +70,7 @@ When a user provides a skill definition (from superpower, claude-plugins, or a c
 - **Tool permissions** the skill needs → `permission` rules for `allow`/`ask`/`deny` on `bash`, `read`, `write`, `edit`, `external_directory`, etc.
 - **Model preferences** → `model` / `provider` / `quick_models` entries.
 - **Prompt activation** → `default_prompt` key or instruct the user on `/prompt <name>`.
-- **Subagent model** (if the skill triggers exploration) → `subagent_model` / `subagent_provider`.
+- **Subagent models** (if the skill delegates work) → permissible `subagent_models` list and raw-ID `subagent_provider` fallback.
 
 ### Step 4: Present and Apply
 

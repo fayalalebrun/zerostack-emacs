@@ -1970,6 +1970,15 @@ impl TestAgent {
                     .await;
                 let _ = self.sandbox.output_command("bash -c 'sleep 500'").await;
             }
+            if prompt == "error" {
+                let _ = event_tx
+                    .send(AgentEvent::Error {
+                        message: CompactString::new("test provider error"),
+                        reasoning: Vec::new(),
+                    })
+                    .await;
+                return;
+            }
             let _ = event_tx
                 .send(AgentEvent::Done {
                     response: CompactString::new(format!("received {prompt}")),

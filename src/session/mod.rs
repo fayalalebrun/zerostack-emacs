@@ -298,6 +298,10 @@ pub struct Session {
     pub model: CompactString,
     pub provider: CompactString,
     pub working_dir: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<CompactString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_access: Option<CompactString>,
     #[serde(default)]
     pub permission_allowlist: Vec<PermissionAllowEntry>,
     #[cfg(feature = "multimodal")]
@@ -349,6 +353,18 @@ impl GitStatus {
     pub fn is_dirty(&self) -> bool {
         self.staged + self.modified + self.deleted + self.untracked > 0
     }
+}
+
+fn encode_url(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 impl Session {
@@ -406,6 +422,8 @@ impl Session {
             working_dir: std::env::current_dir()
                 .map(|p| CompactString::new(p.to_string_lossy()))
                 .unwrap_or_default(),
+            parent_session_id: None,
+            subagent_access: None,
             permission_allowlist: Vec::new(),
             #[cfg(feature = "multimodal")]
             pending_media: Vec::new(),
@@ -772,6 +790,44 @@ impl Session {
     }
 
     pub fn add_subagent_tool_call(&mut self, name: &str, args: &serde_json::Value) {
+        if name == "session"
+            && let (Some(id), Some(workspace)) = (
+                args.get("session_id").and_then(|value| value.as_str()),
+                args.get("workspace").and_then(|value| value.as_str()),
+            )
+        {
+            let transcript = crate::session::storage::session_path(id)
+                .to_string_lossy()
+                .to_string();
+            for (tool, pattern) in [
+                ("read", workspace.to_string()),
+                ("read", format!("{workspace}/**")),
+                ("write", format!("{workspace}/**")),
+                ("edit", format!("{workspace}/**")),
+                ("list_dir", workspace.to_string()),
+                ("list_dir", format!("{workspace}/**")),
+                ("read", transcript),
+            ] {
+                if !self
+                    .permission_allowlist
+                    .iter()
+                    .any(|entry| entry.tool.as_str() == tool && entry.pattern.as_str() == pattern)
+                {
+                    self.permission_allowlist.push(PermissionAllowEntry {
+                        tool: tool.into(),
+                        pattern: pattern.into(),
+                    });
+                }
+            }
+            self.add_message(
+                MessageRole::SubagentToolCall,
+                &format!(
+                    "[subagent session](zerostack-session:{id}?workspace={})",
+                    encode_url(workspace)
+                ),
+            );
+            return;
+        }
         self.add_message(
             MessageRole::SubagentToolCall,
             &crate::ui::utils::format_tool_call_summary(name, args),

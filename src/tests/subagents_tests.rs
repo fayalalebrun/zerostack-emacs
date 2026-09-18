@@ -8,46 +8,191 @@
 
 #[cfg(test)]
 mod tests {
-    use serde_json;
 
     // -----------------------------------------------------------------------
-    // TaskArgs deserialization
+    // SpawnRequest deserialization
     // -----------------------------------------------------------------------
 
     #[test]
-    fn task_args_deserializes_multiple_prompts() {
-        let json = r#"{"prompts": ["explore auth module", "find api routes"]}"#;
-        let args: crate::extras::subagents::task_tool::TaskArgs =
+    fn task_args_deserialize_spawn_request() {
+        let json = r#"{"task":"fix auth","access":"write","timeout":120,"model":"fast","reasoning":"high"}"#;
+        let args: crate::extras::subagents::task_tool::SpawnRequest =
             serde_json::from_str(json).unwrap();
-        assert_eq!(args.prompts.len(), 2);
-        assert_eq!(args.prompts[0], "explore auth module");
-        assert_eq!(args.prompts[1], "find api routes");
+        assert_eq!(args.task, "fix auth");
+        assert_eq!(
+            args.access,
+            crate::extras::subagents::task_tool::Access::Write
+        );
+        assert_eq!(args.timeout, 120);
+        assert_eq!(args.model.as_deref(), Some("fast"));
+        assert_eq!(args.reasoning.as_deref(), Some("high"));
     }
 
     #[test]
-    fn task_args_single_prompt() {
-        let json = r#"{"prompts": ["one thing"]}"#;
-        let args: crate::extras::subagents::task_tool::TaskArgs =
+    fn task_args_allow_optional_model_and_reasoning() {
+        let json = r#"{"task":"inspect auth","access":"read","timeout":30}"#;
+        let args: crate::extras::subagents::task_tool::SpawnRequest =
             serde_json::from_str(json).unwrap();
-        assert_eq!(args.prompts.len(), 1);
-        assert_eq!(args.prompts[0], "one thing");
+        assert_eq!(
+            args.access,
+            crate::extras::subagents::task_tool::Access::Read
+        );
+        assert!(args.model.is_none());
+        assert!(args.reasoning.is_none());
     }
 
     #[test]
-    fn task_args_empty_prompts_deserializes() {
-        // The struct itself allows an empty vec; TaskTool::call rejects it.
-        let json = r#"{"prompts": []}"#;
-        let args: crate::extras::subagents::task_tool::TaskArgs =
-            serde_json::from_str(json).unwrap();
-        assert!(args.prompts.is_empty());
+    fn task_args_reject_invalid_access() {
+        let json = r#"{"task":"inspect","access":"admin","timeout":30}"#;
+        assert!(
+            serde_json::from_str::<crate::extras::subagents::task_tool::SpawnRequest>(json)
+                .is_err()
+        );
     }
 
     #[test]
-    fn task_args_missing_prompts_is_error() {
-        let json = r#"{}"#;
-        let result: Result<crate::extras::subagents::task_tool::TaskArgs, _> =
-            serde_json::from_str(json);
-        assert!(result.is_err());
+    fn configured_model_options_resolve_aliases_and_raw_ids() {
+        use compact_str::CompactString;
+        use std::collections::HashMap;
+
+        let cfg = crate::config::Config {
+            subagent_models: Some(vec!["fast".into(), "raw-model".into()]),
+            quick_models: Some(HashMap::from([(
+                "fast".to_string(),
+                crate::config::QuickModelConfig {
+                    provider: CompactString::new("openrouter"),
+                    model: CompactString::new("vendor/fast"),
+                    input_token_cost: 0.0,
+                    output_token_cost: 0.0,
+                    reserve_tokens: None,
+                    temperature: None,
+                    extra_body: None,
+                    reasoning_effort: None,
+                },
+            )])),
+            ..Default::default()
+        };
+        let options =
+            crate::extras::subagents::resolve_model_options(&cfg, "anthropic", "fallback");
+        assert_eq!(options[0].name, "fast");
+        assert_eq!(options[0].provider, "openrouter");
+        assert_eq!(options[0].model, "vendor/fast");
+        assert_eq!(options[1].provider, "anthropic");
+        assert_eq!(options[1].model, "raw-model");
+    }
+
+    #[test]
+    fn blank_configured_model_options_fall_back_to_main_model() {
+        let cfg = crate::config::Config {
+            subagent_models: Some(vec!["  ".into()]),
+            ..Default::default()
+        };
+        let options =
+            crate::extras::subagents::resolve_model_options(&cfg, "anthropic", "fallback");
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].name, "fallback");
+        assert_eq!(options[0].provider, "anthropic");
+        assert_eq!(options[0].model, "fallback");
+    }
+
+    #[test]
+    fn spawn_model_must_be_in_permitted_options() {
+        let options = vec![crate::extras::subagents::ModelOption {
+            name: "allowed".to_string(),
+            provider: "openrouter".to_string(),
+            model: "vendor/model".to_string(),
+        }];
+        assert_eq!(
+            crate::extras::subagents::task_tool::select_model_option(&options, None)
+                .unwrap()
+                .name,
+            "allowed"
+        );
+        assert!(
+            crate::extras::subagents::task_tool::select_model_option(&options, Some("forbidden"))
+                .unwrap_err()
+                .to_string()
+                .contains("not permitted")
+        );
+    }
+
+    #[test]
+    fn parent_workspace_permissions_match_requested_access() {
+        use crate::extras::subagents::task_tool::{Access, parent_workspace_tools};
+
+        assert_eq!(parent_workspace_tools(Access::Read), &["read", "list_dir"]);
+        assert_eq!(
+            parent_workspace_tools(Access::Write),
+            &["read", "write", "edit", "list_dir"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborting_parent_task_kills_child_process_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let mut child = Command::new("bash");
+        child
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        child.process_group(0);
+        let mut child = child.spawn().unwrap();
+        let pid = child.id();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = crate::extras::subagents::task_tool::ProcessGroupGuard::new(Some(pid));
+            let _ = ready_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        ready_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[test]
+    fn missing_current_executable_falls_back_to_path() {
+        use crate::extras::subagents::task_tool::resolve_subagent_executable;
+
+        assert_eq!(
+            resolve_subagent_executable(Some(std::path::PathBuf::from(
+                "/definitely/missing/zerostack"
+            ))),
+            std::path::PathBuf::from("zerostack")
+        );
+    }
+
+    #[test]
+    fn subagent_reserves_last_twenty_percent_for_finalization() {
+        use crate::extras::subagents::task_tool::finalize_after_ms;
+
+        assert_eq!(finalize_after_ms(1), 800);
+        assert_eq!(finalize_after_ms(10), 8_000);
+        assert_eq!(finalize_after_ms(100), 80_000);
+        assert_eq!(finalize_after_ms(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn task_args_missing_required_field_is_error() {
+        let json = r#"{"task":"inspect","access":"read"}"#;
+        assert!(
+            serde_json::from_str::<crate::extras::subagents::task_tool::SpawnRequest>(json)
+                .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -88,96 +233,103 @@ mod tests {
         assert!(result.starts_with("AAAABB"));
     }
 
-    // -----------------------------------------------------------------------
-    // Result combining
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn combine_single_result_no_heading() {
-        let outputs = vec![(0usize, "explore auth".into(), "Found auth module".into())];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert_eq!(combined, "Found auth module\n");
-        assert!(!combined.contains("Task"));
-    }
+    fn write_workspace_contains_staged_unstaged_and_untracked_edits() {
+        use std::process::Command;
 
-    #[test]
-    fn combine_multiple_results_with_headings() {
-        let outputs = vec![
-            (0, "explore auth".into(), "Found auth".into()),
-            (1, "find routes".into(), "3 routes found".into()),
-        ];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert!(combined.contains("## Task 1:"));
-        assert!(combined.contains("## Task 2:"));
-        assert!(combined.contains("Found auth"));
-        assert!(combined.contains("3 routes found"));
-    }
+        let root =
+            std::env::temp_dir().join(format!("zs-subagent-snapshot-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        std::fs::write(repo.join("staged.txt"), "base\n").unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "."])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "base"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.join("tracked.txt"), "edited\n").unwrap();
+        std::fs::write(repo.join("staged.txt"), "staged\n").unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "staged.txt"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.join("untracked.txt"), "new\n").unwrap();
+        #[cfg(unix)]
+        let non_utf8 = {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
 
-    #[test]
-    fn combine_results_sorted_by_index() {
-        // Results arrive out of order; combine_results trusts the caller to sort.
-        // We test the sorted case here.
-        let outputs = vec![
-            (0, "first".into(), "A".into()),
-            (1, "second".into(), "B".into()),
-        ];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        let pos_a = combined.find("A").unwrap();
-        let pos_b = combined.find("B").unwrap();
-        assert!(pos_a < pos_b);
-    }
+            let path = std::path::PathBuf::from(OsString::from_vec(b"untracked-\xff".to_vec()));
+            std::fs::write(repo.join(&path), "non-utf8\n").unwrap();
+            path
+        };
 
-    #[test]
-    fn combine_error_result_is_preserved() {
-        let outputs = vec![(0, "prompt".into(), "[error: something went wrong]".into())];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert!(combined.contains("[error: something went wrong]"));
-    }
-
-    #[test]
-    fn combine_timeout_result_is_preserved() {
-        let outputs = vec![(
-            0,
-            "prompt".into(),
-            "[timeout: subagent exceeded 300s]".into(),
-        )];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert!(combined.contains("[timeout: subagent exceeded 300s]"));
-    }
-
-    #[test]
-    fn combine_result_ensures_trailing_newline() {
-        let outputs = vec![(0, "p".into(), "no trailing newline".into())];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert!(combined.ends_with('\n'));
-    }
-
-    #[test]
-    fn combine_result_already_has_newline_no_double() {
-        let outputs = vec![(0, "p".into(), "already has newline\n".into())];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert!(combined.ends_with('\n'));
-        // Single result shouldn't have double newline at end
-        let result_part = combined.trim_end();
-        assert_eq!(result_part, "already has newline");
-    }
-
-    #[test]
-    fn combine_empty_outputs() {
-        let outputs: Vec<(usize, String, String)> = vec![];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        assert!(combined.is_empty());
-    }
-
-    #[test]
-    fn combine_long_prompt_label_truncated_to_60_chars() {
-        let long_prompt = "x".repeat(100);
-        let outputs = vec![
-            (0, long_prompt.clone(), "result".into()),
-            (1, "second".into(), "B".into()),
-        ];
-        let combined = crate::extras::subagents::task_tool::combine_results(&outputs);
-        let heading_line = combined.lines().next().unwrap();
-        assert!(heading_line.len() <= "## Task 1: ".len() + 60);
+        let previous = crate::session::storage::set_test_data_dir(Some(data));
+        let workspace =
+            crate::extras::subagents::workspace::create(&repo, "snapshot-test").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
+            "edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("staged.txt")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("untracked.txt")).unwrap(),
+            "new\n"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(non_utf8)).unwrap(),
+            "non-utf8\n"
+        );
+        crate::session::storage::set_test_data_dir(previous);
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "remove", "--force"])
+                .arg(&workspace)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

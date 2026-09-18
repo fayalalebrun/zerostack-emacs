@@ -112,6 +112,12 @@ pub fn set_subagent_provider(cfg: &mut Config, provider: &str) -> anyhow::Result
     let provider = canonical_provider_name(provider);
     let model = crate::provider::default_model_for_provider(&provider, cfg)
         .map(|(model, _)| model)
+        .or_else(|| {
+            cfg.subagent_models
+                .as_ref()
+                .and_then(|models| models.first())
+                .map(ToString::to_string)
+        })
         .or_else(|| cfg.subagent_model.as_ref().map(ToString::to_string))
         .or_else(|| cfg.model.as_ref().map(ToString::to_string))
         .with_context(|| {
@@ -123,6 +129,7 @@ pub fn set_subagent_provider(cfg: &mut Config, provider: &str) -> anyhow::Result
 
     cfg.subagent_provider = Some(CompactString::new(&provider));
     cfg.subagent_model = Some(CompactString::new(&model));
+    cfg.subagent_models = Some(vec![CompactString::new(&model)]);
     Ok((provider, model))
 }
 
@@ -139,7 +146,28 @@ pub fn set_subagent_model(cfg: &mut Config, model: &str) -> anyhow::Result<(Stri
     validate_provider(cfg, &provider)?;
     cfg.subagent_provider = Some(CompactString::new(&provider));
     cfg.subagent_model = Some(CompactString::new(model));
+    cfg.subagent_models = Some(vec![CompactString::new(model)]);
     Ok((provider, model.to_string()))
+}
+
+#[cfg(feature = "subagents")]
+pub fn set_subagent_models(cfg: &mut Config, models: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut unique = Vec::new();
+    for model in models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        if !unique.iter().any(|existing: &String| existing == model) {
+            unique.push(model.to_string());
+        }
+    }
+    if unique.is_empty() {
+        anyhow::bail!("at least one subagent model is required");
+    }
+    cfg.subagent_model = unique.first().map(|model| CompactString::new(model));
+    cfg.subagent_models = Some(unique.iter().map(CompactString::new).collect());
+    Ok(unique)
 }
 
 pub fn canonical_provider_name(provider: &str) -> String {
@@ -302,6 +330,17 @@ mod tests {
         assert!(!model.is_empty());
         assert_eq!(cfg.subagent_provider.as_deref(), Some("openrouter"));
         assert_eq!(cfg.subagent_model.as_deref(), Some(model.as_str()));
+        assert_eq!(
+            cfg.subagent_models.as_deref(),
+            Some([CompactString::new(&model)].as_slice())
+        );
+
+        cfg.subagent_models = Some(vec![CompactString::new("stale-model")]);
+        let (_, provider_model) = set_subagent_provider(&mut cfg, "openrouter").unwrap();
+        assert_eq!(
+            cfg.subagent_models.as_deref(),
+            Some([CompactString::new(&provider_model)].as_slice())
+        );
 
         let (provider, model) =
             set_subagent_model(&mut cfg, "deepseek/deepseek-chat-v3.1").unwrap();
@@ -312,6 +351,22 @@ mod tests {
         assert_eq!(
             cfg.subagent_model.as_deref(),
             Some("deepseek/deepseek-chat-v3.1")
+        );
+        assert_eq!(
+            cfg.subagent_models.as_deref(),
+            Some([CompactString::new("deepseek/deepseek-chat-v3.1")].as_slice())
+        );
+
+        let models = set_subagent_models(
+            &mut cfg,
+            &["fast".to_string(), "strong".to_string(), "fast".to_string()],
+        )
+        .unwrap();
+        assert_eq!(models, vec!["fast", "strong"]);
+        assert_eq!(cfg.subagent_model.as_deref(), Some("fast"));
+        assert_eq!(
+            cfg.subagent_models.as_deref(),
+            Some([CompactString::new("fast"), CompactString::new("strong")].as_slice())
         );
     }
 

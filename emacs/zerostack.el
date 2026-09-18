@@ -258,6 +258,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--model nil)
 (defvar-local zerostack--subagent-provider nil)
 (defvar-local zerostack--subagent-model nil)
+(defvar-local zerostack--subagent-models nil)
 (defvar-local zerostack--tokens nil)
 (defvar-local zerostack--reasoning-tokens nil)
 (defvar-local zerostack--context-window nil)
@@ -322,7 +323,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--provider nil)
   (setq-local zerostack--model nil)
   (setq-local zerostack--subagent-provider nil)
-  (setq-local zerostack--subagent-model nil)
+   (setq-local zerostack--subagent-model nil)
+   (setq-local zerostack--subagent-models nil)
   (setq-local zerostack--tokens nil)
   (setq-local zerostack--reasoning-tokens nil)
   (setq-local zerostack--context-window nil)
@@ -757,16 +759,29 @@ The root is resolved with Projectile when available, then `project.el', then
     (zerostack-board-refresh)
     (message "zerostack default %s" (replace-regexp-in-string "\n" ", " output))))
 
-(defun zerostack-board-set-default-subagent-model ()
-  "Switch the persisted default zerostack subagent model."
+(defun zerostack--read-subagent-models (provider defaults)
+  "Read permissible subagent models for PROVIDER, initially DEFAULTS."
+  (let* ((quick (zerostack--config-lines "quick-models"))
+         (models (zerostack--config-lines "models" provider))
+         (choices (delete-dups (append quick models defaults)))
+         (initial (and defaults (concat (string-join defaults ",") ","))))
+    (completing-read-multiple
+     "Permitted subagent models: " choices nil nil initial)))
+
+(defun zerostack-board-set-default-subagent-models ()
+  "Set the persisted permissible subagent model list."
   (interactive)
   (let* ((fields (cdr zerostack-board--snapshot))
          (provider (or (plist-get fields :subagent-provider)
                        (plist-get fields :provider)))
-         (model (zerostack--read-model provider nil))
-         (output (zerostack--config-command "set-subagent-model" model)))
-    (zerostack-board-refresh)
-    (message "zerostack subagent default %s" (replace-regexp-in-string "\n" ", " output))))
+         (defaults (or (plist-get fields :subagent-models)
+                       (list (plist-get fields :subagent-model))))
+         (models (zerostack--read-subagent-models provider defaults)))
+    (unless models
+      (user-error "At least one subagent model is required"))
+    (let ((output (apply #'zerostack--config-command "set-subagent-models" models)))
+      (zerostack-board-refresh)
+      (message "zerostack permissible %s" (replace-regexp-in-string "\n" ", " output)))))
 
 (defun zerostack-board--config-label (value fallback)
   "Return display label for a board config VALUE."
@@ -802,8 +817,13 @@ The root is resolved with Projectile when available, then `project.el', then
      #'zerostack-board-set-default-subagent-provider)
     (insert " / ")
     (zerostack-board--insert-config-button
-     (zerostack-board--config-label (plist-get fields :subagent-model) "model")
-     #'zerostack-board-set-default-subagent-model))
+     (format "models [%s]"
+             (string-join
+              (or (plist-get fields :subagent-models)
+                  (list (zerostack-board--config-label
+                         (plist-get fields :subagent-model) "model")))
+              ", "))
+     #'zerostack-board-set-default-subagent-models))
   (insert "\n"))
 
 (defun zerostack-board--render (snapshot)
@@ -910,7 +930,8 @@ The root is resolved with Projectile when available, then `project.el', then
      item
      (and single-active (zerostack-board--session-face single-active))
      inline-load-more)
-    (unless collapsed
+    (if collapsed
+        (zerostack-board--insert-subagent-children single-active path "    ")
       (zerostack-board--insert-session-list key sessions path nil nil))))
 
 (defun zerostack-board--insert-loose-workspace (workspace)
@@ -940,7 +961,8 @@ The root is resolved with Projectile when available, then `project.el', then
      item
      (and single-active (zerostack-board--session-face single-active))
      inline-load-more)
-    (unless collapsed
+    (if collapsed
+        (zerostack-board--insert-subagent-children single-active path "    ")
       (zerostack-board--insert-session-list key sessions path nil nil))))
 
 (defun zerostack-board--active-sessions (sessions)
@@ -1051,13 +1073,16 @@ The root is resolved with Projectile when available, then `project.el', then
 
 (defun zerostack-board--insert-session-list (key sessions worktree-path &optional suppress-load-more subdued-session-id)
   "Insert paginated SESSIONS for KEY under WORKTREE-PATH."
-  (let* ((limit (zerostack-board--session-limit key))
-         (shown (cl-subseq sessions 0 (min limit (length sessions)))))
+  (let* ((roots (cl-remove-if (lambda (session)
+                                (plist-get session :parent-session-id))
+                              sessions))
+         (limit (zerostack-board--session-limit key))
+         (shown (cl-subseq roots 0 (min limit (length roots)))))
     (dolist (session shown)
       (unless (equal (plist-get session :id) subdued-session-id)
         (zerostack-board--insert-session session worktree-path)))
-    (when (and (not suppress-load-more) (> (length sessions) limit))
-      (zerostack-board--insert-load-more key (length sessions) limit))))
+    (when (and (not suppress-load-more) (> (length roots) limit))
+      (zerostack-board--insert-load-more key (length roots) limit))))
 
 (defun zerostack-board--session-limit-set-p (key)
   "Return non-nil when KEY has an explicit board session limit."
@@ -1116,9 +1141,27 @@ The root is resolved with Projectile when available, then `project.el', then
         :socket (plist-get session :socket)
         :alive (plist-get session :alive)))
 
-(defun zerostack-board--insert-session (session &optional worktree-path subdued-session-id)
+(defun zerostack-board--all-sessions ()
+  "Return all sessions in the current board snapshot."
+  (let (sessions)
+    (dolist (project (plist-get (cdr zerostack-board--snapshot) :projects))
+      (dolist (worktree (plist-get project :worktrees))
+        (setq sessions (append sessions (plist-get worktree :sessions)))))
+    (dolist (workspace (plist-get (cdr zerostack-board--snapshot) :loose-workspaces))
+      (setq sessions (append sessions (plist-get workspace :sessions))))
+    sessions))
+
+(defun zerostack-board--subagent-children (session-id)
+  "Return child subagent sessions for SESSION-ID."
+  (cl-remove-if-not
+   (lambda (session)
+     (equal (plist-get session :parent-session-id) session-id))
+   (zerostack-board--all-sessions)))
+
+(defun zerostack-board--insert-session (session &optional worktree-path subdued-session-id indent)
   "Insert one SESSION node."
-  (let* ((alive (plist-get session :alive))
+  (let* ((indent (or indent "    "))
+         (alive (plist-get session :alive))
          (title (zerostack-board--one-line (plist-get session :title)))
          (display-title (if (string-empty-p title) "(untitled)" title))
          (buffer (zerostack--find-chat-buffer (plist-get session :id)
@@ -1129,7 +1172,7 @@ The root is resolved with Projectile when available, then `project.el', then
                  (zerostack-board--session-face session buffer)))
          (item (zerostack-board--session-item session worktree-path))
          (start (point)))
-    (insert (format "    %s " (zerostack-board--alive-marker alive)))
+    (insert (format "%s%s " indent (zerostack-board--alive-marker alive)))
     (let ((title-start (point)))
       (insert display-title)
       (add-text-properties title-start (point) `(face ,face)))
@@ -1141,7 +1184,23 @@ The root is resolved with Projectile when available, then `project.el', then
                   keymap ,zerostack-board-mode-map
                   follow-link t
                   zerostack-board-item ,item))
-    (insert "\n")))
+    (insert "\n")
+    (zerostack-board--insert-subagent-children session worktree-path indent)))
+
+(defun zerostack-board--insert-subagent-children (session worktree-path indent)
+  "Insert child subagent sessions below SESSION."
+  (dolist (child (zerostack-board--subagent-children (plist-get session :id)))
+    (let* ((child-workspace (or (plist-get child :cwd) worktree-path))
+           (child-indent (concat indent "  "))
+           (access (or (plist-get child :subagent-access) "read")))
+      (when (and child-workspace
+                 (not (equal child-workspace worktree-path)))
+        (zerostack-board--insert-row
+         (format "%s%s workspace %s" child-indent access child-workspace)
+         'zerostack-board-worktree-face
+         (list :type 'workspace :path child-workspace)))
+      (zerostack-board--insert-session
+       child child-workspace nil (concat child-indent "  ")))))
 
 (defun zerostack-board--session-face (session &optional buffer)
   "Return board face for SESSION, considering live BUFFER state."
@@ -1936,15 +1995,16 @@ Return non-nil when DIRECTORY was newly added."
                            :request (zerostack--next-request)
                            :provider provider))
 
-(defun zerostack-subagent-model-menu (model)
-  "Switch the current zerostack session's subagent model to MODEL."
+(defun zerostack-subagent-models-menu (models)
+  "Set permissible MODELS for subagents in the current session."
   (interactive
-   (let* ((provider (or zerostack--subagent-provider zerostack--provider))
-          (model (zerostack--read-model provider zerostack--subagent-model)))
-     (list model)))
-  (zerostack--send-command 'subagent-model
+   (let ((provider (or zerostack--subagent-provider zerostack--provider)))
+     (list (zerostack--read-subagent-models provider zerostack--subagent-models))))
+  (unless models
+    (user-error "At least one subagent model is required"))
+  (zerostack--send-command 'subagent-models
                            :request (zerostack--next-request)
-                           :model model))
+                           :models models))
 
 (defun zerostack-list-tools ()
   "List built-in zerostack tools exposed to the current session."
@@ -2361,8 +2421,8 @@ When BINARY is non-nil, DATA is written with binary coding."
 (when (featurep 'hydra)
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
-Zerostack
-_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _h_ hydrate  _t_ thinking  _i_ timing  _p_ provider  _m_ model  _e_ subagents  _P_ subagent provider  _S_ subagent model  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
+_Zerostack
+_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _h_ hydrate  _t_ thinking  _i_ timing  _p_ provider  _m_ model  _e_ subagents  _P_ subagent provider  _S_ subagent models  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2379,7 +2439,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     ("m" zerostack-model-menu)
     ("e" zerostack-subagents-menu)
     ("P" zerostack-subagent-provider-menu)
-    ("S" zerostack-subagent-model-menu)
+    ("S" zerostack-subagent-models-menu)
     ("T" zerostack-list-tools)
     ("M" zerostack-mcp)
     ("v" zerostack-set-view)
@@ -2412,7 +2472,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
       ("model" (call-interactively #'zerostack-model-menu))
       ("subagents" (call-interactively #'zerostack-subagents-menu))
       ("subagent-provider" (call-interactively #'zerostack-subagent-provider-menu))
-      ("subagent-model" (call-interactively #'zerostack-subagent-model-menu))
+       ("subagent-model" (call-interactively #'zerostack-subagent-models-menu))
       ("goal" (call-interactively #'zerostack-goal))
       ("clear-goal" (call-interactively #'zerostack-clear-goal))
       ("hydrate" (call-interactively #'zerostack-rerun-hydrate))
@@ -2636,6 +2696,10 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     (setq zerostack--subagent-provider (format "%s" provider)))
   (when-let ((model (plist-get plist :subagent-model)))
     (setq zerostack--subagent-model (format "%s" model)))
+  (when (plist-member plist :subagent-models)
+    (setq zerostack--subagent-models
+          (mapcar (lambda (model) (format "%s" model))
+                  (plist-get plist :subagent-models))))
   (when-let ((tokens (plist-get plist :tokens)))
     (setq zerostack--tokens tokens))
   (when-let ((tokens (plist-get plist :reasoning-tokens)))
@@ -3126,7 +3190,24 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
   (when (eventp event)
     (posn-set-point (event-end event)))
   (if-let ((url (get-text-property (point) 'zerostack-url)))
-      (browse-url url)
+      (if (string-prefix-p "zerostack-session:" url)
+          (let* ((payload (substring url (length "zerostack-session:")))
+                 (parts (split-string payload "?workspace="))
+                 (id (car parts))
+                 (query-parts (and (cadr parts)
+                                   (split-string (cadr parts) "&socket=")))
+                 (workspace (and query-parts
+                                 (url-unhex-string (car query-parts))))
+                 (socket (and (cadr query-parts)
+                              (url-unhex-string (cadr query-parts)))))
+            (zerostack-board--open-session
+             (list :type 'session
+                   :id id
+                   :title (format "subagent %s" (substring id 0 (min 8 (length id))))
+                   :cwd workspace
+                   :worktree-path workspace
+                    :socket (and socket (file-exists-p socket) socket))))
+        (browse-url url))
     (zerostack--append-local-line "no URL at point" 'zs-error)))
 
 (defun zerostack--make-artifact-region (start end artifact)

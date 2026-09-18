@@ -226,6 +226,36 @@ fn save_session_preserves_tool_messages() {
 }
 
 #[test]
+fn subagent_session_link_persists_parent_access() {
+    let env = setup_test_env();
+    let mut session = Session::new("anthropic", "claude", 200000);
+    session.add_subagent_tool_call(
+        "session",
+        &serde_json::json!({
+            "session_id": "12345678-1234-1234-1234-123456789abc",
+            "workspace": "/tmp/subagent workspace"
+        }),
+    );
+    save_session(&session).unwrap();
+
+    let loaded = find_sessions_by_prefix(&session.id[..8].to_string()).unwrap();
+    assert!(loaded[0].messages[0].content.contains("zerostack-session:"));
+    assert!(
+        loaded[0]
+            .permission_allowlist
+            .iter()
+            .any(|entry| entry.tool == "edit" && entry.pattern == "/tmp/subagent workspace/**")
+    );
+    assert!(loaded[0].permission_allowlist.iter().any(|entry| {
+        entry.tool == "read"
+            && entry
+                .pattern
+                .ends_with("12345678-1234-1234-1234-123456789abc.json")
+    }));
+    drop(env);
+}
+
+#[test]
 fn long_tool_result_is_saved_and_truncated_in_session() {
     let env = setup_test_env();
     let mut s = Session::new("anthropic", "claude", 200000);

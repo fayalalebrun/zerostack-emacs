@@ -192,6 +192,9 @@ pub struct Config {
     pub subagent_model: Option<CompactString>,
     #[cfg(feature = "subagents")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_models: Option<Vec<CompactString>>,
+    #[cfg(feature = "subagents")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_provider: Option<CompactString>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colors: Option<types::ColorsConfig>,

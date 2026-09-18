@@ -58,6 +58,21 @@ pub struct Cli {
     #[arg(long = "no-session", help = "Ephemeral mode, do not save")]
     pub no_session: bool,
 
+    #[arg(long, hide = true)]
+    pub subagent_session_id: Option<String>,
+
+    #[arg(long, hide = true)]
+    pub subagent_parent_session: Option<String>,
+
+    #[arg(long, hide = true, value_parser = ["read", "write"])]
+    pub subagent_access: Option<String>,
+
+    #[arg(long, hide = true)]
+    pub subagent_live: bool,
+
+    #[arg(long, hide = true)]
+    pub subagent_finalize_at_unix_ms: Option<u64>,
+
     #[arg(long = "provider", env = "ZS_PROVIDER", help = "API provider")]
     pub provider: Option<String>,
 
@@ -303,6 +318,8 @@ pub enum ConfigCommand {
         #[arg(help = "Provider name; defaults to the configured provider")]
         provider: Option<String>,
     },
+    #[command(about = "List configured quick-model names")]
+    QuickModels,
     #[command(about = "Persist the default provider and reset model to its default")]
     SetProvider {
         #[arg(help = "Provider name")]
@@ -333,6 +350,12 @@ pub enum ConfigCommand {
     SetSubagentModel {
         #[arg(help = "Model id")]
         model: String,
+    },
+    #[cfg(feature = "subagents")]
+    #[command(about = "Persist the permissible subagent model names")]
+    SetSubagentModels {
+        #[arg(help = "One or more model ids or quick-model names", required = true)]
+        models: Vec<String>,
     },
 }
 

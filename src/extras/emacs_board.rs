@@ -15,6 +15,10 @@ struct StoredBoardSession {
     working_dir: String,
     model: String,
     provider: String,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    subagent_access: Option<String>,
     created_at: String,
     updated_at: String,
     total_cost: f64,
@@ -97,6 +101,7 @@ struct BoardSnapshot {
     model: String,
     subagent_provider: String,
     subagent_model: String,
+    subagent_models: Vec<String>,
     subagents_enabled: bool,
     needs_attention: Vec<BoardSession>,
     projects: Vec<BoardProject>,
@@ -127,6 +132,8 @@ struct BoardSession {
     cwd: String,
     model: String,
     provider: String,
+    parent_session_id: Option<String>,
+    subagent_access: Option<String>,
     subagents_enabled: bool,
     created_at: String,
     updated_at: String,
@@ -177,7 +184,8 @@ pub fn print_board() -> anyhow::Result<()> {
 
 fn collect_board() -> anyhow::Result<BoardSnapshot> {
     let (cfg, _) = config::load();
-    let (provider, model, subagent_provider, subagent_model) = board_defaults(&cfg);
+    let (provider, model, subagent_provider, subagent_model, subagent_models) =
+        board_defaults(&cfg);
     let sessions: Vec<StoredBoardSession> = storage::read_session_records()?;
     let mut git_directories = HashMap::new();
     let live = live_sessions_by_id()?;
@@ -258,6 +266,7 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
         model,
         subagent_provider,
         subagent_model,
+        subagent_models,
         subagents_enabled,
         needs_attention,
         projects,
@@ -265,7 +274,7 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
     })
 }
 
-fn board_defaults(cfg: &Config) -> (String, String, String, String) {
+fn board_defaults(cfg: &Config) -> (String, String, String, String, Vec<String>) {
     let provider = config::commands::default_provider_name(cfg);
     let model = cfg
         .model
@@ -285,8 +294,10 @@ fn board_defaults(cfg: &Config) -> (String, String, String, String) {
     let subagent_provider = provider.clone();
     #[cfg(feature = "subagents")]
     let subagent_model = cfg
-        .subagent_model
+        .subagent_models
         .as_ref()
+        .and_then(|models| models.first())
+        .or(cfg.subagent_model.as_ref())
         .map(ToString::to_string)
         .or_else(|| {
             crate::provider::default_model_for_provider(&subagent_provider, cfg)
@@ -295,8 +306,23 @@ fn board_defaults(cfg: &Config) -> (String, String, String, String) {
         .unwrap_or_else(|| model.clone());
     #[cfg(not(feature = "subagents"))]
     let subagent_model = model.clone();
+    #[cfg(feature = "subagents")]
+    let subagent_models = cfg
+        .subagent_models
+        .as_ref()
+        .filter(|models| !models.is_empty())
+        .map(|models| models.iter().map(ToString::to_string).collect())
+        .unwrap_or_else(|| vec![subagent_model.clone()]);
+    #[cfg(not(feature = "subagents"))]
+    let subagent_models = vec![subagent_model.clone()];
 
-    (provider, model, subagent_provider, subagent_model)
+    (
+        provider,
+        model,
+        subagent_provider,
+        subagent_model,
+        subagent_models,
+    )
 }
 
 fn session_directory_exists(dir: &Path) -> bool {
@@ -409,6 +435,8 @@ fn board_session(session: &StoredBoardSession, live: Option<&LiveSessionMeta>) -
         cwd: session.working_dir.to_string(),
         model: session.model.to_string(),
         provider: session.provider.to_string(),
+        parent_session_id: session.parent_session_id.clone(),
+        subagent_access: session.subagent_access.clone(),
         subagents_enabled,
         created_at: session.created_at.to_string(),
         updated_at: live
@@ -687,11 +715,17 @@ fn socket_alive(path: &Path) -> bool {
 
 fn board_to_sexp(snapshot: &BoardSnapshot) -> String {
     format!(
-        "(zerostack-board :version 1 :provider {} :model {} :subagent-provider {} :subagent-model {} :subagents-enabled {} :needs-attention ({}) :projects ({}) :loose-workspaces ({}))",
+        "(zerostack-board :version 1 :provider {} :model {} :subagent-provider {} :subagent-model {} :subagent-models ({}) :subagents-enabled {} :needs-attention ({}) :projects ({}) :loose-workspaces ({}))",
         sexp_quote(&snapshot.provider),
         sexp_quote(&snapshot.model),
         sexp_quote(&snapshot.subagent_provider),
         sexp_quote(&snapshot.subagent_model),
+        snapshot
+            .subagent_models
+            .iter()
+            .map(|model| sexp_quote(model))
+            .collect::<Vec<_>>()
+            .join(" "),
         sexp_bool(snapshot.subagents_enabled),
         snapshot
             .needs_attention
@@ -764,13 +798,23 @@ fn worktree_to_sexp(worktree: &BoardWorktree) -> String {
 
 fn session_to_sexp(session: &BoardSession) -> String {
     format!(
-        "(:id {} :short-id {} :title {} :cwd {} :model {} :provider {} :subagents-enabled {} :created-at {} :updated-at {} :message-count {} :tokens {} :context-window {} :cost {:.6} :alive {} :pid {} :socket {})",
+        "(:id {} :short-id {} :title {} :cwd {} :model {} :provider {} :parent-session-id {} :subagent-access {} :subagents-enabled {} :created-at {} :updated-at {} :message-count {} :tokens {} :context-window {} :cost {:.6} :alive {} :pid {} :socket {})",
         sexp_quote(&session.id),
         sexp_quote(short_id(&session.id)),
         sexp_quote(&session.title),
         sexp_quote(&session.cwd),
         sexp_quote(&session.model),
         sexp_quote(&session.provider),
+        session
+            .parent_session_id
+            .as_deref()
+            .map(sexp_quote)
+            .unwrap_or_else(|| "nil".to_string()),
+        session
+            .subagent_access
+            .as_deref()
+            .map(sexp_quote)
+            .unwrap_or_else(|| "nil".to_string()),
         sexp_bool(session.subagents_enabled),
         sexp_quote(&session.created_at),
         sexp_quote(&session.updated_at),
@@ -836,6 +880,14 @@ mod tests {
         assert_eq!(board.cwd, session.working_dir.as_str());
         assert_eq!(board.cost, session.total_cost);
         assert_eq!(board.context_window, session.context_window);
+        assert_eq!(
+            board.parent_session_id.as_deref(),
+            session.parent_session_id.as_deref()
+        );
+        assert_eq!(
+            board.subagent_access.as_deref(),
+            session.subagent_access.as_deref()
+        );
         #[cfg(feature = "subagents")]
         assert_eq!(
             board.subagents_enabled,
@@ -856,6 +908,8 @@ mod tests {
         session.add_message(MessageRole::User, "latest title");
         assert_metadata_matches(&session);
         session.name = "explicit name".into();
+        session.parent_session_id = Some("parent".into());
+        session.subagent_access = Some("write".into());
         #[cfg(feature = "subagents")]
         {
             session.subagents_enabled = Some(false);
@@ -916,6 +970,8 @@ mod tests {
             cwd: "/repo".to_string(),
             model: "model".to_string(),
             provider: "provider".to_string(),
+            parent_session_id: None,
+            subagent_access: None,
             subagents_enabled: true,
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
@@ -1057,6 +1113,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             subagent_provider: "openrouter".to_string(),
             subagent_model: "deepseek/deepseek-chat-v3.1".to_string(),
+            subagent_models: vec!["deepseek-v4-pro".to_string()],
             subagents_enabled: false,
             needs_attention: vec![session("attention-session", "2026-06-21T00:00:00Z", true)],
             projects,

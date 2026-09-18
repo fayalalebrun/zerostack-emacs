@@ -18,7 +18,7 @@ Single crate, no workspace. All source under `src/`.
 | `src/ui/` | Custom TUI on crossterm (no ratatui): `mod.rs` (event loop), `terminal.rs` (raw mode guard), `renderer.rs` (line buffer + viewport), `input/` (text editor + pickers), `status.rs`, `markdown.rs`, `event_handler.rs`, `cmd_picker.rs` |
 | `src/context/` | Context gathering: embedded prompt themes (`prompts.rs`, `themes.rs`), AGENTS.md/ARCHITECTURE.md loading |
 | `src/config/` | Configuration: `load.rs` (TOML/JSON from disk+env), `types.rs` (QuickModel, CustomProvider, Colors, EditSystem) |
-| `src/extras/` | Feature-gated extensions: `loop/` (headless), `mcp/` (MCP client), `acp/` (ACP server), `memory/` (persistent memory), `subagents/` (parallel task delegation), `git_worktree/`, `archmd/` |
+| `src/extras/` | Feature-gated extensions: `loop/` (headless), `mcp/` (MCP client), `acp/` (ACP server), `memory/` (persistent memory), `subagents/` (separate-process task delegation + CoW workspaces), `git_worktree/`, `archmd/` |
 | `src/sandbox.rs` | `bwrap`/`zerobox` command wrapping |
 | `src/fs.rs` | Filesystem utilities |
 | `src/pricing.rs` | Token pricing constants |
@@ -88,6 +88,7 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 4. **Session compaction** — when token count approaches context window, old messages are summarized and dropped, preserving a summary prefix. (`src/session/mod.rs:24`)
 5. **Feature-gated extras** — `loop`, `mcp`, `acp`, `memory`, `subagents`, `git-worktree`, `archmd` are all compile-time features. Extras don't bloat the core binary.
 6. **Single-threaded tokio by default** — `#[tokio::main(flavor = "current_thread")]` unless `multithread` feature enabled. Keeps resource usage low for a CLI tool.
+7. **Process-isolated subagents** — `task` starts a one-shot zerostack child with its own persisted session and a read-only Emacs socket for real-time attachment. Write tasks snapshot the current working state into a persistent CoW Git worktree or copied directory; parent sessions store links and access rules for child transcripts/workspaces. (`src/extras/subagents/task_tool.rs`, `workspace.rs`, `src/extras/emacs.rs`)
 
 ## Dependencies
 

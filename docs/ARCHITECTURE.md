@@ -1,7 +1,7 @@
 # ARCHITECTURE.md
 
 zerostack supports an optional `ARCHITECTURE.md` file that gives both the main
-agent and exploration subagents high-level design context about your project.
+agent and spawned subagent processes high-level design context about your project.
 
 ## What It Does
 
@@ -111,8 +111,8 @@ config file.
 | Layer | Behavior |
 |---|---|
 | **System prompt** | Architecture content appended after `AGENTS.md`, before custom prompt |
-| **Subagents** | Each subagent receives the architecture context in its preamble |
-| **`task` tool** | Exploration subagents instructed to read `ARCHITECTURE.md` first |
+| **Subagents** | Each spawned zerostack process loads the workspace architecture context |
+| **`task` tool** | Child sessions inherit normal context-file loading in their workspace |
 | **TUI status** | Displays `loaded ARCHITECTURE.md` when architecture content exists |
 | **Prompts** | Built-in prompts reference architecture-aware workflows |
 

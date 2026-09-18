@@ -1,31 +1,38 @@
-use std::time::Duration;
+use std::path::Path;
+use std::process::Stdio;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use futures::future::join_all;
+use compact_str::CompactString;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
+use tokio::process::Command;
+use uuid::Uuid;
 
 use crate::agent::tools::{ToolError, check_perm};
-use crate::extras::subagents::builder;
-use crate::extras::subagents::{clone_subagent_event_tx, with_config};
+use crate::event::AgentEvent;
+use crate::extras::subagents::{clone_subagent_event_tx, with_config, workspace};
 use crate::extras::truncate::truncate_cjk;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 
-/// Per-subagent wall-clock timeout. If a subagent doesn't finish within this
-/// window its output is replaced with a timeout marker and the remaining tasks
-/// continue independently.
-const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Hard cap on a single subagent's response, protecting the main agent's
-/// context window from a runaway multi-megabyte exploration result.
 const MAX_SUBAGENT_RESPONSE_BYTES: usize = 128 * 1024;
+const FINALIZE_PERCENT: u64 = 80;
 
-#[derive(Deserialize)]
-pub struct TaskArgs {
-    /// One or more exploration prompts. When multiple are provided,
-    /// they are explored in parallel subagents and results are combined.
-    pub prompts: Vec<String>,
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpawnRequest {
+    pub task: String,
+    pub access: Access,
+    pub timeout: u64,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
 }
 
 pub struct TaskTool {
@@ -42,199 +49,351 @@ impl TaskTool {
 impl Tool for TaskTool {
     const NAME: &'static str = "task";
     type Error = ToolError;
-    type Args = TaskArgs;
+    type Args = SpawnRequest;
     type Output = String;
 
     async fn definition(&self, _p: String) -> ToolDefinition {
+        let model_options = with_config(|cfg| {
+            cfg.model_options
+                .iter()
+                .map(|option| option.name.clone())
+                .collect::<Vec<_>>()
+        });
+        let default_model = model_options.first().cloned().unwrap_or_default();
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Search and investigate the codebase via a fresh-context subagent. \
-Use for any cross-file question: where is X used, how does Y work, \
-find/list/count all X across the codebase, what calls Z, audit Q. \
-The subagent reads, greps, finds files, lists directories, accesses memory, \
-and returns a verified summary. Subagents receive repository instructions \
-and architecture context, but not conversation history; include the user's \
-goal, relevant constraints, known files/symbols, and desired answer shape \
-in each prompt. \
-More reliable than running multiple grep/read calls yourself; the subagent \
-enumerates completely without truncation gaps or synthesis errors across partial views. \
-Multiple prompts run in parallel. \
-Skip only for known-location work: reading one identified file, \
-editing in a known location, grepping for a literal you will act on immediately."
+            description: "Spawn a fresh zerostack process for an isolated task. Read access uses the current workspace. Write access creates a persistent copy-on-write workspace containing all in-progress edits. The result includes the child response, session transcript, and workspace paths. The parent can access both paths. The call returns when the child agent loop or process exits, or when timeout seconds elapse."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "prompts": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Investigation prompt for the subagent. Include enough standalone context: the user's goal, relevant constraints, known files/symbols, and desired answer shape. Use one for a focused question, or multiple to run independent investigations in parallel. Examples: 'List all tests in this project', 'Where is config loaded?', 'How does the agent loop work?'"
-                    }
+                    "task": { "type": "string", "description": "Standalone task for the subagent." },
+                    "access": { "type": "string", "enum": ["read", "write"], "description": "Filesystem access level." },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Wall-clock timeout in seconds. At 80% elapsed, active work is interrupted and the remaining time is reserved for one final summary turn." },
+                    "model": {
+                        "type": "string",
+                        "enum": model_options,
+                        "description": format!("Optional permitted subagent model. Omit to use the default: {default_model}.")
+                    },
+                    "reasoning": { "type": "string", "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Optional reasoning effort." }
                 },
-                "required": ["prompts"]
+                "required": ["task", "access", "timeout"]
             }),
         }
     }
 
-    async fn call(&self, args: TaskArgs) -> Result<String, ToolError> {
+    async fn call(&self, args: SpawnRequest) -> Result<String, ToolError> {
         if !crate::extras::subagents::is_enabled() {
             return Err(ToolError::Msg(
                 "task: subagents are disabled for this session".into(),
             ));
         }
-        if args.prompts.is_empty() {
-            return Err(ToolError::Msg("task: prompts must not be empty".into()));
+        if args.task.trim().is_empty() {
+            return Err(ToolError::Msg("task: task must not be empty".into()));
         }
-
-        check_perm(
-            &self.permission,
-            &self.ask_tx,
-            Self::NAME,
-            &args.prompts.join(" | "),
-        )
-        .await?;
-
-        let (client, provider_name, model_name, max_turns, config, agents) = with_config(|cfg| {
-            (
-                cfg.client.clone(),
-                cfg.provider_name.clone(),
-                cfg.model_name.clone(),
-                cfg.max_turns,
-                cfg.config.clone(),
-                cfg.agents.clone(),
-            )
-        });
-        let limits = Some(crate::agent::runner::SubagentLimits {
-            context_window: config.resolve_context_window(&provider_name, &model_name),
-            cutoff_fraction: 0.90,
-            timeout_cutoff: Some(SUBAGENT_TIMEOUT.mul_f64(0.90)),
-        });
-
-        let subagent_event_tx = clone_subagent_event_tx();
-
-        #[cfg(feature = "archmd")]
-        let architecture = with_config(|cfg| cfg.architecture.clone());
-        #[cfg(not(feature = "archmd"))]
-        let architecture: Option<String> = None;
-
-        // Spawn one task per prompt, each guarded by a wall-clock timeout.
-        // AbortHandles are stored in a guard so that if the parent future is
-        // dropped (user cancels, session exits) all in-flight subagents are
-        // aborted rather than leaking.
-        let mut abort_handles: Vec<tokio::task::AbortHandle> = Vec::new();
-        let mut handles = Vec::with_capacity(args.prompts.len());
-        for (i, prompt_text) in args.prompts.iter().enumerate() {
-            let prompt_text = prompt_text.clone();
-            let model = client.completion_model(model_name.clone());
-            let event_tx = subagent_event_tx.clone();
-            let architecture = architecture.clone();
-            let agents = agents.clone();
-            let config = config.clone();
-            let join_handle = tokio::spawn(async move {
-                let work = async {
-                    let agent = builder::build_explore_agent(
-                        model,
-                        max_turns,
-                        &config,
-                        agents,
-                        architecture,
-                    )
-                    .await;
-                    agent
-                        .run_subagent(&prompt_text, max_turns, event_tx.as_ref(), limits)
-                        .await
-                };
-                match tokio::time::timeout(SUBAGENT_TIMEOUT, work).await {
-                    Ok(Ok(response)) => (i, prompt_text, Ok(response)),
-                    Ok(Err(e)) => (i, prompt_text, Err(format!("[error: {}]", e))),
-                    Err(_elapsed) => (
-                        i,
-                        prompt_text,
-                        Err("[timeout: subagent exceeded 300s]".to_string()),
-                    ),
-                }
-            });
-            abort_handles.push(join_handle.abort_handle());
-            handles.push(join_handle);
+        if args.timeout == 0 {
+            return Err(ToolError::Msg(
+                "task: timeout must be at least 1 second".into(),
+            ));
         }
+        check_perm(&self.permission, &self.ask_tx, Self::NAME, &args.task).await?;
 
-        // Abort guard — if this future is dropped, all subagents are cancelled.
-        // Created after all spawns complete: the window between first spawn and
-        // guard creation is negligible in practice (no .await in between).
-        let _guard = SubagentGuard {
-            handles: abort_handles,
+        let session_id = Uuid::new_v4().to_string();
+        let source = std::env::current_dir()
+            .map_err(|e| ToolError::Msg(format!("task: failed to get current directory: {e}")))?;
+        let workspace_path = match args.access {
+            Access::Read => source
+                .canonicalize()
+                .map_err(|e| ToolError::Msg(format!("task: failed to resolve workspace: {e}")))?,
+            Access::Write => {
+                let source = source.clone();
+                let id = session_id.clone();
+                tokio::task::spawn_blocking(move || workspace::create(&source, &id))
+                    .await
+                    .map_err(|e| ToolError::Msg(format!("task: workspace creation panicked: {e}")))?
+                    .map_err(|e| ToolError::Msg(format!("task: {e}")))?
+            }
         };
+        let transcript_path = crate::session::storage::session_path(&session_id);
+        allow_parent_access(
+            &self.permission,
+            args.access,
+            &workspace_path,
+            &transcript_path,
+        );
 
-        let results = join_all(handles).await;
-
-        let mut outputs: Vec<(usize, String, String)> = Vec::new();
-        for r in results {
-            match r {
-                Ok((i, prompt_text, Ok(response))) => {
-                    outputs.push((
-                        i,
-                        prompt_text,
-                        truncate_cjk(
-                            &response,
-                            MAX_SUBAGENT_RESPONSE_BYTES,
-                            &format!(
-                                "\n…[subagent response truncated at {}B]",
-                                MAX_SUBAGENT_RESPONSE_BYTES
-                            ),
-                        ),
-                    ));
-                }
-                Ok((i, prompt_text, Err(e))) => {
-                    outputs.push((i, prompt_text, e));
-                }
-                Err(e) => {
-                    outputs.push((
-                        outputs.len(),
-                        "(unknown)".to_string(),
-                        format!("[task panicked: {}]", e),
-                    ));
-                }
-            }
+        let started = Instant::now();
+        let finalize_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .saturating_add(finalize_after_ms(args.timeout) as u128)
+            .min(u64::MAX as u128) as u64;
+        let (mut command, selected_model) =
+            child_command(&args, &session_id, &workspace_path, finalize_at_unix_ms)?;
+        let mut child = command
+            .spawn()
+            .map_err(|e| ToolError::Msg(format!("task: failed to start subagent process: {e}")))?;
+        let mut process_guard = ProcessGroupGuard::new(child.id());
+        let timeout = Duration::from_secs(args.timeout);
+        let socket_path = crate::extras::emacs::session_socket_path(&session_id);
+        let socket_ready = wait_for_socket(
+            &mut child,
+            &socket_path,
+            timeout.min(Duration::from_secs(5)),
+        )
+        .await;
+        let event_tx = clone_subagent_event_tx();
+        if let Some(tx) = event_tx {
+            let _ = tx
+                .send(AgentEvent::SubagentToolCall {
+                    name: CompactString::new("session"),
+                    args: serde_json::json!({
+                        "session_id": session_id,
+                        "workspace": workspace_path,
+                        "socket": socket_ready.then(|| socket_path.clone()),
+                        "model": selected_model.name,
+                        "provider": selected_model.provider,
+                        "resolved_model": selected_model.model,
+                        "reasoning": args.reasoning.as_deref().unwrap_or("default"),
+                        "access": access_name(args.access),
+                        "timeout": args.timeout,
+                    }),
+                })
+                .await;
         }
 
-        outputs.sort_by_key(|(i, _, _)| *i);
-
-        Ok(combine_results(&outputs))
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let output = tokio::time::timeout(remaining, child.wait_with_output()).await;
+        if matches!(&output, Ok(Ok(_))) {
+            process_guard.disarm();
+        }
+        let response = match output {
+            Ok(Ok(output)) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                format!(
+                    "[error: subagent process exited with {}: {}]",
+                    output.status,
+                    stderr.trim()
+                )
+            }
+            Ok(Err(e)) => format!("[error: failed to run subagent process: {e}]"),
+            Err(_) => format!("[timeout: subagent exceeded {}s]", args.timeout),
+        };
+        let response = truncate_cjk(
+            &response,
+            MAX_SUBAGENT_RESPONSE_BYTES,
+            &format!(
+                "\n…[subagent response truncated at {}B]",
+                MAX_SUBAGENT_RESPONSE_BYTES
+            ),
+        );
+        Ok(format!(
+            "{}\n\nSession: {}\nWorkspace: {}\nTranscript: {}\nSocket: {}\n",
+            response,
+            session_id,
+            workspace_path.display(),
+            transcript_path.display(),
+            socket_path.display()
+        ))
     }
 }
 
-/// Combine per-task outputs into a single Markdown string, ordered by the
-/// original prompt index. Multiple tasks get `## Task N:` headings; a single
-/// task is emitted as-is.
-pub(crate) fn combine_results(outputs: &[(usize, String, String)]) -> String {
-    let mut combined = String::new();
-    for (idx, (_, prompt_text, response)) in outputs.iter().enumerate() {
-        if outputs.len() > 1 {
-            if idx > 0 {
-                combined.push('\n');
-            }
-            let label = prompt_text.chars().take(60).collect::<String>();
-            combined.push_str(&format!("## Task {}: {}\n\n", idx + 1, label));
+fn child_command(
+    args: &SpawnRequest,
+    session_id: &str,
+    workspace: &Path,
+    finalize_at_unix_ms: u64,
+) -> Result<(Command, crate::extras::subagents::ModelOption), ToolError> {
+    let (model_options, max_turns, parent_session_id) = with_config(|cfg| {
+        (
+            cfg.model_options.clone(),
+            cfg.max_turns,
+            cfg.parent_session_id.clone(),
+        )
+    });
+    let selected = select_model_option(&model_options, args.model.as_deref())?;
+    let executable = subagent_executable();
+    let mut command = Command::new(executable);
+    command
+        .current_dir(workspace)
+        .arg("--print")
+        .arg("--provider")
+        .arg(&selected.provider)
+        .arg("--model")
+        .arg(&selected.model)
+        .arg("--max-agent-turns")
+        .arg(max_turns.to_string())
+        .arg("--subagent-session-id")
+        .arg(session_id)
+        .arg("--subagent-parent-session")
+        .arg(parent_session_id)
+        .arg("--subagent-access")
+        .arg(match args.access {
+            Access::Read => "read",
+            Access::Write => "write",
+        })
+        .arg("--subagent-live")
+        .arg("--subagent-finalize-at-unix-ms")
+        .arg(finalize_at_unix_ms.to_string());
+    match args.access {
+        Access::Read => {
+            command.arg("--read-only");
         }
-        combined.push_str(response);
-        if !combined.ends_with('\n') {
-            combined.push('\n');
+        Access::Write => {
+            command.args(["--accept-all", "--sandbox"]);
         }
     }
-    combined
+    if let Some(reasoning) = &args.reasoning {
+        command.arg("--reasoning-effort").arg(reasoning);
+    }
+    let prompt = match args.access {
+        Access::Read => format!(
+            "Work as a read-only subagent. Investigate and report a concise, verified answer. Do not modify files.\n\n{}",
+            args.task
+        ),
+        Access::Write => format!(
+            "Work as an isolated write subagent. Complete the task in this workspace, test the result, and report what changed.\n\n{}",
+            args.task
+        ),
+    };
+    command
+        .arg("--")
+        .arg(prompt)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    Ok((command, selected.clone()))
 }
 
-/// Aborts all registered subagent tasks on drop. If the parent agent cancels
-/// the `task` tool call (e.g. the session ends or the loop exits), in-flight
-/// subagents are stopped immediately rather than leaking.
-struct SubagentGuard {
-    handles: Vec<tokio::task::AbortHandle>,
+fn subagent_executable() -> std::path::PathBuf {
+    resolve_subagent_executable(std::env::current_exe().ok())
 }
 
-impl Drop for SubagentGuard {
+pub(crate) fn resolve_subagent_executable(
+    current: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    current
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("zerostack"))
+}
+
+pub(crate) struct ProcessGroupGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    pub(crate) fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
-        for h in &self.handles {
-            h.abort();
+        if let Some(pid) = self.pid {
+            kill_process_group(pid);
         }
+    }
+}
+
+pub(crate) fn finalize_after_ms(timeout_secs: u64) -> u64 {
+    timeout_secs.saturating_mul(10 * FINALIZE_PERCENT)
+}
+
+fn access_name(access: Access) -> &'static str {
+    match access {
+        Access::Read => "read",
+        Access::Write => "write",
+    }
+}
+
+async fn wait_for_socket(
+    child: &mut tokio::process::Child,
+    socket: &Path,
+    duration: Duration,
+) -> bool {
+    let deadline = Instant::now() + duration;
+    loop {
+        if socket.exists() {
+            return true;
+        }
+        if child.try_wait().ok().flatten().is_some() || Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+pub(crate) fn select_model_option<'a>(
+    options: &'a [crate::extras::subagents::ModelOption],
+    requested: Option<&str>,
+) -> Result<&'a crate::extras::subagents::ModelOption, ToolError> {
+    match requested {
+        Some(name) => options.iter().find(|option| option.name == name),
+        None => options.first(),
+    }
+    .ok_or_else(|| {
+        let permitted = options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        ToolError::Msg(format!(
+            "task: model '{}' is not permitted; choose one of: {}",
+            requested.unwrap_or(""),
+            permitted
+        ))
+    })
+}
+
+pub(crate) fn parent_workspace_tools(access: Access) -> &'static [&'static str] {
+    match access {
+        Access::Read => &["read", "list_dir"],
+        Access::Write => &["read", "write", "edit", "list_dir"],
+    }
+}
+
+fn allow_parent_access(
+    permission: &Option<PermCheck>,
+    access: Access,
+    workspace: &Path,
+    transcript: &Path,
+) {
+    let Some(permission) = permission else {
+        return;
+    };
+    let mut permission = permission.lock().unwrap_or_else(|e| e.into_inner());
+    let workspace = workspace.to_string_lossy();
+    for tool in parent_workspace_tools(access) {
+        permission.add_session_allowlist((*tool).to_string(), &workspace);
+        permission.add_session_allowlist((*tool).to_string(), &format!("{workspace}/**"));
+    }
+    permission.add_session_allowlist("read".to_string(), &transcript.to_string_lossy());
+}
+
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{pid}");
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }

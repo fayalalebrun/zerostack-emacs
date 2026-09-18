@@ -194,9 +194,23 @@ async fn main() -> anyhow::Result<()> {
         &model,
         cfg.resolve_context_window(&provider, &model),
     );
+    if let Some(id) = &cli.subagent_session_id {
+        uuid::Uuid::parse_str(id)
+            .map_err(|_| anyhow::anyhow!("invalid subagent session id: {id}"))?;
+        session.id = id.as_str().into();
+    }
+    if let Some(parent) = &cli.subagent_parent_session {
+        session.parent_session_id = Some(parent.as_str().into());
+        session.subagent_access = cli.subagent_access.as_deref().map(Into::into);
+    }
     #[cfg(feature = "subagents")]
     {
-        session.subagents_enabled = Some(cfg.task_enabled.unwrap_or(true));
+        session.subagents_enabled = Some(
+            cli.subagent_parent_session
+                .as_ref()
+                .map(|_| false)
+                .unwrap_or_else(|| cfg.task_enabled.unwrap_or(true)),
+        );
     }
 
     // Resolve input/output token costs from quick models or defaults
@@ -295,24 +309,15 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "subagents")]
     {
         let task_max_turns = cfg.task_max_turns.unwrap_or(20);
-        let qm = config::quick_models_map(&cfg);
-
-        // Resolve subagent model: subagent_model config > subagent_provider + model > main model
-        let (mut sub_provider, mut sub_model) = if let Some(sa_model) = &cfg.subagent_model {
-            if let Some(q) = qm.get(sa_model.as_str()) {
-                (q.provider.clone(), q.model.clone())
-            } else {
-                let prov = cfg
-                    .subagent_provider
-                    .clone()
-                    .unwrap_or_else(|| provider.clone());
-                (prov, sa_model.clone())
-            }
-        } else if let Some(sa_prov) = &cfg.subagent_provider {
-            (sa_prov.clone(), model.clone())
-        } else {
-            (provider.clone(), model.clone())
-        };
+        let fallback_provider = cfg.subagent_provider.as_deref().unwrap_or(&provider);
+        let mut model_options =
+            crate::extras::subagents::resolve_model_options(&cfg, fallback_provider, &model);
+        let default_option = model_options
+            .first()
+            .cloned()
+            .expect("subagent model options always include a fallback");
+        let mut sub_provider = compact_str::CompactString::new(&default_option.provider);
+        let mut sub_model = compact_str::CompactString::new(&default_option.model);
 
         let sub_client = if sub_provider.as_str() == provider {
             client.clone()
@@ -334,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(
                         "Could not initialize subagent provider '{}' ({}); \
                          falling back to main provider '{}'. \
-                         Set `subagent_provider`/`subagent_model` in config, or the \
+                         Set `subagent_provider`/`subagent_models` in config, or the \
                          provider's API key, to silence this.",
                         sub_provider,
                         e,
@@ -342,6 +347,11 @@ async fn main() -> anyhow::Result<()> {
                     );
                     sub_model = model.clone();
                     sub_provider = provider.clone();
+                    model_options = vec![crate::extras::subagents::ModelOption {
+                        name: model.to_string(),
+                        provider: provider.to_string(),
+                        model: model.to_string(),
+                    }];
                     client.clone()
                 }
             }
@@ -351,7 +361,9 @@ async fn main() -> anyhow::Result<()> {
             sub_client,
             sub_provider.to_string(),
             sub_model.to_string(),
+            model_options,
             task_max_turns,
+            session.id.to_string(),
             cfg.clone(),
             context.agents.clone(),
             #[cfg(feature = "archmd")]
@@ -376,7 +388,18 @@ async fn main() -> anyhow::Result<()> {
     let status_signals = cli.status_socket.clone().map(StatusSignals::new);
     #[cfg(not(feature = "status-signals"))]
     let status_signals: Option<StatusSignals> = None;
-    let (permission, ask_tx, ask_rx) = build_permission_checker(&cli, &cfg, &context.skills);
+    let (permission, ask_tx, mut ask_rx) = build_permission_checker(&cli, &cfg, &context.skills);
+    if cli.subagent_parent_session.is_some()
+        && let Some(mut requests) = ask_rx.take()
+    {
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                let _ = request
+                    .reply
+                    .send(crate::permission::ask::UserDecision::Deny);
+            }
+        });
+    }
 
     #[cfg(feature = "advisor")]
     let handoff_rx = {
@@ -650,6 +673,27 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if cli.subagent_live {
+        let prompt = cli.message.join(" ");
+        if prompt.trim().is_empty() {
+            anyhow::bail!("live subagent requires a prompt");
+        }
+        return extras::emacs::serve_subagent(
+            client,
+            cli,
+            cfg,
+            context,
+            session,
+            permission,
+            ask_tx,
+            ask_rx,
+            sandbox,
+            status_signals,
+            prompt,
+        )
+        .await;
+    }
+
     if cli.emacs {
         return extras::emacs::serve(
             client,
@@ -758,48 +802,53 @@ async fn main() -> anyhow::Result<()> {
                 });
                 crate::extras::advisor::set_session_messages(msgs);
             }
-            if let Some(ss) = status_signals.as_ref() {
-                ss.send_start();
-            }
-            let response_result = agent
-                .run_print(&msg, cli.resolve_max_agent_turns(&cfg), cli.pure_stdout)
-                .await;
-            if let Some(ss) = status_signals.as_ref() {
-                ss.send_stop();
-            }
-            let print_result = response_result?;
-            if !cli.no_session {
-                session.add_message(MessageRole::User, &msg);
-                for call in print_result.provider_calls {
-                    session.add_provider_call(call.call_index, call.usage, call.duration_ms);
+            if cli.subagent_parent_session.is_some() {
+                run_subagent_child(agent, &msg, &mut session).await?;
+            } else {
+                if let Some(ss) = status_signals.as_ref() {
+                    ss.send_start();
                 }
-                let mut provider_usage =
-                    session::SessionTokenUsage::from(print_result.context_usage);
-                provider_usage.reasoning_tokens = print_result.usage.reasoning_tokens;
-                session.add_message_with_reasoning_and_usage(
-                    MessageRole::Assistant,
-                    &print_result.response,
-                    print_result.reasoning,
-                    Some(provider_usage),
-                );
-                session.total_input_tokens = session
-                    .total_input_tokens
-                    .saturating_add(print_result.usage.input_tokens);
-                session.total_cached_input_tokens = session
-                    .total_cached_input_tokens
-                    .saturating_add(print_result.usage.cached_input_tokens);
-                session.total_output_tokens = session
-                    .total_output_tokens
-                    .saturating_add(print_result.usage.output_tokens);
-                session.total_reasoning_tokens = session
-                    .total_reasoning_tokens
-                    .saturating_add(print_result.usage.reasoning_tokens);
-                session::storage::save_session(&session)?;
-                let _ =
-                    session::chat_history::append_entry(&session::chat_history::ChatHistoryEntry {
-                        content: msg,
-                        timestamp: session.updated_at.clone(),
-                    });
+                let response_result = agent
+                    .run_print(&msg, cli.resolve_max_agent_turns(&cfg), cli.pure_stdout)
+                    .await;
+                if let Some(ss) = status_signals.as_ref() {
+                    ss.send_stop();
+                }
+                let print_result = response_result?;
+                if !cli.no_session {
+                    session.add_message(MessageRole::User, &msg);
+                    for call in print_result.provider_calls {
+                        session.add_provider_call(call.call_index, call.usage, call.duration_ms);
+                    }
+                    let mut provider_usage =
+                        session::SessionTokenUsage::from(print_result.context_usage);
+                    provider_usage.reasoning_tokens = print_result.usage.reasoning_tokens;
+                    session.add_message_with_reasoning_and_usage(
+                        MessageRole::Assistant,
+                        &print_result.response,
+                        print_result.reasoning,
+                        Some(provider_usage),
+                    );
+                    session.total_input_tokens = session
+                        .total_input_tokens
+                        .saturating_add(print_result.usage.input_tokens);
+                    session.total_cached_input_tokens = session
+                        .total_cached_input_tokens
+                        .saturating_add(print_result.usage.cached_input_tokens);
+                    session.total_output_tokens = session
+                        .total_output_tokens
+                        .saturating_add(print_result.usage.output_tokens);
+                    session.total_reasoning_tokens = session
+                        .total_reasoning_tokens
+                        .saturating_add(print_result.usage.reasoning_tokens);
+                    session::storage::save_session(&session)?;
+                    let _ = session::chat_history::append_entry(
+                        &session::chat_history::ChatHistoryEntry {
+                            content: msg,
+                            timestamp: session.updated_at.clone(),
+                        },
+                    );
+                }
             }
         }
     } else {
@@ -864,6 +913,116 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_subagent_child(
+    agent: provider::AnyAgent,
+    prompt: &str,
+    session: &mut session::Session,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    session.name = format!("subagent: {}", prompt.chars().take(64).collect::<String>()).into();
+    session.add_message(MessageRole::User, prompt);
+    session::storage::save_session(session)?;
+    let mut runner = agent.spawn_runner(prompt.to_string(), Vec::new());
+    let mut response_buf = String::new();
+    while let Some(event) = runner.event_rx.recv().await {
+        match event {
+            event::AgentEvent::Token(text) => {
+                response_buf.push_str(&text);
+                print!("{text}");
+                std::io::stdout().flush()?;
+            }
+            event::AgentEvent::Reasoning(text) => {
+                eprint!("{text}");
+                std::io::stderr().flush()?;
+            }
+            event::AgentEvent::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            } => {
+                session.add_partial_assistant_output(&response_buf, Vec::new());
+                response_buf.clear();
+                session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
+                session::storage::save_session(session)?;
+            }
+            event::AgentEvent::ToolResult {
+                id,
+                call_id,
+                name,
+                output,
+                loaded_context,
+                duration_ms,
+                ..
+            } => {
+                session.add_tool_result_structured_with_context(
+                    &name,
+                    &output,
+                    &id,
+                    call_id.as_deref(),
+                    loaded_context,
+                    duration_ms,
+                );
+                session::storage::save_session(session)?;
+            }
+            event::AgentEvent::SubagentToolCall { name, args } => {
+                session.add_subagent_tool_call(&name, &args);
+                session::storage::save_session(session)?;
+            }
+            event::AgentEvent::CompletionCall {
+                call_index,
+                usage,
+                duration_ms,
+            } => session.add_provider_call(call_index, usage, duration_ms),
+            event::AgentEvent::Done {
+                response,
+                usage,
+                context_usage,
+                reasoning,
+            } => {
+                let mut provider_usage = session::SessionTokenUsage::from(context_usage);
+                provider_usage.reasoning_tokens = usage.reasoning_tokens;
+                session.add_message_with_reasoning_and_usage(
+                    MessageRole::Assistant,
+                    &response,
+                    reasoning,
+                    Some(provider_usage),
+                );
+                session.total_input_tokens = session
+                    .total_input_tokens
+                    .saturating_add(usage.input_tokens);
+                session.total_cached_input_tokens = session
+                    .total_cached_input_tokens
+                    .saturating_add(usage.cached_input_tokens);
+                session.total_output_tokens = session
+                    .total_output_tokens
+                    .saturating_add(usage.output_tokens);
+                session.total_reasoning_tokens = session
+                    .total_reasoning_tokens
+                    .saturating_add(usage.reasoning_tokens);
+                session::storage::save_session(session)?;
+                println!();
+                return Ok(());
+            }
+            event::AgentEvent::Error { message, reasoning } => {
+                session.add_partial_assistant_output(&response_buf, reasoning);
+                session.add_message(MessageRole::System, &format!("subagent error: {message}"));
+                session::storage::save_session(session)?;
+                anyhow::bail!("subagent error: {message}");
+            }
+            event::AgentEvent::Retry { .. } => {}
+        }
+    }
+    session.add_partial_assistant_output(&response_buf, Vec::new());
+    session.add_message(
+        MessageRole::System,
+        "subagent process stopped before completion",
+    );
+    session::storage::save_session(session)?;
+    anyhow::bail!("subagent agent loop stopped before completion")
+}
+
 fn handle_config_command(
     cfg: &mut config::Config,
     command: &cli::ConfigCommand,
@@ -882,6 +1041,15 @@ fn handle_config_command(
             config::commands::validate_provider(cfg, &provider)?;
             for model in config::commands::model_ids_for_provider(&provider) {
                 println!("{model}");
+            }
+        }
+        cli::ConfigCommand::QuickModels => {
+            let mut names = config::quick_models_map(cfg)
+                .into_keys()
+                .collect::<Vec<_>>();
+            names.sort();
+            for name in names {
+                println!("{name}");
             }
         }
         cli::ConfigCommand::SetProvider { provider } => {
@@ -915,6 +1083,12 @@ fn handle_config_command(
             config::save_config(cfg)?;
             println!("subagent_provider {provider}");
             println!("subagent_model {model}");
+        }
+        #[cfg(feature = "subagents")]
+        cli::ConfigCommand::SetSubagentModels { models } => {
+            let models = config::commands::set_subagent_models(cfg, models)?;
+            config::save_config(cfg)?;
+            println!("subagent_models {}", models.join(","));
         }
     }
     Ok(())

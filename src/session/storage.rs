@@ -11,6 +11,10 @@ fn session_dir() -> PathBuf {
     dirs_path().join("sessions")
 }
 
+pub fn session_path(session_id: &str) -> PathBuf {
+    session_dir().join(format!("{}.json", safe_path_component(session_id)))
+}
+
 pub fn tool_output_dir(session_id: &str) -> PathBuf {
     dirs_path()
         .join("tool-outputs")
@@ -65,7 +69,7 @@ pub(crate) fn config_path() -> PathBuf {
 pub fn save_session(session: &Session) -> anyhow::Result<()> {
     let dir = session_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.json", session.id));
+    let path = session_path(&session.id);
     atomic_write(&path, serialize_session(session)?.as_bytes())
 }
 

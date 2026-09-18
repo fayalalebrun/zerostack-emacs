@@ -190,6 +190,8 @@ Accepted top-level keys:
 | `editor`                  | string  | Editor command for `Ctrl+G` (default: `$EDITOR` env var, then `editor`, then `nano`).                                                                                        |
 | `api_keys`                | object  | Map of provider names to API keys (e.g. `"openai": "sk-..."`). Used as fallback when the corresponding env var is not set.                                                   |
 | `quick_models`            | object  | Map of quick-model names to `{ "provider", "model", "reserve_tokens"?, "input_token_cost"?, "output_token_cost"?, "temperature"?, "extra_body"? }`. Can be switched with `/models <name>` or `--quick-model=<name>`. See Provider-specific request body parameters below for `extra_body`. |
+| `subagent_models`         | array of strings | Permitted model IDs or quick-model aliases exposed as `task.model` options. The first is the default. Unknown selections are rejected. |
+| `subagent_provider`       | string | Provider used for raw IDs in `subagent_models`; quick-model aliases use their own provider. |
 | `mcp_servers`             | object  | MCP server map when compiled with the `mcp` feature. When omitted, recommended MCPs are auto-configured (see below).                                                   |
 | `enable-exa-mcp`          | boolean | Auto-configure the Exa Web Search MCP server. Default: `true`.                                                                                                         |
 | `enable-context7-mcp`     | boolean | Auto-configure the Context7 MCP server. Default: `false`.                                                                                                              |
