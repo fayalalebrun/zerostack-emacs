@@ -226,6 +226,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (define-key map (kbd "A") #'zerostack-board-open-attention)
   (define-key map (kbd "c") #'zerostack-board-create-at-point)
   (define-key map (kbd "d") #'zerostack-board-set-description-at-point)
+  (define-key map (kbd "R") #'zerostack-restart-idle-sessions)
   (define-key map (kbd "s") #'zerostack-board-stop-at-point)
   (define-key map (kbd "x") #'zerostack-board-trash-at-point)
   (define-key map (kbd "RET") #'zerostack-board-open-at-point)
@@ -838,7 +839,7 @@ The root is resolved with Projectile when available, then `project.el', then
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
-    (insert (propertize "g refresh, j jump, o open, A attention, RET open, c create, d describe, s stop, x trash\n" 'face 'zerostack-muted-face))
+    (insert (propertize "g refresh, j jump, o open, A attention, RET open, c create, d describe, R restart idle, s stop, x trash\n" 'face 'zerostack-muted-face))
     (zerostack-board--insert-config-controls snapshot)
     (insert "\n")
     (when needs-attention
@@ -2670,6 +2671,32 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
           zerostack--line-buffer "")
     (zerostack--append-local-line "restarting zerostack --emacs" 'zs-muted)
     (zerostack--start-server args)))
+
+;;;###autoload
+(defun zerostack-restart-idle-sessions ()
+  "Restart each idle zerostack daemon owned by an open chat buffer."
+  (interactive)
+  (let* ((sessions (cl-remove-if-not #'zerostack--chat-buffer-p (buffer-list)))
+         (owned (cl-remove-if-not
+                 (lambda (buffer)
+                   (with-current-buffer buffer
+                     (process-live-p zerostack--server-process)))
+                 sessions))
+         (idle (cl-remove-if-not
+                (lambda (buffer)
+                  (with-current-buffer buffer
+                    (and (not zerostack--thinking)
+                         (not zerostack--startup-timer)
+                         (zerop (hash-table-count zerostack--pending-permissions)))))
+                owned)))
+    (dolist (buffer idle)
+      (with-current-buffer buffer
+        (zerostack-restart-daemon)))
+    (message "Restarted %d idle zerostack session%s; skipped %d busy, %d without an owned daemon"
+             (length idle)
+             (if (= (length idle) 1) "" "s")
+             (- (length owned) (length idle))
+             (- (length sessions) (length owned)))))
 
 (defun zerostack-disconnect ()
   "Disconnect from zerostack and stop a server process started by this buffer."

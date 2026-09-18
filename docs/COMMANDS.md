@@ -231,6 +231,10 @@ follow up with a normal message asking the agent about it.
 
 ## Native Emacs Protocol
 
+`M-x zerostack-restart-idle-sessions`, or `R` on the zerostack board, restarts
+all idle session daemons owned by open chat buffers while leaving busy and
+externally attached sessions untouched.
+
 `M-x zerostack-timing` opens a separate buffer with individual commands and
 text-generation blocks for the current session, sorted from slowest to fastest.
 

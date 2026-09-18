@@ -1486,6 +1486,40 @@
        (should (string-empty-p zerostack--line-buffer))
        (should (string-match-p "restarting zerostack --emacs" (buffer-string)))))))
 
+(ert-deftest zerostack-test-restart-idle-sessions-skips-busy-and-unowned-sessions ()
+  (let ((idle (generate-new-buffer " *zerostack-idle*"))
+        (thinking (generate-new-buffer " *zerostack-thinking*"))
+        (starting (generate-new-buffer " *zerostack-starting*"))
+        (permission (generate-new-buffer " *zerostack-permission*"))
+        (unowned (generate-new-buffer " *zerostack-unowned*"))
+        restarted)
+    (unwind-protect
+        (progn
+          (dolist (buffer (list idle thinking starting permission unowned))
+            (with-current-buffer buffer
+              (zerostack-mode)
+              (setq zerostack--server-process 'owned)))
+          (with-current-buffer thinking
+            (setq zerostack--thinking t))
+          (with-current-buffer starting
+            (setq zerostack--startup-timer t))
+          (with-current-buffer permission
+            (puthash 1 '(:tool "bash") zerostack--pending-permissions))
+          (with-current-buffer unowned
+            (setq zerostack--server-process nil))
+          (cl-letf (((symbol-function 'zerostack--chat-buffer-p)
+                     (lambda (buffer)
+                       (memq buffer (list idle thinking starting permission unowned))))
+                    ((symbol-function 'process-live-p)
+                     (lambda (process) (eq process 'owned)))
+                    ((symbol-function 'zerostack-restart-daemon)
+                     (lambda () (push (current-buffer) restarted))))
+            (zerostack-restart-idle-sessions))
+          (should (equal restarted (list idle))))
+      (dolist (buffer (list idle thinking starting permission unowned))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest zerostack-test-command-menu-permission-selection ()
   (zerostack-test--with-buffer
    (let (sent)
