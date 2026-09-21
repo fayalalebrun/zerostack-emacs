@@ -496,7 +496,7 @@ Example:
 Permission actions are lowercase strings: `allow`, `ask`, or `deny`. Each tool
 rule can be a single action or an object mapping patterns to actions. Supported
 permission tool keys are `bash`, `read`, `write`, `edit`, `grep`, `find_files`,
-`list_dir`, and `todo_write`. MCP-backed tools are checked under
+`list_dir`, `todo_write`, and `code_search`. MCP-backed tools are checked under
 `mcp_tool:{server_name}:{tool_name}`. Use `"*"` for the default action,
 `external_directory` for absolute-path rules outside the working directory, and
 `doom_loop` for repeated identical tool calls (default: `ask`). If `bash` is
@@ -555,6 +555,16 @@ A `permission-regex` example in JSON:
   }
 }
 ```
+
+When compiled with the `veles` feature, the read-only `code_search` tool provides
+hybrid, semantic, and BM25 repository search. Its optional `path` argument
+scopes results to a relative or absolute file/directory; absolute external paths
+use normal external-directory permission checks. It refreshes its persistent index
+on each call and stores it outside the repository under
+`$XDG_CACHE_HOME/zerostack/veles/<repository-id>/`. Git worktrees use the
+canonical Git common directory as their repository identity, so they share the
+same cache. The first call downloads Veles' embedding model into the standard
+Hugging Face cache.
 
 When compiled with MCP support, `mcp_servers` accepts command-based and URL-based
 servers:

@@ -12,7 +12,7 @@ You are an expert coding assistant. Read, write, edit files and run commands. Re
 - **Repeated reads are BLOCKED.** Once you read a file section, calling read again with the same path/offset/limit returns an error until the file is edited or written. Finding a different file, a different section, or searching with grep is always allowed.
 - Read files with enough offset/limit to cover the scope — avoid repeated tiny reads. Read at least 200 lines at a time.
 - When you need multiple files, read them in parallel in one message. A single multi-tool-call message is faster than several sequential ones.
-- Prefer grep and find_files over reading many files one-by-one. Search first, then read only the files that matched.
+- Search before reading many files one-by-one, then read only the relevant matches.
 - Do NOT re-list the same directory. Do NOT re-search the same pattern. If you need the result again, it's the same.
 - **Subagent use:** The task tool runs a fresh-context subagent and is the default for cross-file work: find/list/count all X, where is Y used, how does Z work. It returns a verified summary in one call rather than forcing you to synthesize across multiple grep views. Call read/grep/find_files directly for single-file work or known-location lookups. If you already ran a subagent and got results, use those results; do not re-spawn.
 
@@ -36,6 +36,18 @@ You are an expert coding assistant. Read, write, edit files and run commands. Re
 - Do NOT restructure unrelated code.
 - If a task requires system intervention (installing packages, modifying system config), stop and ask.
 - Ask the user when you have doubts or need clarification — do not guess.";
+
+#[cfg(feature = "veles")]
+pub const CODE_SEARCH_PROMPT: &str = "
+
+# Code Search Routing
+
+- Use `code_search` first when the relevant location is unknown, when exploring unfamiliar code, or when searching by behavior, intent, or architecture.
+- Use `grep` for exact identifiers, literals, regex patterns, and exhaustive occurrence checks.
+- Use `find_files` when searching by filename or extension.
+- If results are polluted by unrelated folders, set `code_search.path` to a relevant file or directory instead of switching to grep.
+- After `code_search` identifies likely files or ranges, use `read` for precise context before editing.
+- Do not repeat the same search with `grep` unless you need exact or exhaustive matches that semantic search may omit.";
 
 pub const TODO_TOOLS_PROMPT: &str = "
 

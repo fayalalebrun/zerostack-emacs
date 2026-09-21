@@ -92,7 +92,7 @@ pub(crate) fn format_tool_call_summary(name: &str, args: &serde_json::Value) -> 
 
     let primary_keys: &[&str] = match name {
         "read" | "write" | "edit" | "list_dir" => &["path"],
-        "grep" => &["pattern", "path"],
+        "grep" | "code_search" => &["query", "pattern", "path"],
         "find_files" => &["pattern"],
         "bash" => &["command"],
         _ => &[],

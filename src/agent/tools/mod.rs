@@ -8,6 +8,8 @@ pub(crate) mod list_dir;
 pub(crate) mod normalize;
 pub(crate) mod read;
 pub(crate) mod todo;
+#[cfg(feature = "veles")]
+pub(crate) mod veles;
 pub(crate) mod write;
 
 pub(crate) use normalize::{levenshtein_similarity, normalize_whitespace};
@@ -208,6 +210,8 @@ pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use read::ReadTool;
 pub use todo::WriteTodoList;
+#[cfg(feature = "veles")]
+pub use veles::VelesTool;
 pub use write::WriteTool;
 
 use std::io;

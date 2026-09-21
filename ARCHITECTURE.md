@@ -12,7 +12,7 @@ Single crate, no workspace. All source under `src/`.
 | `src/provider.rs` | LLM provider abstraction (type-erased: `AnyClient`, `AnyModel`, `AnyAgent` enums) |
 | `src/auth.rs` | API key resolution (`AuthResolver`, `ProviderKind` enum) |
 | `src/event.rs` | `AgentEvent` (streaming LLM output) and `UserEvent` (TUI input) enums |
-| `src/agent/` | Agent lifecycle: `builder.rs` (rig Agent construction + tool injection), `runner.rs` (spawn, stream), `prompt.rs` (system prompts), `tools/` (11 tool impls) |
+| `src/agent/` | Agent lifecycle: `builder.rs` (rig Agent construction + tool injection), `runner.rs` (spawn, stream), `prompt.rs` (system prompts), `tools/` (core tool implementations, including feature-gated Veles search) |
 | `src/session/` | Session state: `mod.rs` (messages, compactions, costs), `storage.rs` (JSON file I/O), `chat_history.rs` |
 | `src/permission/` | Security: `checker.rs` (glob+regex rules, doom-loop detection), `ask.rs` (user prompt UI), `pattern.rs` |
 | `src/ui/` | Custom TUI on crossterm (no ratatui): `mod.rs` (event loop), `terminal.rs` (raw mode guard), `renderer.rs` (line buffer + viewport), `input/` (text editor + pickers), `status.rs`, `markdown.rs`, `event_handler.rs`, `cmd_picker.rs` |
@@ -86,9 +86,10 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 2. **Type-erased enums, not trait objects** — `AnyAgent` enum wraps each provider variant. Avoids `dyn CompletionModel` lifetime issues; matching on enum is faster than vtable dispatch. (`src/provider.rs:83-259`)
 3. **Permission: dual-layer (glob + regex) rules** — glob for fast path, regex for complex patterns. Doom-loop detection tracks repeated identical tool calls. (`src/permission/checker.rs:29`)
 4. **Session compaction** — when token count approaches context window, old messages are summarized and dropped, preserving a summary prefix. (`src/session/mod.rs:24`)
-5. **Feature-gated extras** — `loop`, `mcp`, `acp`, `memory`, `subagents`, `git-worktree`, `archmd` are all compile-time features. Extras don't bloat the core binary.
+5. **Feature-gated extras** — `loop`, `mcp`, `acp`, `memory`, `subagents`, `git-worktree`, `archmd`, and `veles` are compile-time features. Extras don't bloat builds that disable them.
 6. **Single-threaded tokio by default** — `#[tokio::main(flavor = "current_thread")]` unless `multithread` feature enabled. Keeps resource usage low for a CLI tool.
 7. **Process-isolated subagents** — `task` starts a one-shot zerostack child with its own persisted session and a read-only Emacs socket for real-time attachment. Write tasks snapshot the current working state into a persistent CoW Git worktree or copied directory; parent sessions store links and access rules for child transcripts/workspaces. (`src/extras/subagents/task_tool.rs`, `workspace.rs`, `src/extras/emacs.rs`)
+8. **Worktree-shared Veles index** — the feature-gated embedded Veles tool stores indexes under the zerostack cache directory, keyed by the canonical Git common directory. Calls from all worktrees serialize through a per-repository file lock and refresh the shared index from the active worktree. (`src/agent/tools/veles.rs`)
 
 ## Dependencies
 
@@ -107,6 +108,7 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 | `tracing + tracing-subscriber` | Structured logging (`RUST_LOG` env var) |
 | `mimalloc` | Global allocator (size + speed) |
 | `compact_str`, `smallvec` | Heap-efficient small-string/small-vector types |
+| `veles-core 0.6` | Optional embedded hybrid code search and persistent repository indexes |
 
 Optional (`mcp` feature): `rmcp 1.7` (MCP client with child-process + HTTP transport). Optional (`acp` feature): `agent-client-protocol 0.12`.
 

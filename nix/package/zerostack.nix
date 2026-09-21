@@ -1,9 +1,11 @@
 { lib
+, autoPatchelfHook
 , rustPlatform
 , binutils
 , mold
 , openssl
 , pkg-config
+, stdenv
 }:
 
 let
@@ -26,6 +28,7 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../../Cargo.lock;
 
   nativeBuildInputs = [
+    autoPatchelfHook
     binutils
     mold
     pkg-config
@@ -33,12 +36,14 @@ rustPlatform.buildRustPackage {
 
   buildInputs = [
     openssl
+    stdenv.cc.cc.lib
   ];
 
   buildFeatures = [
     "acp"
     "memory"
     "multithread"
+    "veles"
   ];
 
   # TODO: there needs to be a list of tests that can vs. can’t run in the Nix

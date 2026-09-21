@@ -57,6 +57,9 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         }
         + if !cwd.is_empty() { 30 + cwd.len() } else { 0 };
 
+    #[cfg(feature = "veles")]
+    let total_len = total_len + crate::agent::prompt::CODE_SEARCH_PROMPT.len();
+
     #[cfg(feature = "archmd")]
     let total_len = total_len
         + if context.architecture.is_some() {
@@ -90,6 +93,8 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     preamble.push_str(SYSTEM_PROMPT);
     preamble.push('\n');
     preamble.push_str(TODO_TOOLS_PROMPT);
+    #[cfg(feature = "veles")]
+    preamble.push_str(crate::agent::prompt::CODE_SEARCH_PROMPT);
     if !context_agents.is_empty() {
         preamble.push_str("\n\n");
         preamble.push_str(context_agents);
@@ -261,6 +266,11 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         if crate::extras::advisor::with_config(|c| c.enabled) {
             use crate::extras::advisor::AdvisorTool;
             builder = builder.tool(AdvisorTool::new());
+        }
+
+        #[cfg(feature = "veles")]
+        {
+            builder = builder.tool(tools::VelesTool::new(permission.clone(), ask_tx.clone()));
         }
 
         builder.build()

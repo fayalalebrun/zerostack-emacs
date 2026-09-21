@@ -33,6 +33,7 @@ pub struct PermissionConfig {
     pub list_dir: Option<ToolPerm>,
     #[serde(alias = "write_todo_list")]
     pub todo_write: Option<ToolPerm>,
+    pub code_search: Option<ToolPerm>,
     pub mcp_tool: Option<ToolPerm>,
     pub external_directory: Option<HashMap<String, Action>>,
     pub doom_loop: Option<Action>,

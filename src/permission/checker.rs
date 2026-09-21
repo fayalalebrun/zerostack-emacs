@@ -56,6 +56,7 @@ impl PermissionChecker {
             ("find_files", &config.find_files),
             ("list_dir", &config.list_dir),
             ("todo_write", &config.todo_write),
+            ("code_search", &config.code_search),
             ("mcp_tool", &config.mcp_tool),
         ] {
             let Some(tp) = tool_perm else { continue };
@@ -201,7 +202,10 @@ impl PermissionChecker {
     }
 
     fn is_read_tool(&self, tool: &str) -> bool {
-        matches!(tool, "read" | "grep" | "find_files" | "list_dir")
+        matches!(
+            tool,
+            "read" | "grep" | "find_files" | "list_dir" | "code_search"
+        )
     }
 
     fn resolve_check_action(&self, tool: &str, matched: &SmallVec<[Action; 4]>) -> Action {
@@ -437,7 +441,7 @@ impl PermissionChecker {
     }
 
     fn is_path_tool(&self, tool: &str) -> bool {
-        matches!(tool, "read" | "write" | "edit" | "list_dir")
+        matches!(tool, "read" | "write" | "edit" | "list_dir" | "code_search")
     }
 
     fn is_external_path(&self, path_str: &str) -> bool {

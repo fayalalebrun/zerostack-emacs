@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'multimodal', 'pdf', 'rtk']
+default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'multimodal', 'pdf', 'rtk', 'veles']
 status-signals = []
 loop = []
 git-worktree = []
@@ -31,6 +31,7 @@ multimodal = ["rig/image", "dep:png", "dep:zune-jpeg", "dep:zune-core", "dep:gif
 pdf = ["multimodal", "rig/pdf"]   
 advisor = []
 rtk = []
+veles = ["dep:veles-core"]
 
 [dependencies]
 rig = { version = "0.39", features = ["rmcp"] }
@@ -83,6 +84,7 @@ http = "1"
 agent-client-protocol = { version = "0.12.0", optional = true }
 blocking = { version = "1", optional = true }
 mimalloc = { version = "0.1", default-features = false }
+veles-core = { version = "0.6", optional = true }
 
 [profile.dev]
 opt-level = 1
