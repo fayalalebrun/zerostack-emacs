@@ -1687,6 +1687,23 @@ fn openai_reasoning_params(effort: Option<&str>) -> Option<serde_json::Value> {
         .map(|effort| serde_json::json!({ "reasoning": { "effort": effort } }))
 }
 
+const OPENAI_FILE_LINK_GUIDANCE: &str =
+    "Do not use `sandbox:` URLs. Link local files with `file:///absolute/path` URLs.";
+
+fn append_openai_file_link_guidance(prompt: &mut Option<String>) {
+    let prompt = prompt.get_or_insert_default();
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(OPENAI_FILE_LINK_GUIDANCE);
+}
+
+fn with_openai_file_link_guidance(context: &ContextFiles) -> ContextFiles {
+    let mut context = context.clone();
+    append_openai_file_link_guidance(&mut context.current_prompt);
+    context
+}
+
 /// Builds an OpenAiModel (Responses / Completions) into the matching OpenAiAgent.
 #[allow(clippy::too_many_arguments)]
 async fn build_openai_agent(
@@ -1703,6 +1720,13 @@ async fn build_openai_agent(
     extra_body: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> OpenAiAgent {
+    let openai_context = matches!(
+        &model,
+        OpenAiModel::Responses(_) | OpenAiModel::Completions(_) | OpenAiModel::Codex(_)
+    )
+    .then(|| with_openai_file_link_guidance(context));
+    let context = openai_context.as_ref().unwrap_or(context);
+
     match model {
         OpenAiModel::Responses(m) => OpenAiAgent::Responses(
             builder::build_agent_inner(
@@ -2176,13 +2200,32 @@ mod opencode_go_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenCodeGoApi, OpenCodeGoHttpClient, ensure_codex_instructions,
-        normalize_reasoning_effort_value, opencode_go_api, opencode_go_reasoning_params,
-        openrouter_anthropic_routing, parse_opencode_go_models, supported_reasoning_efforts,
-        supports_reasoning_effort_value,
+        OpenCodeGoApi, OpenCodeGoHttpClient, append_openai_file_link_guidance,
+        ensure_codex_instructions, normalize_reasoning_effort_value, opencode_go_api,
+        opencode_go_reasoning_params, openrouter_anthropic_routing, parse_opencode_go_models,
+        supported_reasoning_efforts, supports_reasoning_effort_value,
     };
     use bytes::Bytes;
     use serde_json::json;
+
+    #[test]
+    fn openai_file_link_guidance_rejects_sandbox_urls() {
+        let mut prompt = Some("Follow project rules.".to_string());
+        append_openai_file_link_guidance(&mut prompt);
+        assert_eq!(
+            prompt.as_deref(),
+            Some(
+                "Follow project rules.\n\nDo not use `sandbox:` URLs. Link local files with `file:///absolute/path` URLs."
+            )
+        );
+
+        let mut prompt = None;
+        append_openai_file_link_guidance(&mut prompt);
+        assert_eq!(
+            prompt.as_deref(),
+            Some("Do not use `sandbox:` URLs. Link local files with `file:///absolute/path` URLs.")
+        );
+    }
 
     #[test]
     fn pins_anthropic_namespaced_openrouter_models() {
