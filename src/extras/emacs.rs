@@ -39,7 +39,7 @@ mod imp {
     const EVENT_BUFFER: usize = 512;
     const ARTIFACT_PREVIEW_CHARS: usize = 240;
     const STREAM_RENDER_INTERVAL: Duration = Duration::from_millis(33);
-    const SUBAGENT_FINALIZE_PROMPT: &str = "Time is nearly exhausted. Stop all new work now. Use this one final turn only to verify and save the work already completed, then return a concise final response stating what was completed, what was verified, and what remains. Do not start additional tasks or broad investigations.";
+    const SUBAGENT_FINALIZE_PROMPT: &str = "The soft deadline has been reached. Stop all new work now. Use this one tool-free final turn only to summarize the work already completed, what was verified, and what remains. Do not start additional tasks or broad investigations.";
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct SessionMeta {
@@ -550,7 +550,7 @@ mod imp {
                         "subagent-finalizing",
                         format!(
                             " :message {}",
-                            sexp_quote("time limit 80% reached; finalizing")
+                            sexp_quote("soft deadline reached; starting tool-free final turn")
                         ),
                     )
                     .await;
@@ -4452,10 +4452,10 @@ mod imp {
             .get("access")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("read");
-        let timeout = args
+        let finalize_after = args
             .get("timeout")
             .and_then(serde_json::Value::as_u64)
-            .map(|seconds| format!(", timeout={seconds}s"))
+            .map(|seconds| format!(", finalize-after={seconds}s"))
             .unwrap_or_default();
         let label = format!(
             "subagent session {} [model={}, provider={}, thinking={}, access={}{}]",
@@ -4464,7 +4464,7 @@ mod imp {
             provider,
             reasoning,
             access,
-            timeout,
+            finalize_after,
         );
         let mut url = format!("zerostack-session:{id}?workspace={workspace}");
         if let Some(socket) = socket {
@@ -7580,7 +7580,7 @@ mod imp {
             );
             assert_eq!(
                 line.text,
-                "subagent session child-id [model=fast->vendor/fast, provider=openrouter, thinking=high, access=write, timeout=120s]"
+                "subagent session child-id [model=fast->vendor/fast, provider=openrouter, thinking=high, access=write, finalize-after=120s]"
             );
         }
 
@@ -7684,6 +7684,7 @@ mod imp {
                     .any(|message| message.content == SUBAGENT_FINALIZE_PROMPT)
             );
             drop(session);
+            assert!(server.mutable.lock().await.finalizing);
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
 

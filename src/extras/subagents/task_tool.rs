@@ -17,7 +17,6 @@ use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 
 const MAX_SUBAGENT_RESPONSE_BYTES: usize = 128 * 1024;
-const FINALIZE_PERCENT: u64 = 80;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -62,14 +61,14 @@ impl Tool for TaskTool {
         let default_model = model_options.first().cloned().unwrap_or_default();
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Spawn a fresh zerostack process for an isolated task. Read access uses the current workspace. Write access creates a persistent copy-on-write workspace containing all in-progress edits. The result includes the child response, session transcript, and workspace paths. The parent can access both paths. The call returns when the child agent loop or process exits, or when timeout seconds elapse."
+            description: "Spawn a fresh zerostack process for an isolated task. Read access uses the current workspace. Write access creates a persistent copy-on-write workspace containing all in-progress edits. The result includes the child response, session transcript, and workspace paths. The parent can access both paths. The soft deadline interrupts active work and starts one tool-free final turn; that final turn has no timeout."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "Standalone task for the subagent." },
                     "access": { "type": "string", "enum": ["read", "write"], "description": "Filesystem access level." },
-                    "timeout": { "type": "integer", "minimum": 1, "description": "Wall-clock timeout in seconds. At 80% elapsed, active work is interrupted and the remaining time is reserved for one final summary turn." },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Soft deadline in seconds. When elapsed, active work is interrupted and exactly one tool-free final turn begins without a hard timeout." },
                     "model": {
                         "type": "string",
                         "enum": model_options,
@@ -122,7 +121,6 @@ impl Tool for TaskTool {
             &transcript_path,
         );
 
-        let started = Instant::now();
         let finalize_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -163,16 +161,15 @@ impl Tool for TaskTool {
                 .await;
         }
 
-        let remaining = timeout.saturating_sub(started.elapsed());
-        let output = tokio::time::timeout(remaining, child.wait_with_output()).await;
-        if matches!(&output, Ok(Ok(_))) {
+        let output = child.wait_with_output().await;
+        if output.is_ok() {
             process_guard.disarm();
         }
         let response = match output {
-            Ok(Ok(output)) if output.status.success() => {
+            Ok(output) if output.status.success() => {
                 String::from_utf8_lossy(&output.stdout).trim().to_string()
             }
-            Ok(Ok(output)) => {
+            Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 format!(
                     "[error: subagent process exited with {}: {}]",
@@ -180,8 +177,7 @@ impl Tool for TaskTool {
                     stderr.trim()
                 )
             }
-            Ok(Err(e)) => format!("[error: failed to run subagent process: {e}]"),
-            Err(_) => format!("[timeout: subagent exceeded {}s]", args.timeout),
+            Err(e) => format!("[error: failed to run subagent process: {e}]"),
         };
         let response = truncate_cjk(
             &response,
@@ -307,7 +303,7 @@ impl Drop for ProcessGroupGuard {
 }
 
 pub(crate) fn finalize_after_ms(timeout_secs: u64) -> u64 {
-    timeout_secs.saturating_mul(10 * FINALIZE_PERCENT)
+    timeout_secs.saturating_mul(1_000)
 }
 
 fn access_name(access: Access) -> &'static str {

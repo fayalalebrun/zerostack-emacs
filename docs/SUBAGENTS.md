@@ -9,12 +9,12 @@ Git repository) containing the parent's tracked, staged, unstaged, and untracked
 edits at spawn time. File copies use CoW reflinks when the filesystem supports
 them.
 
-The tool returns when the child agent loop exits, the child process exits, or
-the requested timeout expires. At 80% of the requested timeout, active work is
-force-interrupted and the final 20% is reserved for exactly one turn that saves,
-verifies, and summarizes completed work. The outer deadline remains a hard
-process-group kill. Aborting the parent turn also terminates the child process
-group. Results include the response, child session ID, workspace path,
+The tool returns when the child agent loop or child process exits. The requested
+`timeout` is a soft deadline: when it expires, active work is interrupted and
+exactly one tool-free turn summarizes completed work, existing verification,
+and anything remaining. That final turn has no hard timeout. Aborting the parent
+turn still terminates the child process group. Results include the response,
+child session ID, workspace path,
 transcript path, and live socket path. While the child is running, Emacs
 attaches to that same process and receives streamed updates.
 
@@ -42,9 +42,9 @@ The main agent has a tool called `task` with this request:
 }
 ```
 
-`task`, `access`, and `timeout` (seconds) are required. `model` accepts either a
-model ID or a configured quick-model name. `reasoning` accepts the same effort
-values as `--reasoning-effort`.
+`task`, `access`, and `timeout` (soft-deadline seconds) are required. `model`
+accepts either a model ID or a configured quick-model name. `reasoning` accepts
+the same effort values as `--reasoning-effort`.
 
 ## Access modes
 
@@ -173,7 +173,7 @@ child session sets its workspace as `default-directory`, so normal `find-file`
 access stays scoped to that session. Deleting the child session also removes its
 Git worktree or copied workspace. During a task call, Emacs renders a clickable
 child-session link that lists the model, provider, thinking level, access mode,
-and timeout. Opening
+and soft finalization deadline. Opening
 running connects to the child process's Unix socket and streams its real-time
 updates. The attachment is read-only so it cannot start a competing turn or
 mutate the child session. On completion, the child's model response is attached

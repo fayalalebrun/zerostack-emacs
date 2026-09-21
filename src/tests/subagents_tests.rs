@@ -177,12 +177,12 @@ mod tests {
     }
 
     #[test]
-    fn subagent_reserves_last_twenty_percent_for_finalization() {
+    fn subagent_timeout_is_the_soft_finalization_deadline() {
         use crate::extras::subagents::task_tool::finalize_after_ms;
 
-        assert_eq!(finalize_after_ms(1), 800);
-        assert_eq!(finalize_after_ms(10), 8_000);
-        assert_eq!(finalize_after_ms(100), 80_000);
+        assert_eq!(finalize_after_ms(1), 1_000);
+        assert_eq!(finalize_after_ms(10), 10_000);
+        assert_eq!(finalize_after_ms(100), 100_000);
         assert_eq!(finalize_after_ms(u64::MAX), u64::MAX);
     }
 
