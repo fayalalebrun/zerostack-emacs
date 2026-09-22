@@ -221,6 +221,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defun zerostack-board--bind-keys (map)
   (set-keymap-parent map special-mode-map)
   (define-key map (kbd "g") #'zerostack-board-refresh)
+  (define-key map (kbd "S") #'zerostack-board-search-sessions)
   (define-key map (kbd "j") #'zerostack-board-jump)
   (define-key map (kbd "o") #'zerostack-board-open)
   (define-key map (kbd "A") #'zerostack-board-open-attention)
@@ -305,6 +306,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack-board--snapshot nil)
 (defvar-local zerostack-board--fetch-function nil)
 (defvar-local zerostack-board--session-limits nil)
+(defvar-local zerostack-session-search--process nil)
+(defvar-local zerostack-session-search--query nil)
 (defvar zerostack--config-command-function nil
   "Optional test hook used instead of invoking `zerostack-command config'.")
 
@@ -693,6 +696,143 @@ The root is resolved with Projectile when available, then `project.el', then
       (goto-char (point-min))
       (read (current-buffer)))))
 
+(define-derived-mode zerostack-session-search-mode special-mode "zerostack-session-search"
+  "Major mode for semantic zerostack session search results."
+  (setq truncate-lines nil))
+
+(defun zerostack-board-search-sessions ()
+  "Search saved zerostack conversations semantically."
+  (interactive)
+  (let ((query (string-trim (read-string "Semantic session search: "))))
+    (unless (string-empty-p query)
+      (zerostack-session-search query))))
+
+(defun zerostack-session-search (query)
+  "Show asynchronous semantic saved-session results for QUERY."
+  (let ((buffer (get-buffer-create (format "*zerostack session search: %s*" query))))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'zerostack-session-search-mode)
+        (zerostack-session-search-mode))
+      (when (process-live-p zerostack-session-search--process)
+        (delete-process zerostack-session-search--process))
+      (setq-local zerostack-session-search--query query)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Searching saved conversations for %S...\n" query))
+        (goto-char (point-min)))
+      (let ((output (generate-new-buffer " *zerostack-session-search-output*")))
+        (condition-case err
+            (setq-local zerostack-session-search--process
+                        (make-process
+                         :name "zerostack-session-search" :buffer output :noquery t
+                         :connection-type 'pipe :coding 'utf-8-unix
+                         :command (list zerostack-command "--emacs-board-search" query)
+                         :sentinel
+                         (lambda (process _event)
+                           (zerostack-session-search--finished process buffer))))
+          (error
+           (kill-buffer output)
+           (signal (car err) (cdr err))))))
+    (pop-to-buffer buffer)))
+
+(defun zerostack-session-search--finished (process buffer)
+  "Render PROCESS output into semantic search result BUFFER."
+  (when (memq (process-status process) '(exit signal))
+    (unwind-protect
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (eq process zerostack-session-search--process)
+              (setq zerostack-session-search--process nil)
+              (condition-case err
+                  (let ((snapshot
+                         (with-current-buffer (process-buffer process)
+                           (unless (zerop (process-exit-status process))
+                             (error "zerostack --emacs-board-search exited with %s: %s"
+                                    (process-exit-status process)
+                                    (string-trim (buffer-string))))
+                           (goto-char (point-min))
+                           (read (current-buffer)))))
+                    (zerostack-session-search--render snapshot))
+                (error
+                 (let ((inhibit-read-only t))
+                   (erase-buffer)
+                   (insert (format "Semantic session search failed: %s\n"
+                                   (error-message-string err)))))))))
+      (when (buffer-live-p (process-buffer process))
+        (kill-buffer (process-buffer process))))))
+
+(defun zerostack-session-search--render (snapshot)
+  "Render semantic session-search SNAPSHOT."
+  (unless (eq (car-safe snapshot) 'zerostack-session-search)
+    (error "Invalid zerostack session search snapshot"))
+  (let ((query (plist-get (cdr snapshot) :query))
+        (results (plist-get (cdr snapshot) :results))
+        (inhibit-read-only t))
+    (erase-buffer)
+    (insert (propertize (format "semantic session search: %s\n" query)
+                        'face 'zerostack-heading-face))
+    (insert (propertize "g repeat search, RET open session\n\n"
+                        'face 'zerostack-muted-face))
+    (if results
+        (dolist (result results)
+          (zerostack-session-search--insert-result result))
+      (insert (propertize "No matching saved conversations.\n"
+                          'face 'zerostack-muted-face)))
+    (goto-char (point-min))
+    (when-let ((window (get-buffer-window (current-buffer) 0)))
+      (set-window-point window (point-min)))))
+
+(defun zerostack-session-search--insert-result (result)
+  "Insert one semantic session search RESULT."
+  (let ((start (point))
+        (id (or (plist-get result :id) ""))
+        (title (or (plist-get result :title) "(untitled)"))
+        (cwd (or (plist-get result :cwd) ""))
+        (score (or (plist-get result :score) 0))
+        (text (or (plist-get result :text) "")))
+    (insert (propertize (make-string 72 ?─) 'face 'zerostack-muted-face))
+    (insert "\n")
+    (insert (propertize (format "Session %s  %s\n" (substring id 0 (min 8 (length id))) title)
+                        'face 'zerostack-heading-face))
+    (insert (propertize (format "%s  relevance %.3f\n" cwd score)
+                        'face 'zerostack-muted-face))
+    (insert text "\n\n")
+    (add-text-properties
+     start (point)
+     `(mouse-face highlight
+                  help-echo "RET opens this zerostack session"
+                  keymap ,zerostack-session-search-mode-map
+                  follow-link t
+                  zerostack-session-search-result ,result))))
+
+(defun zerostack-session-search--result-at-point (&optional event)
+  "Return the semantic search result at point or mouse EVENT."
+  (when (eventp event)
+    (posn-set-point (event-end event)))
+  (get-text-property (point) 'zerostack-session-search-result))
+
+(defun zerostack-session-search-open-at-point (&optional event)
+  "Open the semantic search result at point or mouse EVENT."
+  (interactive (list last-nonmenu-event))
+  (if-let ((result (zerostack-session-search--result-at-point event)))
+      (zerostack-board--open-session
+       (list :type 'session
+             :id (plist-get result :id)
+             :title (plist-get result :title)
+             :cwd (plist-get result :cwd)))
+    (message "No semantic session search result at point")))
+
+(defun zerostack-session-search-refresh ()
+  "Repeat the current semantic saved-session search."
+  (interactive)
+  (if zerostack-session-search--query
+      (zerostack-session-search zerostack-session-search--query)
+    (message "No semantic session search query")))
+
+(define-key zerostack-session-search-mode-map (kbd "g") #'zerostack-session-search-refresh)
+(define-key zerostack-session-search-mode-map (kbd "RET") #'zerostack-session-search-open-at-point)
+(define-key zerostack-session-search-mode-map [mouse-2] #'zerostack-session-search-open-at-point)
+
 (defun zerostack--config-command (&rest args)
   "Run `zerostack config' with ARGS and return trimmed stdout."
   (if zerostack--config-command-function
@@ -839,7 +979,7 @@ The root is resolved with Projectile when available, then `project.el', then
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "zerostack board\n" 'face 'zerostack-heading-face))
-    (insert (propertize "g refresh, j jump, o open, A attention, RET open, c create, d describe, R restart idle, s stop, x trash\n" 'face 'zerostack-muted-face))
+    (insert (propertize "g refresh, S search sessions, j jump, o open, A attention, RET open, c create, d describe, R restart idle, s stop, x trash\n" 'face 'zerostack-muted-face))
     (zerostack-board--insert-config-controls snapshot)
     (insert "\n")
     (when needs-attention
@@ -3537,8 +3677,8 @@ inserted into the transcript."
   (when zerostack--notice-timer
     (cancel-timer zerostack--notice-timer)
     (setq zerostack--notice-timer nil))
-  (setq zerostack--last-notice text)
   (setq zerostack--notice (and text (zerostack--status-text text)))
+  (setq zerostack--last-notice zerostack--notice)
   (when text
     (message "%s" zerostack--notice)
     (let ((buffer (current-buffer))

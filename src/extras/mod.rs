@@ -30,6 +30,9 @@ pub mod emacs_attention;
 
 pub mod emacs_board;
 
+#[cfg(feature = "veles")]
+pub mod session_search;
+
 #[cfg(feature = "multimodal")]
 pub mod image_validate;
 

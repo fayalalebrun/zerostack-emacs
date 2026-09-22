@@ -418,6 +418,13 @@ ignored; no follow-up fetch is queued. The previous board remains usable until
 the new snapshot arrives; failed refreshes retain it and report an error in
 `*Messages*`.
 
+When built with the `veles` feature, `S` runs an asynchronous semantic search
+across saved conversations. The persistent index under
+`$XDG_CACHE_HOME/zerostack/session-search/` contains user messages, assistant
+messages, and compaction summaries, but excludes tool calls, tool results, and
+reasoning. Results open the matching saved session. The first search may need
+to build the local embedding index.
+
 The snapshot shape is:
 
 ```lisp
@@ -536,6 +543,7 @@ Key bindings in `zerostack-board-mode`:
 | Key | Action |
 | --- | ------ |
 | `g` | Refresh the board snapshot. |
+| `S` | Prompt for a semantic search across saved conversations (requires the `veles` feature), then show asynchronously loaded results. `g` reruns the query in the results buffer; `RET` opens its session. |
 | `RET` | Open the item at point. Projects/worktrees open with `dired`; live sessions connect to their socket; inactive sessions start `zerostack --emacs --session <id>`. Subagent lists start collapsed; opening a child session uses its isolated workspace as `default-directory`. Needs-attention rows also have a clickable `dismiss` button. |
 | `c` | Create from the item at point. On a project, prompts for a branch/path/description, runs the local workspace `prepare` hook, and creates a worktree from `origin/HEAD`; the path defaults to `<repo>_<branch>`. The `hydrate` hook then runs without blocking in `*zerostack hydrate: <branch>*`. On a worktree, starts a new `zerostack --emacs` session with that worktree as `default-directory`. |
 | `p` | Persist a new default provider in zerostack config. The model is reset to that provider's configured/default model. |

@@ -2589,6 +2589,34 @@
           (delete-process server))
         (delete-directory dir t)))))
 
+(ert-deftest zerostack-test-session-search-renders-and-opens-session ()
+  (with-temp-buffer
+    (zerostack-session-search-mode)
+    (zerostack-session-search--render
+     '(zerostack-session-search
+       :version 1
+       :query "authentication"
+       :results ((:id "session-id"
+                  :title "Authentication work"
+                  :cwd "/repo"
+                  :updated-at "2026-09-21T00:00:00Z"
+                  :score 0.75
+                  :text "Auth is resolved in auth.rs."))))
+    (should (= (point) (point-min)))
+    (should (string-match-p "Session session-  Authentication work" (buffer-string)))
+    (should (string-match-p "relevance 0.750" (buffer-string)))
+    (should (string-match-p (make-string 72 ?─) (buffer-string)))
+    (search-forward "Authentication work")
+    (backward-char)
+    (should (equal (plist-get (get-text-property (point) 'zerostack-session-search-result) :id)
+                   "session-id"))
+    (let (opened)
+      (cl-letf (((symbol-function 'zerostack-board--open-session)
+                 (lambda (item) (setq opened item))))
+        (zerostack-session-search-open-at-point))
+      (should (equal (plist-get opened :id) "session-id"))
+      (should (equal (plist-get opened :cwd) "/repo")))))
+
 (provide 'zerostack-test)
 
 ;;; zerostack-test.el ends here

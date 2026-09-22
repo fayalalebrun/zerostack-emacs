@@ -156,6 +156,14 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(query) = &cli.emacs_board_search {
+        #[cfg(feature = "veles")]
+        extras::session_search::print(query)?;
+        #[cfg(not(feature = "veles"))]
+        anyhow::bail!("semantic session search requires the veles feature");
+        return Ok(());
+    }
+
     if let Some(session_id) = &cli.emacs_dismiss_attention {
         extras::emacs_attention::dismiss(session_id)?;
         return Ok(());

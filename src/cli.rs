@@ -40,6 +40,9 @@ pub struct Cli {
     )]
     pub emacs_board: bool,
 
+    #[arg(long = "emacs-board-search", hide = true, value_name = "QUERY")]
+    pub emacs_board_search: Option<String>,
+
     #[arg(
         long = "emacs-dismiss-attention",
         help = "Dismiss a session from the Emacs board Needs attention section"
