@@ -921,6 +921,7 @@ mod imp {
 
         let mut event_rx = server.events.subscribe();
         let event_tx = client_tx.clone();
+        let event_server = server.clone();
         let event_task = tokio::spawn(async move {
             loop {
                 match event_rx.recv().await {
@@ -929,7 +930,15 @@ mod imp {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "Emacs client lagged; resyncing rendered session");
+                        if resync_client_render(&event_server, &event_tx)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -1166,6 +1175,17 @@ mod imp {
                     .await;
             }
         });
+    }
+
+    async fn resync_client_render(
+        server: &Arc<Server>,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let cols = server.mutable.lock().await.cols;
+        let lines = render_session_lines(server, cols).await;
+        let seq = server.next_seq().await;
+        let session_id = server.current_session_id().await;
+        send_lines_event(out, seq, &session_id, "session-render", 0, &lines).await
     }
 
     async fn send_lines_event(
@@ -7731,6 +7751,27 @@ mod imp {
                 server.mutable.lock().await.last_error.as_deref(),
                 Some("test provider error")
             );
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn lagged_client_resyncs_with_a_full_session_render() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server(prompts);
+            drop(listener);
+            {
+                let mut session = server.session.lock().await;
+                session.add_message(MessageRole::User, "question");
+                session.add_message(MessageRole::Assistant, "answer");
+            }
+            let (out_tx, mut out_rx) = mpsc::channel(1);
+
+            resync_client_render(&server, &out_tx).await.unwrap();
+
+            let render = out_rx.recv().await.unwrap();
+            assert!(render.contains(":type session-render :replace-from 0"));
+            assert!(render.contains("question"));
+            assert!(render.contains("answer"));
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
 

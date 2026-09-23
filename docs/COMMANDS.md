@@ -576,6 +576,7 @@ Command menu actions:
 | `loop` | Start or stop the iterative loop. Starting prompts for objective, optional max iterations, and optional validation command. |
 | `skill` | Discover runtime skills from the same home/project skill roots and insert an explicit selected-skill directive into the input line. |
 | `artifact` | Open the most recent artifact. |
+| `log` | Open the stderr buffer for the session's locally owned `zerostack --emacs` daemon. |
 
 The `attach` action sends `file-add` for path-based files. Clipboard attachment
 accepts actual PNG, JPEG, GIF, or WebP image data only; clipboard text, including

@@ -852,6 +852,24 @@
           (when (buffer-live-p buffer)
             (kill-buffer buffer)))))))
 
+(ert-deftest zerostack-test-open-server-log-opens-local-stderr-buffer ()
+  (zerostack-test--with-buffer
+   (let ((stderr-buffer (generate-new-buffer " *zerostack-log-test*"))
+         (process (start-process "zerostack-log-test" nil "true"))
+         opened)
+     (unwind-protect
+         (progn
+           (process-put process 'zerostack-stderr-buffer stderr-buffer)
+           (setq zerostack--server-process process)
+           (cl-letf (((symbol-function 'pop-to-buffer)
+                      (lambda (buffer &rest _) (setq opened buffer))))
+             (zerostack-open-server-log))
+           (should (eq opened stderr-buffer)))
+       (when (process-live-p process)
+         (delete-process process))
+       (when (buffer-live-p stderr-buffer)
+         (kill-buffer stderr-buffer))))))
+
 (ert-deftest zerostack-test-startup-error-surfaces-stderr ()
   (let ((script (make-temp-file "zerostack-fail" nil nil
                                 "#!/bin/sh\nprintf '%s\n' 'Error: missing key' >&2\nexit 1\n"))

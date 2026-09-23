@@ -2029,6 +2029,15 @@ Return non-nil when DIRECTORY was newly added."
                  lines)))
           (string-join visible-lines "\n"))))))
 
+(defun zerostack-open-server-log ()
+  "Show the stderr log for this buffer's locally owned zerostack server."
+  (interactive)
+  (if-let* ((process zerostack--server-process)
+            (buffer (process-get process 'zerostack-stderr-buffer))
+            ((buffer-live-p buffer)))
+      (pop-to-buffer buffer)
+    (user-error "No local zerostack server log for this session")))
+
 (defun zerostack--connect-buffer (socket)
   "Connect the current zerostack buffer to SOCKET."
   (setq zerostack--socket (zerostack--normalize-socket socket))
@@ -2592,8 +2601,14 @@ When BINARY is non-nil, DATA is written with binary coding."
 (when (featurep 'hydra)
   (defhydra zerostack-command-hydra (:hint nil :color blue)
     "
-_Zerostack
-_k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear goal  _l_ loop  _h_ hydrate  _t_ thinking  _i_ timing  _p_ provider  _m_ model  _e_ subagents  _P_ subagent provider  _S_ subagent models  _T_ tools  _M_ MCP  _v_ view  _o_ artifact  _R_ restart
+^Session^       ^Agent^          ^Models^                ^System^
+^───────^       ^─────^          ^──────^                ^──────^
+_w_ rewind      _l_ loop         _p_ provider            _T_ tools
+_u_ redo        _t_ thinking     _m_ model               _M_ MCP
+_c_ compact     _i_ timing       _e_ subagents           _v_ view
+_g_ goal        _k_ skill        _P_ subagent provider   _h_ hydrate
+_G_ clear goal  _a_ attach       _S_ subagent models     _L_ log
+_o_ artifact                                              _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2615,6 +2630,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
     ("M" zerostack-mcp)
     ("v" zerostack-set-view)
     ("o" zerostack-open-last-artifact)
+    ("L" zerostack-open-server-log)
     ("R" zerostack-restart-daemon)))
 
 (defun zerostack-command-menu ()
@@ -2628,7 +2644,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
   "Fallback command menu used when Hydra is unavailable."
   (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking" "timing"
                     "provider" "model" "subagents" "subagent-provider" "subagent-model" "goal"
-                    "clear-goal" "hydrate" "tools" "mcp" "view" "artifact" "restart"))
+                    "clear-goal" "hydrate" "tools" "mcp" "view" "artifact" "log" "restart"))
          (choice (completing-read "Zerostack command: " commands nil t)))
     (pcase choice
       ("skill" (zerostack-skill-menu))
@@ -2651,6 +2667,7 @@ _k_ skill  _a_ attach  _c_ compact  _w_ rewind  _u_ redo  _g_ goal  _G_ clear go
       ("mcp" (call-interactively #'zerostack-mcp))
       ("view" (call-interactively #'zerostack-set-view))
       ("artifact" (zerostack-open-last-artifact))
+      ("log" (zerostack-open-server-log))
       ("restart" (zerostack-restart-daemon)))))
 
 (defun zerostack-permission-menu ()
