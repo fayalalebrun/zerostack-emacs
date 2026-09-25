@@ -166,5 +166,6 @@ mod tests {
         assert_eq!(openai.len(), codex.len());
         assert!(codex.iter().any(|m| m.id == "gpt-5.5"));
         assert!(codex.iter().any(|m| m.id == "gpt-6-astra"));
+        assert!(codex.iter().any(|m| m.id == "gpt-6-sol"));
     }
 }

@@ -290,6 +290,11 @@
       "context": 272000
     },
     {
+      "id": "gpt-6-sol",
+      "name": "GPT-6-Sol",
+      "context": 272000
+    },
+    {
       "id": "o1",
       "name": "o1",
       "context": 200000
