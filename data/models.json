@@ -290,8 +290,18 @@
       "context": 272000
     },
     {
+      "id": "gpt-6-luna",
+      "name": "GPT-6-Luna",
+      "context": 272000
+    },
+    {
       "id": "gpt-6-sol",
       "name": "GPT-6-Sol",
+      "context": 272000
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1-Sol",
       "context": 272000
     },
     {
