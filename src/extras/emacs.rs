@@ -108,6 +108,7 @@ mod imp {
         reasoning_enabled: bool,
         reasoning_effort: Option<CompactString>,
         abort_handle: Option<tokio::task::AbortHandle>,
+        driver_abort_handle: Option<tokio::task::AbortHandle>,
         turn: u64,
         #[cfg(feature = "loop")]
         loop_state: Option<crate::extras::r#loop::LoopState>,
@@ -607,6 +608,7 @@ mod imp {
                 reasoning_enabled: initial_reasoning_enabled,
                 reasoning_effort: initial_reasoning_effort,
                 abort_handle: None,
+                driver_abort_handle: None,
                 turn: 0,
                 #[cfg(feature = "loop")]
                 loop_state: None,
@@ -2308,7 +2310,9 @@ mod imp {
             mutable.turn
         };
         dismiss_attention_marker(&server).await;
-        tokio::spawn(run_prompt(server, text, turn));
+        let run_server = server.clone();
+        let task = tokio::spawn(run_prompt(run_server, text, turn));
+        set_driver_abort_handle(&server, turn, task.abort_handle()).await;
         send_ok(out, request_arg(cmd), format!(" :turn {}", turn)).await;
         Ok(())
     }
@@ -2361,7 +2365,9 @@ mod imp {
         server
             .broadcast_event("loop-iteration", format!(" :turn {}{}", turn, fields))
             .await;
-        tokio::spawn(run_loop(server, iteration_prompt, turn));
+        let run_server = server.clone();
+        let task = tokio::spawn(run_loop(run_server, iteration_prompt, turn));
+        set_driver_abort_handle(&server, turn, task.abort_handle()).await;
         send_ok(out, request_arg(cmd), format!(" :turn {}{}", turn, fields)).await;
         Ok(())
     }
@@ -2774,23 +2780,45 @@ mod imp {
         Ok(true)
     }
 
+    async fn set_driver_abort_handle(
+        server: &Arc<Server>,
+        turn: u64,
+        handle: tokio::task::AbortHandle,
+    ) {
+        let mut mutable = server.mutable.lock().await;
+        if mutable.running && mutable.turn == turn {
+            mutable.driver_abort_handle = Some(handle);
+        } else {
+            handle.abort();
+        }
+    }
+
     async fn interrupt_running_prompt(
         server: &Arc<Server>,
         broadcast_abort: bool,
     ) -> anyhow::Result<bool> {
-        let (aborted, abort_handle, partial_response) = {
+        let (aborted, abort_handle, driver_abort_handle, partial_response) = {
             let mut mutable = server.mutable.lock().await;
             let was_running = mutable.running;
             let abort_handle = mutable.abort_handle.take();
+            let driver_abort_handle = mutable.driver_abort_handle.take();
             mutable.running = false;
             let partial_response = mutable
                 .active_response
                 .take()
                 .map(|(_, response)| response)
                 .unwrap_or_default();
-            (was_running, abort_handle, partial_response)
+            (
+                was_running,
+                abort_handle,
+                driver_abort_handle,
+                partial_response,
+            )
         };
         if let Some(handle) = abort_handle {
+            handle.abort();
+        }
+        if let Some(handle) = driver_abort_handle {
             handle.abort();
         }
         server.sandbox.kill_active();
@@ -2825,12 +2853,17 @@ mod imp {
 
     #[cfg(feature = "loop")]
     async fn stop_loop_state(server: &Arc<Server>, abort_running: bool) -> bool {
-        let (stopped, aborted, abort_handle, partial_response) = {
+        let (stopped, aborted, abort_handle, driver_abort_handle, partial_response) = {
             let mut mutable = server.mutable.lock().await;
             let stopped = mutable.loop_state.take().is_some();
             let aborted = abort_running && mutable.running;
             let abort_handle = if abort_running {
                 mutable.abort_handle.take()
+            } else {
+                None
+            };
+            let driver_abort_handle = if abort_running {
+                mutable.driver_abort_handle.take()
             } else {
                 None
             };
@@ -2846,9 +2879,18 @@ mod imp {
             if abort_running {
                 mutable.running = false;
             }
-            (stopped, aborted, abort_handle, partial_response)
+            (
+                stopped,
+                aborted,
+                abort_handle,
+                driver_abort_handle,
+                partial_response,
+            )
         };
         if let Some(handle) = abort_handle {
+            handle.abort();
+        }
+        if let Some(handle) = driver_abort_handle {
             handle.abort();
         }
         if aborted {
@@ -6827,6 +6869,7 @@ mod imp {
                 reasoning_enabled: true,
                 reasoning_effort: None,
                 abort_handle: None,
+                driver_abort_handle: None,
                 turn: 2,
                 #[cfg(feature = "loop")]
                 loop_state: None,
@@ -7395,6 +7438,30 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn abort_cancels_prompt_driver_before_agent_runner_starts() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, listener) = test_server(prompts);
+            drop(listener);
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            });
+            {
+                let mut mutable = server.mutable.lock().await;
+                mutable.running = true;
+                mutable.turn = 1;
+            }
+            set_driver_abort_handle(&server, 1, task.abort_handle()).await;
+            started_rx.await.unwrap();
+
+            assert!(interrupt_running_prompt(&server, false).await.unwrap());
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(!server.mutable.lock().await.running);
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
         async fn abort_allows_provider_to_receive_next_prompt() {
             let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
             let (server, registration, listener) = test_server(prompts.clone());
@@ -7832,6 +7899,7 @@ mod imp {
                     reasoning_enabled: true,
                     reasoning_effort: None,
                     abort_handle: None,
+                    driver_abort_handle: None,
                     turn: 0,
                     #[cfg(feature = "loop")]
                     loop_state: None,
