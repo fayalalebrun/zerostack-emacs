@@ -98,7 +98,7 @@ fn token_filename_sanitizes_server_name() {
 #[test]
 fn parse_callback_extracts_code_and_state() {
     let line = "GET /callback?code=abc123&state=xyz789 HTTP/1.1";
-    let (code, state) = oauth::parse_callback(line).unwrap();
+    let (code, state, _) = oauth::parse_callback(line).unwrap();
     assert_eq!(code, "abc123");
     assert_eq!(state, "xyz789");
 }
@@ -106,9 +106,21 @@ fn parse_callback_extracts_code_and_state() {
 #[test]
 fn parse_callback_decodes_percent_escapes() {
     let line = "GET /callback?code=a%2Fb%2Bc&state=s%20t HTTP/1.1";
-    let (code, state) = oauth::parse_callback(line).unwrap();
+    let (code, state, _) = oauth::parse_callback(line).unwrap();
     assert_eq!(code, "a/b+c");
     assert_eq!(state, "s t");
+}
+
+#[test]
+fn parse_callback_preserves_oauth_issuer() {
+    let line = "GET /callback?code=abc&state=xyz&iss=https%3A%2F%2Fmcp.linear.app HTTP/1.1";
+    let (code, state, issuer) = oauth::parse_callback(line).unwrap();
+    assert_eq!(code, "abc");
+    assert_eq!(state, "xyz");
+    assert_eq!(issuer.as_deref(), Some("https://mcp.linear.app"));
+    let (_, _, issuer) =
+        oauth::parse_callback("GET /callback?code=abc&state=xyz HTTP/1.1").unwrap();
+    assert!(issuer.is_none());
 }
 
 #[test]

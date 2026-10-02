@@ -661,7 +661,9 @@ working or select the URL with the mouse to copy it). The token is saved to
 reconnects automatically once authorization completes. Later sessions reuse the
 stored refresh token and reconnect without a browser. Use
 `/mcp logout <server>` to remove a stored token. A server with OAuth enabled but
-no stored token fails to connect until you log in.
+no stored token fails to connect until you log in. OAuth callbacks preserve the
+RFC 9207 `iss` parameter for issuer validation, including servers such as Linear
+that require it.
 
 ### Recommended MCP servers
 

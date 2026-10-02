@@ -225,7 +225,11 @@ impl LoginSession {
             tokio::task::spawn_blocking(move || listen_for_callback(port, timeout)).await??;
 
         self.session
-            .handle_callback(&captured.code, &captured.state)
+            .handle_callback_with_issuer(
+                &captured.code,
+                &captured.state,
+                captured.issuer.as_deref(),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("OAuth token exchange failed: {e}"))?;
         Ok(())
@@ -235,6 +239,7 @@ impl LoginSession {
 struct CapturedCode {
     code: String,
     state: String,
+    issuer: Option<String>,
 }
 
 /// Blocking single-request loopback HTTP listener for the OAuth redirect.
@@ -257,7 +262,7 @@ fn listen_for_callback(port: u16, timeout: Duration) -> anyhow::Result<CapturedC
             Ok((mut stream, _addr)) => {
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let request_line = read_request_line(&mut stream)?;
-                let (code, state) = parse_callback(&request_line)?;
+                let (code, state, issuer) = parse_callback(&request_line)?;
                 let body = "<html><body><h3>zerostack: authorization complete.</h3>You can close this tab and return to the terminal.</body></html>";
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -266,7 +271,11 @@ fn listen_for_callback(port: u16, timeout: Duration) -> anyhow::Result<CapturedC
                 );
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
-                return Ok(CapturedCode { code, state });
+                return Ok(CapturedCode {
+                    code,
+                    state,
+                    issuer,
+                });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -290,7 +299,9 @@ fn read_request_line(stream: &mut std::net::TcpStream) -> anyhow::Result<String>
 }
 
 /// Parse `GET /callback?code=...&state=... HTTP/1.1` and return (code, state).
-pub(crate) fn parse_callback(request_line: &str) -> anyhow::Result<(String, String)> {
+pub(crate) fn parse_callback(
+    request_line: &str,
+) -> anyhow::Result<(String, String, Option<String>)> {
     let target = request_line
         .split_whitespace()
         .nth(1)
@@ -299,6 +310,7 @@ pub(crate) fn parse_callback(request_line: &str) -> anyhow::Result<(String, Stri
 
     let mut code = None;
     let mut state = None;
+    let mut issuer = None;
     let mut error = None;
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
@@ -308,6 +320,7 @@ pub(crate) fn parse_callback(request_line: &str) -> anyhow::Result<(String, Stri
         match k {
             "code" => code = Some(v),
             "state" => state = Some(v),
+            "iss" => issuer = Some(v),
             "error" => error = Some(v),
             _ => {}
         }
@@ -317,7 +330,7 @@ pub(crate) fn parse_callback(request_line: &str) -> anyhow::Result<(String, Stri
         anyhow::bail!("authorization server returned an error: {err}");
     }
     match (code, state) {
-        (Some(code), Some(state)) => Ok((code, state)),
+        (Some(code), Some(state)) => Ok((code, state, issuer)),
         _ => anyhow::bail!("redirect missing code or state"),
     }
 }
