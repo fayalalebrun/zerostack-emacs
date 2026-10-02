@@ -601,6 +601,8 @@ An explicit union of all JSON types preserves unrestricted values; existing
 types, references, composition, constraints, and tool arguments are unchanged.
 Codex requests explicitly disable strict mode for tools with open-ended
 `additionalProperties`, since strict mode cannot represent dictionary values.
+Codex tool schemas also omit unsupported `format: "uri"` annotations used by
+Linear; the MCP server remains responsible for validating tool arguments.
 
 ### Diagnosing pending MCP requests
 

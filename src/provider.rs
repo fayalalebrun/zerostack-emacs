@@ -467,6 +467,11 @@ fn ensure_codex_instructions(
         .and_then(serde_json::Value::as_array_mut)
     {
         for tool in tools {
+            if tool.get("type").and_then(serde_json::Value::as_str) == Some("function") {
+                if let Some(parameters) = tool.get_mut("parameters") {
+                    remove_uri_format(parameters);
+                }
+            }
             if tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
                 && tool
                     .get("parameters")
@@ -480,6 +485,25 @@ fn ensure_codex_instructions(
     serde_json::to_vec(&value)
         .map(bytes::Bytes::from)
         .map_err(|e| http_client::Error::Instance(Box::new(e)))
+}
+
+fn remove_uri_format(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(node) => {
+            if node.get("format").and_then(serde_json::Value::as_str) == Some("uri") {
+                node.remove("format");
+            }
+            for value in node.values_mut() {
+                remove_uri_format(value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                remove_uri_format(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn schema_allows_extra_properties(schema: &serde_json::Value) -> bool {
@@ -2233,6 +2257,27 @@ mod tests {
     };
     use bytes::Bytes;
     use serde_json::json;
+
+    #[test]
+    fn codex_removes_uri_format_from_linear_tools() {
+        let body = json!({"tools":[{"type":"function", "name":"create_attachment_from_upload",
+            "parameters":{"type":"object","properties":{
+                "assetUrl":{"type":"string","format":"uri","description":"Uploaded asset"},
+                "created":{"type":"string","format":"date-time"}
+            }}
+        }]});
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string()), None).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        let properties = &value["tools"][0]["parameters"]["properties"];
+        assert_eq!(
+            properties["assetUrl"],
+            json!({"type":"string","description":"Uploaded asset"})
+        );
+        assert_eq!(
+            properties["created"],
+            body["tools"][0]["parameters"]["properties"]["created"]
+        );
+    }
 
     #[test]
     fn codex_open_ended_tool_schemas_disable_strict_without_losing_values() {
