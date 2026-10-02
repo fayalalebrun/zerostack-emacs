@@ -32,6 +32,108 @@ pub struct McpTool {
     pub timeout: Option<std::time::Duration>,
 }
 
+fn normalize_schema(schema: &mut serde_json::Value) {
+    let Some(node) = schema.as_object_mut() else {
+        return;
+    };
+    if !["type", "$ref", "anyOf", "oneOf", "allOf"]
+        .iter()
+        .any(|key| node.contains_key(*key))
+    {
+        node.insert(
+            "type".into(),
+            serde_json::json!(["object", "array", "string", "number", "boolean", "null"]),
+        );
+    }
+    for key in [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+    ] {
+        if let Some(children) = node.get_mut(key).and_then(serde_json::Value::as_object_mut) {
+            for child in children.values_mut() {
+                normalize_schema(child);
+            }
+        }
+    }
+    for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+        if let Some(children) = node.get_mut(key).and_then(serde_json::Value::as_array_mut) {
+            for child in children {
+                normalize_schema(child);
+            }
+        }
+    }
+    for key in [
+        "items",
+        "additionalProperties",
+        "not",
+        "if",
+        "then",
+        "else",
+        "contains",
+        "propertyNames",
+    ] {
+        if let Some(child) = node.get_mut(key) {
+            normalize_schema(child);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_schema;
+    use serde_json::json;
+
+    #[test]
+    fn notion_additional_properties_gets_explicit_unrestricted_type() {
+        let mut schema = json!({"type":"object", "additionalProperties":{}, "properties":{
+            "filters":{"type":"object", "additionalProperties":{"description":"Any value"}}
+        }});
+        normalize_schema(&mut schema);
+        let types = json!(["object", "array", "string", "number", "boolean", "null"]);
+        assert_eq!(schema["additionalProperties"]["type"], types);
+        assert_eq!(
+            schema["properties"]["filters"]["additionalProperties"]["type"],
+            types
+        );
+        assert_eq!(
+            schema["properties"]["filters"]["additionalProperties"]["description"],
+            "Any value"
+        );
+        let normalized = schema.clone();
+        normalize_schema(&mut schema);
+        assert_eq!(schema, normalized);
+    }
+
+    #[test]
+    fn valid_schemas_and_non_schema_values_are_preserved() {
+        let mut schema = json!({"type":"object", "additionalProperties":false,
+            "properties":{"value":{"anyOf":[{"type":"string"},{"$ref":"#/$defs/value"}]}},
+            "$defs":{"value":{"type":"integer","minimum":0}},
+            "default":{"additionalProperties":{}}, "examples":[{}]
+        });
+        let original = schema.clone();
+        normalize_schema(&mut schema);
+        assert_eq!(schema, original);
+        let mut boolean_schema = json!(true);
+        normalize_schema(&mut boolean_schema);
+        assert_eq!(boolean_schema, true);
+    }
+
+    #[test]
+    fn traverses_array_items_definitions_and_composition_branches() {
+        let mut schema = json!({"anyOf":[{"type":"array","items":{}},{"$ref":"#/$defs/value"}],
+            "$defs":{"value":{"type":"object","additionalProperties":{}}}});
+        normalize_schema(&mut schema);
+        assert!(schema.get("type").is_none());
+        assert!(schema["anyOf"][0]["items"]["type"].is_array());
+        assert!(schema["$defs"]["value"]["additionalProperties"]["type"].is_array());
+        assert_eq!(schema["anyOf"][1], json!({"$ref":"#/$defs/value"}));
+    }
+}
+
 impl ToolDyn for McpTool {
     fn name(&self) -> String {
         self.definition.name.to_string()
@@ -45,7 +147,9 @@ impl ToolDyn for McpTool {
             .clone()
             .unwrap_or(Cow::from(""))
             .to_string();
-        let parameters = serde_json::to_value(&self.definition.input_schema).unwrap_or_default();
+        let mut parameters =
+            serde_json::to_value(&self.definition.input_schema).unwrap_or_default();
+        normalize_schema(&mut parameters);
         Box::pin(async move {
             ToolDefinition {
                 name,

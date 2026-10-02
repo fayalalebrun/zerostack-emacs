@@ -595,6 +595,13 @@ Each server accepts `connect_timeout_secs`, `discovery_timeout_secs`, and
 Set a timeout to `0` to disable it for that server; this is useful for tools that
 legitimately run longer than five minutes.
 
+MCP tool schemas with missing types are normalized before being sent to the
+model, including schema-valued `additionalProperties` used by Notion tools.
+An explicit union of all JSON types preserves unrestricted values; existing
+types, references, composition, constraints, and tool arguments are unchanged.
+Codex requests explicitly disable strict mode for tools with open-ended
+`additionalProperties`, since strict mode cannot represent dictionary values.
+
 ### Diagnosing pending MCP requests
 
 To identify where a request is waiting, enable MCP diagnostics and capture

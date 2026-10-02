@@ -462,10 +462,36 @@ fn ensure_codex_instructions(
     if let Some(reasoning) = object.get_mut("reasoning").and_then(|v| v.as_object_mut()) {
         reasoning.remove("summary");
     }
+    if let Some(tools) = object
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for tool in tools {
+            if tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
+                && tool
+                    .get("parameters")
+                    .is_some_and(schema_allows_extra_properties)
+            {
+                tool["strict"] = serde_json::Value::Bool(false);
+            }
+        }
+    }
     normalize_codex_input_content(object.get_mut("input"));
     serde_json::to_vec(&value)
         .map(bytes::Bytes::from)
         .map_err(|e| http_client::Error::Instance(Box::new(e)))
+}
+
+fn schema_allows_extra_properties(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Object(node) => {
+            node.get("additionalProperties")
+                .is_some_and(|value| value.is_object() || value == &serde_json::Value::Bool(true))
+                || node.values().any(schema_allows_extra_properties)
+        }
+        serde_json::Value::Array(items) => items.iter().any(schema_allows_extra_properties),
+        _ => false,
+    }
 }
 
 fn ensure_codex_reasoning_include(object: &mut serde_json::Map<String, serde_json::Value>) {
@@ -2207,6 +2233,26 @@ mod tests {
     };
     use bytes::Bytes;
     use serde_json::json;
+
+    #[test]
+    fn codex_open_ended_tool_schemas_disable_strict_without_losing_values() {
+        let parameters = json!({"type":"object", "additionalProperties":{
+            "type":["object","array","string","number","boolean","null"]
+        }});
+        let body = json!({"tools":[
+            {"type":"function","name":"notion-search","parameters":parameters,"strict":true},
+            {"type":"function","name":"closed","parameters":{"type":"object","additionalProperties":false},"strict":true},
+            {"type":"function","name":"nested","parameters":{"type":"object","properties":{"filters":{"type":"object","additionalProperties":true}}}},
+            {"type":"web_search"}
+        ]});
+        let patched = ensure_codex_instructions(Bytes::from(body.to_string()), None).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(value["tools"][0]["strict"], false);
+        assert_eq!(value["tools"][0]["parameters"], parameters);
+        assert_eq!(value["tools"][1], body["tools"][1]);
+        assert_eq!(value["tools"][2]["strict"], false);
+        assert_eq!(value["tools"][3], body["tools"][3]);
+    }
 
     #[test]
     fn openai_file_link_guidance_rejects_sandbox_urls() {
