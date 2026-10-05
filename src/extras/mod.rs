@@ -30,6 +30,9 @@ pub mod emacs_attention;
 
 pub mod emacs_board;
 
+#[cfg(unix)]
+pub mod session_cli;
+
 #[cfg(feature = "veles")]
 pub mod session_search;
 

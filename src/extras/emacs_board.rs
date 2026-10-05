@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Context as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{self, Config};
 use crate::session::{MessageRole, SessionTokenUsage, storage};
@@ -85,7 +85,7 @@ impl<'de> Deserialize<'de> for BoardMessages {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct BoardProject {
     name: String,
     path: PathBuf,
@@ -95,7 +95,7 @@ struct BoardProject {
     worktrees: Vec<BoardWorktree>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct BoardSnapshot {
     provider: String,
     model: String,
@@ -108,7 +108,7 @@ struct BoardSnapshot {
     loose_workspaces: Vec<BoardLooseWorkspace>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct BoardLooseWorkspace {
     path: PathBuf,
     alive: bool,
@@ -116,7 +116,7 @@ struct BoardLooseWorkspace {
     sessions: Vec<BoardSession>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct BoardWorktree {
     path: PathBuf,
     branch: String,
@@ -125,7 +125,7 @@ struct BoardWorktree {
     sessions: Vec<BoardSession>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct BoardSession {
     id: String,
     title: String,
@@ -174,6 +174,11 @@ struct LiveSessionMeta {
     pid: u32,
     socket: String,
     updated_at: Option<String>,
+}
+
+pub fn print_json() -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string(&collect_board()?)?);
+    Ok(())
 }
 
 pub fn print_board() -> anyhow::Result<()> {

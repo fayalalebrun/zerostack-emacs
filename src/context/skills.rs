@@ -32,7 +32,30 @@ pub fn load() -> Vec<Skill> {
     for dir in skill_dirs() {
         load_from_dir(&dir, &mut seen, &mut skills);
     }
+    if let Err(error) = load_builtin(
+        &storage::data_dir().join("builtin-skills"),
+        &mut seen,
+        &mut skills,
+    ) {
+        tracing::warn!("failed to load built-in board skill: {error}");
+    }
     skills
+}
+
+fn load_builtin(
+    root: &Path,
+    seen: &mut HashSet<String>,
+    skills: &mut Vec<Skill>,
+) -> std::io::Result<()> {
+    let dir = root.join("zerostack-board");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("SKILL.md");
+    let content = include_str!("../../docs/BOARD_SKILL.md");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(content) {
+        std::fs::write(&path, content)?;
+    }
+    load_from_dir(&dir, seen, skills);
+    Ok(())
 }
 
 pub fn format_for_prompt(skills: &[Skill]) -> Option<String> {
@@ -227,6 +250,23 @@ fn xml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_board_skill_is_readable_and_deduplicated() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let mut seen = HashSet::new();
+        let mut skills = Vec::new();
+        load_builtin(&root, &mut seen, &mut skills).unwrap();
+        load_builtin(&root, &mut seen, &mut skills).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "zerostack-board");
+        assert!(
+            std::fs::read_to_string(&skills[0].location)
+                .unwrap()
+                .contains("session start")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let root =

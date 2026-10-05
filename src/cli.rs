@@ -303,6 +303,23 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    #[command(about = "Inspect the project/workspace/session board as JSON")]
+    Board {
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
+    #[cfg(unix)]
+    #[command(about = "Start or prompt persistent background sessions")]
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    #[cfg(feature = "git-worktree")]
+    #[command(about = "Manage workspaces without a frontend")]
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
     #[command(about = "Manage stored provider authentication")]
     Auth {
         #[command(subcommand)]
@@ -312,6 +329,49 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum BoardCommand {
+    List,
+}
+
+#[cfg(unix)]
+#[derive(Subcommand, Debug, Clone)]
+pub enum SessionCommand {
+    Start {
+        #[arg(long)]
+        path: std::path::PathBuf,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+    Send {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        prompt: String,
+    },
+}
+
+#[cfg(feature = "git-worktree")]
+#[derive(Subcommand, Debug, Clone)]
+pub enum WorkspaceCommand {
+    Create {
+        #[arg(long)]
+        repo: std::path::PathBuf,
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        path: std::path::PathBuf,
+        #[arg(long, default_value = "origin/HEAD")]
+        base: String,
+        #[arg(long)]
+        description: Option<String>,
     },
 }
 
@@ -407,6 +467,66 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, ConfigCommand};
+
+    #[test]
+    fn parses_board_list() {
+        assert!(matches!(
+            Cli::try_parse_from(["zerostack", "board", "list"])
+                .unwrap()
+                .command,
+            Some(Command::Board {
+                command: super::BoardCommand::List
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_session_control() {
+        let cli = Cli::try_parse_from([
+            "zerostack",
+            "session",
+            "start",
+            "--path",
+            "/tmp",
+            "--prompt",
+            "Task",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                command: super::SessionCommand::Start {
+                    prompt: Some(_),
+                    ..
+                }
+            })
+        ));
+        assert!(Cli::try_parse_from(["zerostack", "session", "send", "--session", "id"]).is_err());
+    }
+
+    #[cfg(feature = "git-worktree")]
+    #[test]
+    fn parses_workspace_default_base() {
+        let cli = Cli::try_parse_from([
+            "zerostack",
+            "workspace",
+            "create",
+            "--repo",
+            "/repo",
+            "--branch",
+            "task",
+            "--path",
+            "/workspace",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Workspace {
+                command: super::WorkspaceCommand::Create { base, .. },
+            } => assert_eq!(base, "origin/HEAD"),
+            _ => panic!("expected workspace creation"),
+        }
+    }
 
     #[cfg(feature = "subagents")]
     #[test]

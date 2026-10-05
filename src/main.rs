@@ -146,6 +146,62 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    #[cfg(feature = "git-worktree")]
+    if let Some(cli::Command::Workspace { command }) = &cli.command {
+        match command {
+            cli::WorkspaceCommand::Create {
+                repo,
+                branch,
+                path,
+                base,
+                description,
+            } => {
+                let (path, _) = extras::git_worktree::create_workspace(
+                    repo,
+                    branch,
+                    path,
+                    Some(base),
+                    description.as_deref(),
+                )
+                .map_err(anyhow::Error::msg)?;
+                println!("{}", serde_json::json!({"path": path, "branch": branch}));
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(cli::Command::Board { .. }) = &cli.command {
+        extras::emacs_board::print_json()?;
+        return Ok(());
+    }
+    #[cfg(unix)]
+    if let Some(cli::Command::Session { command }) = &cli.command {
+        match command {
+            cli::SessionCommand::Start {
+                path,
+                provider,
+                model,
+                prompt,
+            } => {
+                extras::session_cli::start(
+                    path,
+                    provider.as_deref(),
+                    model.as_deref(),
+                    prompt.as_deref(),
+                )
+                .await?;
+            }
+            cli::SessionCommand::Send { session, prompt } => {
+                let acknowledgement = extras::emacs::cli_request(session, Some(prompt)).await?;
+                println!(
+                    "{}",
+                    serde_json::json!({"session": session, "accepted": true, "acknowledgement": acknowledgement})
+                );
+            }
+        }
+        return Ok(());
+    }
+
     if cli.emacs_list {
         extras::emacs::print_sessions()?;
         return Ok(());

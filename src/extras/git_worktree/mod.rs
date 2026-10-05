@@ -171,6 +171,35 @@ pub(crate) fn create_in(
         Some(dir) => main_repo.join(dir).join(name),
         None => main_repo.join("..").join(name),
     };
+    create_workspace(&main_repo, name, &target, None, None)
+}
+
+pub(crate) fn create_workspace(
+    repo: &Path,
+    name: &str,
+    target: &Path,
+    base: Option<&str>,
+    description: Option<&str>,
+) -> Result<(PathBuf, WorktreeInfo), String> {
+    let main_repo = repo.canonicalize().map_err(|e| e.to_string())?;
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        main_repo.join(target)
+    };
+    let validation = Command::new("git")
+        .args(["check-ref-format", "--branch", name])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !validation.status.success() || name.starts_with('-') {
+        return Err(format!("invalid branch name: {name}"));
+    }
+    if target.exists() {
+        return Err(format!(
+            "workspace path already exists: {}",
+            target.display()
+        ));
+    }
     let common_dir = git_common_dir(&main_repo)?;
 
     run_workspace_hook(
@@ -182,11 +211,16 @@ pub(crate) fn create_in(
         &common_dir,
     )?;
 
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(&main_repo)
-        .args(["worktree", "add", "-b", name])
-        .arg(&target)
+        .args(["worktree", "add", "-b", name, "--"])
+        .arg(&target);
+    if let Some(base) = base {
+        command.arg(base);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("failed to run git: {}", e))?;
 
@@ -199,6 +233,21 @@ pub(crate) fn create_in(
         .canonicalize()
         .map_err(|e| format!("failed to resolve worktree path: {}", e))?;
 
+    if let Some(description) = description {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&main_repo)
+            .args(["config", &format!("branch.{name}.description"), description])
+            .output()
+            .map_err(|e| format!("workspace created but description failed: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "workspace created at {} but description failed: {}",
+                wt_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
     run_workspace_hook("hydrate", &wt_path, &wt_path, name, &main_repo, &common_dir)
         .map_err(|e| format!("worktree created at {} but {}", wt_path.display(), e))?;
 
@@ -271,6 +320,82 @@ fn run_workspace_hook(
         phase,
         stderr.trim()
     ))
+}
+
+#[cfg(test)]
+mod workspace_cli_tests {
+    use super::*;
+
+    #[test]
+    fn creates_from_requested_base_and_rejects_collisions() {
+        let root = std::env::temp_dir().join(format!("zs-workspace-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        let target = root.join("workspace");
+        let (path, info) = create_workspace(
+            &repo,
+            "task",
+            &target,
+            Some("origin/HEAD"),
+            Some("Task description"),
+        )
+        .unwrap();
+        assert_eq!(path, target.canonicalize().unwrap());
+        assert_eq!(info.branch, "task");
+        assert!(create_workspace(&repo, "another", &target, Some("origin/HEAD"), None).is_err());
+        assert!(create_workspace(&repo, "--bad", &root.join("bad"), None, None).is_err());
+        assert!(
+            create_workspace(
+                &repo,
+                "missing",
+                &root.join("missing"),
+                Some("missing-ref"),
+                None
+            )
+            .is_err()
+        );
+        let description = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "branch.task.description"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&description.stdout).trim(),
+            "Task description"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 pub fn repo_name(path: &Path) -> String {

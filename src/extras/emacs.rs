@@ -416,6 +416,9 @@ mod imp {
             status_signals,
             false,
         )?;
+        if !server.cli.no_session {
+            crate::session::storage::save_session(&*server.session.lock().await)?;
+        }
         crate::startup_profile::mark("emacs:socket_ready");
         if let Some(permission) = &server.permission {
             let session = server.session.lock().await;
@@ -630,6 +633,83 @@ mod imp {
 
     pub fn session_socket_path(session_id: &str) -> PathBuf {
         sessions_root().join(session_id).join("sock")
+    }
+
+    pub async fn cli_request(session: &str, prompt: Option<&str>) -> anyhow::Result<String> {
+        uuid::Uuid::parse_str(session).context("session requires a full UUID")?;
+        if prompt.is_some_and(|text| text.trim().is_empty()) {
+            anyhow::bail!("prompt must not be empty");
+        }
+        cli_request_at(&session_socket_path(session), prompt).await
+    }
+
+    async fn cli_request_at(path: &Path, prompt: Option<&str>) -> anyhow::Result<String> {
+        let command = match prompt {
+            Some(text) => format!("(prompt :request 1 :text {})\n", sexp_quote(text)),
+            None => "(hello :request 1)\n".to_string(),
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut stream = tokio::net::UnixStream::connect(path).await?;
+            stream.write_all(command.as_bytes()).await?;
+            let mut lines = BufReader::new(stream).lines();
+            while let Some(line) = lines.next_line().await? {
+                let response = parse_command(&line)?;
+                if usize_arg(&response, "request") != Some(1) {
+                    continue;
+                }
+                if response.name == "error" {
+                    anyhow::bail!("{}", string_arg(&response, "message").unwrap_or(line));
+                }
+                if response.name == "ok" {
+                    return Ok(line);
+                }
+            }
+            anyhow::bail!("session disconnected before acknowledging request")
+        })
+        .await
+        .context("session acknowledgement timed out; prompt may have been accepted")?
+    }
+
+    #[cfg(test)]
+    mod cli_request_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn socket_request_quotes_prompt_and_handles_acknowledgements() {
+            for reply in [
+                "(ok :request 1 :turn 2)",
+                "(error :request 1 :message \"busy\")",
+            ] {
+                let path = std::env::temp_dir().join(format!("zs-{}.sock", uuid::Uuid::new_v4()));
+                let listener = UnixListener::bind(&path).unwrap();
+                let task = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let command = parse_command(line.trim()).unwrap();
+                    assert_eq!(
+                        string_arg(&command, "text").as_deref(),
+                        Some("quote \" newline\n")
+                    );
+                    reader
+                        .get_mut()
+                        .write_all(format!("(event :type ready)\n{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                });
+                let response = cli_request_at(&path, Some("quote \" newline\n")).await;
+                assert_eq!(response.is_ok(), reply.starts_with("(ok"));
+                task.await.unwrap();
+                std::fs::remove_file(path).unwrap();
+            }
+            assert!(cli_request("../invalid", Some("prompt")).await.is_err());
+            assert!(
+                cli_request(&uuid::Uuid::new_v4().to_string(), Some(" "))
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     pub fn print_sessions() -> anyhow::Result<()> {
@@ -7977,7 +8057,7 @@ mod imp {
 }
 
 #[cfg(unix)]
-pub use imp::{print_sessions, serve, serve_subagent, session_socket_path};
+pub use imp::{cli_request, print_sessions, serve, serve_subagent, session_socket_path};
 
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]

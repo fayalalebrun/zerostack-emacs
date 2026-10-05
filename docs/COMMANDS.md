@@ -511,6 +511,48 @@ sessions sort before inactive ones; sessions are then sorted by most-recent
 update. Each worktree/workspace initially renders five sessions and adds a
 clickable `show 5 more` row when more are available.
 
+## Standalone workspace CLI
+
+With the `git-worktree` feature, create a workspace without Emacs:
+
+```bash
+zerostack workspace create --repo /path/to/repo --branch task \
+  --path /path/to/workspace --description "Task workspace"
+```
+
+The command returns JSON containing `path` and `branch`. Relative paths are
+resolved against the repository. The base defaults to `origin/HEAD`; use
+`--base HEAD` for repositories without that remote reference. Existing paths
+and invalid branch names are rejected. Local workspace `prepare` and `hydrate`
+hooks run synchronously, and failures return a nonzero exit status. If hydration
+fails, the error identifies the workspace that was already created.
+
+Inspect the board and launch persistent workers without Emacs:
+
+```bash
+zerostack board list
+zerostack session start --path /path/to/workspace --prompt "Implement the task"
+zerostack session send --session FULL-UUID --prompt "Follow-up task"
+```
+
+`board list` returns JSON using the same snapshot as the Emacs board.
+On Unix, `session start` launches a background socket worker and returns JSON
+with `session`, `pid`, `path`, `socket`, and `log` after a readiness handshake.
+It accepts optional `--provider` and `--model`; omit `--prompt` for an idle worker.
+Startup has a 30-second deadline; failed startup reports the private log path.
+Workers retain normal permissions and may wait for approval through a socket
+client such as Emacs. The process continues after the CLI exits.
+
+`session send` requires the full UUID and acknowledges acceptance, not completion.
+Busy workers reject new prompts. A timed-out send may already have been accepted;
+inspect the session before retrying. Logs contain diagnostics, not the transcript.
+For a single foreground turn, use `cd /path/to/workspace && zerostack -p "Task"`.
+
+The embedded `zerostack-board` skill is automatically made available to agents
+with tools enabled. Its instructions cover workspace creation, worker startup,
+follow-up prompts, and permission/timeout precautions. User skills with the
+same name take precedence.
+
 ## Native Emacs Client
 
 The repository includes an Emacs Lisp client at `emacs/zerostack.el`. It is
