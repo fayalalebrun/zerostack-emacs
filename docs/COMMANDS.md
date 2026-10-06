@@ -520,12 +520,31 @@ zerostack workspace create --repo /path/to/repo --branch task \
   --path /path/to/workspace --description "Task workspace"
 ```
 
-The command returns JSON containing `path` and `branch`. Relative paths are
-resolved against the repository. The base defaults to `origin/HEAD`; use
-`--base HEAD` for repositories without that remote reference. Existing paths
-and invalid branch names are rejected. Local workspace `prepare` and `hydrate`
-hooks run synchronously, and failures return a nonzero exit status. If hydration
-fails, the error identifies the workspace that was already created.
+On Unix, creation runs in a detached worker, including `prepare`, worktree
+creation, and `hydrate`. The command returns JSON containing `job`, `path`,
+`branch`, `status`, `log`, and `error` after worker startup, without waiting for
+hydration. Submission success does not mean the workspace is ready.
+
+```bash
+zerostack workspace status --job FULL-JOB-UUID
+zerostack workspace logs --job FULL-JOB-UUID
+```
+
+Poll status until `ready` before starting a session. Status phases are `queued`,
+`preparing`, `creating`, and `hydrating`; terminal outcomes are `ready`, `failed`,
+and `interrupted`. A dead worker without a recorded result reports `interrupted`,
+not success. Status queries return JSON even for failed jobs: inspect `status`
+and `error`, not just the CLI exit code. Logs return all combined hook stdout
+and stderr collected so far; tail the returned log path for live output.
+Jobs persist under the zerostack data directory's `workspace-jobs/<job>/`.
+If submission times out, inspect those records before retrying creation.
+Failures do not roll back existing worktrees or partially completed hydration.
+
+Relative paths are resolved against the repository. The base defaults to
+`origin/HEAD`; use `--base HEAD` for repositories without that remote reference.
+Existing paths and invalid branch names are rejected. On non-Unix platforms,
+creation remains synchronous; detached status/log commands are Unix-only.
+Existing TUI worktree creation behavior is unchanged.
 
 Inspect the board and launch persistent workers without Emacs:
 

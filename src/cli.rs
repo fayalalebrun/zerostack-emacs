@@ -361,6 +361,22 @@ pub enum SessionCommand {
 #[cfg(feature = "git-worktree")]
 #[derive(Subcommand, Debug, Clone)]
 pub enum WorkspaceCommand {
+    #[cfg(unix)]
+    Status {
+        #[arg(long)]
+        job: String,
+    },
+    #[cfg(unix)]
+    Logs {
+        #[arg(long)]
+        job: String,
+    },
+    #[cfg(unix)]
+    #[command(hide = true)]
+    RunJob {
+        #[arg(long)]
+        job: String,
+    },
     Create {
         #[arg(long)]
         repo: std::path::PathBuf,

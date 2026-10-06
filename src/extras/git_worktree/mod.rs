@@ -181,6 +181,26 @@ pub(crate) fn create_workspace(
     base: Option<&str>,
     description: Option<&str>,
 ) -> Result<(PathBuf, WorktreeInfo), String> {
+    create_workspace_observed(
+        repo,
+        name,
+        target,
+        base,
+        description,
+        &mut |_| Ok(()),
+        false,
+    )
+}
+
+pub(crate) fn create_workspace_observed(
+    repo: &Path,
+    name: &str,
+    target: &Path,
+    base: Option<&str>,
+    description: Option<&str>,
+    phase: &mut dyn FnMut(&str) -> Result<(), String>,
+    live_logs: bool,
+) -> Result<(PathBuf, WorktreeInfo), String> {
     let main_repo = repo.canonicalize().map_err(|e| e.to_string())?;
     let target = if target.is_absolute() {
         target.to_path_buf()
@@ -202,14 +222,17 @@ pub(crate) fn create_workspace(
     }
     let common_dir = git_common_dir(&main_repo)?;
 
-    run_workspace_hook(
+    phase("preparing")?;
+    run_workspace_hook_output(
         "prepare",
         &main_repo,
         &target,
         name,
         &main_repo,
         &common_dir,
+        live_logs,
     )?;
+    phase("creating")?;
 
     let mut command = Command::new("git");
     command
@@ -248,8 +271,17 @@ pub(crate) fn create_workspace(
             ));
         }
     }
-    run_workspace_hook("hydrate", &wt_path, &wt_path, name, &main_repo, &common_dir)
-        .map_err(|e| format!("worktree created at {} but {}", wt_path.display(), e))?;
+    phase("hydrating")?;
+    run_workspace_hook_output(
+        "hydrate",
+        &wt_path,
+        &wt_path,
+        name,
+        &main_repo,
+        &common_dir,
+        live_logs,
+    )
+    .map_err(|e| format!("worktree created at {} but {}", wt_path.display(), e))?;
 
     Ok((
         wt_path.clone(),
@@ -289,12 +321,25 @@ fn run_workspace_hook(
     repo: &Path,
     common_dir: &Path,
 ) -> Result<(), String> {
+    run_workspace_hook_output(phase, cwd, target, name, repo, common_dir, false)
+}
+
+fn run_workspace_hook_output(
+    phase: &str,
+    cwd: &Path,
+    target: &Path,
+    name: &str,
+    repo: &Path,
+    common_dir: &Path,
+    live_logs: bool,
+) -> Result<(), String> {
     let hook = common_dir.join("zerostack/workspace");
     if !hook.is_file() {
         return Ok(());
     }
 
-    let output = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .args([
             "-c",
             "set -euo pipefail; source \"$1\"; if declare -F \"$2\" >/dev/null; then \"$2\"; fi",
@@ -307,7 +352,18 @@ fn run_workspace_hook(
         .env("ZEROSTACK_WORKTREE_NAME", name)
         .env("ZEROSTACK_WORKTREE_PATH", target)
         .env("ZEROSTACK_REPO_ROOT", repo)
-        .env("ZEROSTACK_GIT_COMMON_DIR", common_dir)
+        .env("ZEROSTACK_GIT_COMMON_DIR", common_dir);
+    if live_logs {
+        let status = command
+            .status()
+            .map_err(|e| format!("failed to run workspace {phase} hook: {e}"))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("workspace {phase} hook failed: {status}"))
+        };
+    }
+    let output = command
         .output()
         .map_err(|e| format!("failed to run workspace {} hook: {}", phase, e))?;
     if output.status.success() {

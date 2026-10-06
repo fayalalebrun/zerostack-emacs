@@ -156,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
                 base,
                 description,
             } => {
+                #[cfg(unix)]
+                extras::workspace_jobs::start(repo, branch, path, base, description.as_deref())?;
+                #[cfg(not(unix))]
                 let (path, _) = extras::git_worktree::create_workspace(
                     repo,
                     branch,
@@ -164,8 +167,15 @@ async fn main() -> anyhow::Result<()> {
                     description.as_deref(),
                 )
                 .map_err(anyhow::Error::msg)?;
+                #[cfg(not(unix))]
                 println!("{}", serde_json::json!({"path": path, "branch": branch}));
             }
+            #[cfg(unix)]
+            cli::WorkspaceCommand::Status { job } => extras::workspace_jobs::status(job)?,
+            #[cfg(unix)]
+            cli::WorkspaceCommand::Logs { job } => extras::workspace_jobs::logs(job)?,
+            #[cfg(unix)]
+            cli::WorkspaceCommand::RunJob { job } => extras::workspace_jobs::run(job)?,
         }
         return Ok(());
     }

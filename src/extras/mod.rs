@@ -4,6 +4,9 @@ pub mod r#loop;
 #[cfg(feature = "git-worktree")]
 pub mod git_worktree;
 
+#[cfg(all(unix, feature = "git-worktree"))]
+pub mod workspace_jobs;
+
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
