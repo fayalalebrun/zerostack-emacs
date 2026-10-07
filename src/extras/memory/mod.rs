@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Duration, Local};
 use regex::RegexBuilder;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
 
@@ -625,30 +624,34 @@ impl Tool for MemoryWrite {
     type Args = MemoryWriteArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Persist durable memory to disk. target=long_term writes curated facts/\
+    fn description(&self) -> String {
+        "Persist durable memory to disk. target=long_term writes curated facts/\
 preferences/decisions to MEMORY.md (always loaded next session). target=scratchpad maintains a \
 per-project checklist (use `- [ ]` items; open ones are auto-injected, mode=overwrite to rewrite the list). \
 target=daily appends to today's running log. target=note saves reference material to \
 notes/<name>.md (find it later with memory_search, then read it in full with memory_read). \
 Prefer long_term for things that should always be remembered."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
-                    "content": { "type": "string", "description": "Markdown content to store (max 64KB; longer is truncated with a warning)" },
-                    "mode":    { "type": "string", "description": "append (default) or overwrite" },
-                    "name":    { "type": "string", "description": "filename stem, required for note" }
-                },
-                "required": ["target", "content"]
-            }),
-        }
+                .to_string()
     }
 
-    async fn call(&self, args: MemoryWriteArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
+                "content": { "type": "string", "description": "Markdown content to store (max 64KB; longer is truncated with a warning)" },
+                "mode":    { "type": "string", "description": "append (default) or overwrite" },
+                "name":    { "type": "string", "description": "filename stem, required for note" }
+            },
+            "required": ["target", "content"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: MemoryWriteArgs,
+    ) -> Result<String, ToolError> {
         check_perm(&self.permission, &self.ask_tx, Self::NAME, &args.target).await?;
         let target = match args.target.as_str() {
             "long_term" => WriteTarget::LongTerm,
@@ -690,24 +693,28 @@ impl Tool for MemoryRead {
     type Args = MemoryReadArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Read a memory file: source=long_term (MEMORY.md), scratchpad, \
+    fn description(&self) -> String {
+        "Read a memory file: source=long_term (MEMORY.md), scratchpad, \
 daily (name=YYYY-MM-DD, omit for today), note (name=<stem>), or list (enumerate everything)."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "source": { "type": "string", "description": "long_term, scratchpad, daily, note, or list" },
-                    "name":   { "type": "string", "description": "note stem or YYYY-MM-DD" }
-                },
-                "required": ["source"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: MemoryReadArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "source": { "type": "string", "description": "long_term, scratchpad, daily, note, or list" },
+                "name":   { "type": "string", "description": "note stem or YYYY-MM-DD" }
+            },
+            "required": ["source"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: MemoryReadArgs,
+    ) -> Result<String, ToolError> {
         check_perm(&self.permission, &self.ask_tx, Self::NAME, &args.source).await?;
         let m = Mem::open();
         let body = match args.source.as_str() {
@@ -767,25 +774,29 @@ impl Tool for MemorySearch {
     type Args = MemorySearchArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Case-insensitive keyword search across all memory files (long-term, \
+    fn description(&self) -> String {
+        "Case-insensitive keyword search across all memory files (long-term, \
 notes, daily logs, including older ones). Space-separated words are treated as separate terms; a \
 line matches if it contains ANY term, and files matching more distinct terms rank higher. Matches \
 are returned with surrounding context and the file path; to read a relevant file in full, follow \
 up with memory_read. Use to recall older context that is not auto-injected. If a search returns \
 'No matches', try again with synonyms, broader concepts, or shorter keywords."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"]
-            }),
-        }
+            .to_string()
     }
 
-    async fn call(&self, args: MemorySearchArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: MemorySearchArgs,
+    ) -> Result<String, ToolError> {
         check_perm(&self.permission, &self.ask_tx, Self::NAME, &args.query).await?;
         let results = Mem::open().search(&args.query);
         if results.hits.is_empty() {

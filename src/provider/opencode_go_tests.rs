@@ -1,5 +1,6 @@
 use super::*;
-use rig::completion::{CompletionError, Message};
+use rig::completion::Message;
+use rig::error::ProviderError;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -63,11 +64,7 @@ fn opencode_go_session_identity_survives_cloning_and_client_recreation() {
                 panic!("Go client")
             };
             for client in [client.clone(), client] {
-                for headers in [
-                    client.completions.headers(),
-                    client.responses.headers(),
-                    client.messages.headers(),
-                ] {
+                for headers in [&client.headers, &client.headers, &client.headers] {
                     assert_eq!(headers["x-opencode-session"], id);
                     assert_eq!(
                         headers["user-agent"],
@@ -85,17 +82,11 @@ fn opencode_go_missing_session_gets_one_stable_client_id() {
     for input in [None, Some(""), Some(" ")] {
         let client =
             build_opencode_go_client("test-key", None, reqwest::Client::new(), input).unwrap();
-        let id = client.responses.headers()["x-opencode-session"]
-            .to_str()
-            .unwrap();
+        let id = client.headers["x-opencode-session"].to_str().unwrap();
         assert!(uuid::Uuid::parse_str(id).is_ok());
         assert!(ids.insert(id.to_string()));
         let cloned = client.clone();
-        for headers in [
-            cloned.responses.headers(),
-            cloned.completions.headers(),
-            cloned.messages.headers(),
-        ] {
+        for headers in [&cloned.headers, &cloned.headers, &cloned.headers] {
             assert_eq!(headers["x-opencode-session"], id);
         }
     }
@@ -114,21 +105,24 @@ fn opencode_go_rejects_session_header_injection() {
     );
 }
 
-async fn send_request<M: CompletionModel>(
-    model: M,
+async fn send_request(
+    model: rig::DynModel<rig::operation::Completion>,
     params: Option<Value>,
     history: Vec<Message>,
     streaming: bool,
-) -> CompletionError {
-    let request = model
-        .completion_request("Continue")
+) -> ProviderError {
+    let request = rig::completion::CompletionRequest::new("Continue")
         .messages(history)
+        .tools(vec![rig::completion::ToolDefinition {
+            name: rig::message::ToolName::new("read").unwrap(),
+            description: "Read a file".into(),
+            parameters: json!({"type":"object", "properties":{"path":{"type":"string"}}, "required":["path"]}),
+        }])
         .max_tokens(256)
-        .additional_params_opt(params)
-        .build();
+        .additional_params(params);
     if streaming {
         use futures::StreamExt;
-        let mut stream = match model.stream(request).await {
+        let mut stream = match model.stream(request) {
             Ok(stream) => stream,
             Err(error) => return error,
         };
@@ -139,11 +133,7 @@ async fn send_request<M: CompletionModel>(
         }
         panic!("expected mock rejection")
     } else {
-        model
-            .completion(request)
-            .await
-            .err()
-            .expect("mock rejection")
+        model.call(request).await.err().expect("mock rejection")
     }
 }
 
@@ -212,8 +202,6 @@ async fn opencode_go_model_refresh_sends_session_and_client_identity() {
 #[cfg(feature = "subagents")]
 #[tokio::test]
 async fn opencode_go_subagents_honor_quick_model_effort_and_token_limit() {
-    use rig::completion::Prompt;
-
     for name in ["qwen3.8-max", "glm-5.3-flash", "gpt-5.6-luna"] {
         let (client, captured) = capture_request().await;
         let cfg: Config = serde_json::from_value(json!({
@@ -280,7 +268,10 @@ async fn opencode_go_wire_replays_reasoning_after_session_roundtrip() {
         };
         send_request(model, None, history, streaming).await;
         let (_, body) = captured.await.unwrap();
-        assert_eq!(body["messages"][1]["reasoning_content"], "test reasoning");
+        assert_eq!(
+            body["messages"][1]["reasoning_content"], "test reasoning",
+            "{body}"
+        );
         assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_1");
         assert_eq!(body["messages"][2]["role"], "tool");
         assert_eq!(body["messages"][2]["tool_call_id"], "call_1");

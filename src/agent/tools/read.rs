@@ -2,7 +2,6 @@
 use base64::Engine;
 #[cfg(feature = "multimodal")]
 use base64::prelude::BASE64_STANDARD;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::crc::crc32_hex;
@@ -43,14 +42,8 @@ impl ReadTool {
     }
 }
 
-impl Tool for ReadTool {
-    const NAME: &'static str = "read";
-
-    type Error = ToolError;
-    type Args = ReadArgs;
-    type Output = String;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+impl ReadTool {
+    fn metadata(&self) -> (String, serde_json::Value) {
         let (desc, params) = match edit_system() {
             EditSystem::Similarity => (
                 format!(
@@ -84,14 +77,30 @@ impl Tool for ReadTool {
             ),
         };
 
-        ToolDefinition {
-            name: "read".to_string(),
-            description: desc,
-            parameters: params,
-        }
+        (desc, params)
+    }
+}
+
+impl Tool for ReadTool {
+    const NAME: &'static str = "read";
+
+    type Error = ToolError;
+    type Args = ReadArgs;
+    type Output = rig::tool::ToolOutput;
+
+    fn description(&self) -> String {
+        self.metadata().0
     }
 
-    async fn call(&self, args: ReadArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        self.metadata().1
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: ReadArgs,
+    ) -> Result<rig::tool::ToolOutput, ToolError> {
         let path = crate::fs::expand_tilde(&args.path);
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "read", &path).await?;
 
@@ -109,18 +118,27 @@ impl Tool for ReadTool {
             let data = tokio::fs::read(&path).await?;
             match crate::extras::image_validate::validate(&data) {
                 Ok(Some(image)) => {
-                    return Ok(serde_json::json!({
-                        "response": format!(
-                            "Read image: {} ({}, {}x{}, {} bytes)",
-                            path, image.mime, image.width, image.height, file_size
-                        ),
-                        "parts": [{
-                            "type": "image",
-                            "data": BASE64_STANDARD.encode(data),
-                            "mimeType": image.mime,
-                        }]
-                    })
-                    .to_string());
+                    let mut text = format!(
+                        "Read image: {} ({}, {}x{}, {} bytes)",
+                        path, image.mime, image.width, image.height, file_size
+                    );
+                    if let Some(coaching) = coaching {
+                        text = format!("{coaching}\n\n{text}");
+                    }
+                    let rig::message::UserContent::Image(image) =
+                        rig::message::UserContent::image_base64(
+                            BASE64_STANDARD.encode(data),
+                            Some(crate::agent::runner::image_media_type(&image.mime)),
+                            None,
+                        )
+                    else {
+                        unreachable!()
+                    };
+                    return Ok(rig::tool::ToolOutput::content(vec![
+                        rig::message::ToolResultContent::Text(rig::message::Text::new(text)),
+                        rig::message::ToolResultContent::Image(image),
+                    ])
+                    .map_err(|error| ToolError::Msg(error.to_string()))?);
                 }
                 Ok(None) => {}
                 Err(error) => return Err(ToolError::Msg(error)),
@@ -250,7 +268,7 @@ impl Tool for ReadTool {
         let info = crate::agent::tools::truncate_live_tool_output(Self::NAME, &info);
         crate::agent::tools::register_read_context_metadata(&info, loaded_paths);
 
-        Ok(info)
+        Ok(rig::tool::ToolOutput::text(info))
     }
 }
 
@@ -302,16 +320,22 @@ mod tests {
         let tool = ReadTool::new(None, None, None, 2000);
 
         let output = tool
-            .call(ReadArgs {
-                path: path.to_string_lossy().to_string(),
-                offset: None,
-                limit: None,
-            })
+            .call(
+                &mut rig::tool::ToolContext::new(),
+                ReadArgs {
+                    path: path.to_string_lossy().to_string(),
+                    offset: None,
+                    limit: None,
+                },
+            )
             .await
             .unwrap();
-        let content = ToolResultContent::from_tool_output(output);
+        let content = output.into_content();
 
-        assert!(matches!(content.first_ref(), ToolResultContent::Text(_)));
+        assert!(matches!(
+            content.first().unwrap(),
+            ToolResultContent::Text(_)
+        ));
         assert!(matches!(
             content.iter().nth(1),
             Some(ToolResultContent::Image(_))
@@ -328,11 +352,14 @@ mod tests {
         let tool = ReadTool::new(None, None, None, 2000);
 
         let error = tool
-            .call(ReadArgs {
-                path: path.to_string_lossy().to_string(),
-                offset: None,
-                limit: None,
-            })
+            .call(
+                &mut rig::tool::ToolContext::new(),
+                ReadArgs {
+                    path: path.to_string_lossy().to_string(),
+                    offset: None,
+                    limit: None,
+                },
+            )
             .await
             .unwrap_err();
 

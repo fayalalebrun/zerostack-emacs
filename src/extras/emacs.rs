@@ -1613,7 +1613,7 @@ mod imp {
         #[cfg(feature = "memory")]
         tools.extend(["memory_write", "memory_read", "memory_search"]);
         #[cfg(feature = "advisor")]
-        if crate::extras::advisor::with_config(|c| c.enabled) {
+        if crate::extras::advisor::is_enabled() {
             tools.push("advisor");
         }
         tools.sort_unstable();
@@ -3526,6 +3526,7 @@ mod imp {
                     call_id,
                     name,
                     args,
+                    reasoning,
                 } => {
                     if response_start_line.is_some() {
                         server
@@ -3554,7 +3555,7 @@ mod imp {
                     let summary = format_tool_call_summary(&name, &args);
                     {
                         let mut session = server.session.lock().await;
-                        session.add_partial_assistant_output(&response_buf, Vec::new());
+                        session.add_partial_assistant_output(&response_buf, reasoning);
                         session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;

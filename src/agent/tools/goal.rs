@@ -1,5 +1,4 @@
 use compact_str::CompactString;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
@@ -140,24 +139,28 @@ impl Tool for UpdateGoal {
     type Args = GoalUpdateArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "goal_update".to_string(),
-            description: "Set, update, clear, or complete the single active implementation goal. Completing requires concrete evidence and automatically runs an independent evaluator.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "clear": { "type": "boolean", "description": "Clear the active goal" },
-                    "content": { "type": "string", "description": "Goal description" },
-                    "status": { "type": "string", "description": "pending, in_progress, completed, blocked, or cancelled" },
-                    "priority": { "type": "string", "description": "high, medium, or low" },
-                    "evidence": { "type": "string", "description": "Concrete evidence for completion: commands run, output observed, files changed, or user confirmation" }
-                }
-            }),
-        }
+    fn description(&self) -> String {
+        "Set, update, clear, or complete the single active implementation goal. Completing requires concrete evidence and automatically runs an independent evaluator.".to_string()
     }
 
-    async fn call(&self, args: GoalUpdateArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "clear": { "type": "boolean", "description": "Clear the active goal" },
+                "content": { "type": "string", "description": "Goal description" },
+                "status": { "type": "string", "description": "pending, in_progress, completed, blocked, or cancelled" },
+                "priority": { "type": "string", "description": "high, medium, or low" },
+                "evidence": { "type": "string", "description": "Concrete evidence for completion: commands run, output observed, files changed, or user confirmation" }
+            }
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: GoalUpdateArgs,
+    ) -> Result<String, ToolError> {
         let coaching = check_perm(&self.permission, &self.ask_tx, "goal_update", "").await?;
 
         if args.clear {

@@ -27,7 +27,7 @@ Single crate, no workspace. All source under `src/`.
 
 - **`Config`** (`src/config/mod.rs:22`) — central deserialized config, drives all runtime behavior.
 - **`Cli`** (`src/cli.rs:9`) — `clap::Parser` args, overrides `Config` fields.
-- **`AnyClient` / `AnyModel` / `AnyAgent`** (`src/provider.rs:83-259`) — type-erased enums wrapping rig's provider-specific clients (OpenAI, Anthropic, Gemini, Ollama, OpenRouter). `AnyAgent` provides `run_print()` and `spawn_runner()`. No custom traits — enum dispatch replaces dynamic dispatch.
+- **`AnyClient` / `AnyModel` / `AnyAgent`** (`src/provider.rs`) — provider-routing enums wrapping concrete clients, Rig `DynModel<Completion>` handles, and non-generic `Agent` values. `AnyAgent` provides `run_print()` and `spawn_runner()`.
 - **`AgentRunner`** (`src/agent/runner.rs:12`) — holds `mpsc::Receiver<AgentEvent>`, spawned via `spawn_agent()`.
 - **`AgentEvent`** (`src/event.rs:4`) — `Token`, `Reasoning`, `ToolCall`, `ToolResult`, `SubagentToolCall`, `Error`, `Done`.
 - **`UserEvent`** (`src/event.rs:27`) — `Key`, `ScrollUp/Down`, `Resize`, `Paste`, `MouseDown/Drag/Up`.
@@ -66,7 +66,7 @@ Key dispatch: `InputEditor::handle_key()` → `Some(text)` triggers `spawn_agent
 User input → InputEditor (buffer) → spawn_agent(prompt + history)
   │
   ▼
-Agent (rig) → CompletionModel (LLM API)
+Agent (rig) → DynModel<Completion> (LLM API)
   │
   ▼ streaming
 AgentEvent stream (Token, ToolCall, ToolResult, ...)
@@ -83,7 +83,7 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 ## Design Decisions
 
 1. **Custom TUI over crossterm (no ratatui)** — keeps binary size minimal; project has its own line buffer, markdown renderer, scroll/selection. No widget tree overhead.
-2. **Type-erased enums, not trait objects** — `AnyAgent` enum wraps each provider variant. Avoids `dyn CompletionModel` lifetime issues; matching on enum is faster than vtable dispatch. (`src/provider.rs:83-259`)
+2. **Provider routing over erased Rig models** — enums preserve provider-specific routing and configuration; Rig 0.44 erases completion models and agent types. Contextual `Tool` and `DynamicTool` implementations retain zerostack permission checks. Streaming uses `Item<StreamEvent>` and `AgentHook` captures provider-native assistant turns for persisted reasoning replay. (`src/provider.rs`, `src/agent/runner.rs`, `src/session/mod.rs`)
 3. **Permission: dual-layer (glob + regex) rules** — glob for fast path, regex for complex patterns. Doom-loop detection tracks repeated identical tool calls. (`src/permission/checker.rs:29`)
 4. **Session compaction** — when token count approaches context window, old messages are summarized and dropped, preserving a summary prefix. (`src/session/mod.rs:24`)
 5. **Feature-gated extras** — `loop`, `mcp`, `acp`, `memory`, `subagents`, `git-worktree`, `archmd`, and `veles` are compile-time features. Extras don't bloat builds that disable them.
@@ -95,7 +95,7 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 
 | Crate | Use |
 |---|---|
-| `rig 0.37` | Agent framework: prompt hooks, tool system, streaming, provider clients (OpenAI, Anthropic, Gemini, Ollama, OpenRouter) |
+| `rig 0.44` | Agent hooks, contextual tools, streaming, erased completion models, provider clients |
 | `clap 4` | Derive-based CLI argument parsing (`src/cli.rs:9`) |
 | `crossterm 0.29` | Terminal raw mode, color, cursor, mouse, paste events — TUI foundation |
 | `tokio 1` | Async runtime (current_thread default), channels (`mpsc`), process, fs |
@@ -110,7 +110,7 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 | `compact_str`, `smallvec` | Heap-efficient small-string/small-vector types |
 | `veles-core 0.6` | Optional embedded hybrid code search and persistent repository indexes |
 
-Optional (`mcp` feature): `rmcp 1.7` (MCP client with child-process + HTTP transport). Optional (`acp` feature): `agent-client-protocol 0.12`.
+Optional (`mcp` feature): `rmcp 1.8` (MCP client with child-process + HTTP transport). Optional (`acp` feature): `agent-client-protocol 0.12`.
 
 ## Entry Points
 

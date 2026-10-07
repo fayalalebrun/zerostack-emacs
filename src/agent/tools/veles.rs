@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -40,43 +39,47 @@ impl Tool for VelesTool {
     type Args = VelesArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Search the current repository by behavior, intent, architecture, identifier, or code fragment. Use this first when you do not know the exact file or symbol; use grep instead for exact regex matches or exhaustive occurrence lists. The persistent Veles index is refreshed automatically and shared by all Git worktrees without writing into the repository.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural-language description, identifier, or code fragment to find"
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20,
-                        "description": "Maximum results (default 5)"
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["hybrid", "semantic", "bm25"],
-                        "description": "Search mode (default hybrid)"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Optional language filter such as rust, python, or typescript"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Optional file or directory to search within, relative to the working directory or absolute"
-                    }
-                },
-                "required": ["query"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Search the current repository by behavior, intent, architecture, identifier, or code fragment. Use this first when you do not know the exact file or symbol; use grep instead for exact regex matches or exhaustive occurrence lists. The persistent Veles index is refreshed automatically and shared by all Git worktrees without writing into the repository.".to_string()
     }
 
-    async fn call(&self, args: VelesArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language description, identifier, or code fragment to find"
+                },
+                "top_k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "Maximum results (default 5)"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["hybrid", "semantic", "bm25"],
+                    "description": "Search mode (default hybrid)"
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Optional language filter such as rust, python, or typescript"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional file or directory to search within, relative to the working directory or absolute"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: VelesArgs,
+    ) -> Result<String, ToolError> {
         let query = args.query.trim().to_string();
         if query.is_empty() {
             return Err(ToolError::Msg("query must not be empty".to_string()));

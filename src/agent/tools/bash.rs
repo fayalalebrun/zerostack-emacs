@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::process::Output;
 use std::sync::Mutex;
 
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
@@ -183,7 +182,12 @@ impl Tool for BashTool {
     type Args = BashArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+    fn description(&self) -> String {
+        "Execute a bash command in the current working directory. Returns stdout and stderr."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
         let properties = {
             #[cfg(feature = "rtk")]
             {
@@ -211,18 +215,18 @@ impl Tool for BashTool {
             }
         };
 
-        ToolDefinition {
-            name: "bash".to_string(),
-            description: "Execute a bash command in the current working directory. Returns stdout and stderr.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": properties,
-                "required": ["command"]
-            }),
-        }
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": ["command"]
+        })
     }
 
-    async fn call(&self, args: BashArgs) -> Result<String, ToolError> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: BashArgs,
+    ) -> Result<String, ToolError> {
         let mut coaching: Option<String> = None;
         for cmd in split_bash_commands(&args.command) {
             if let Some(msg) = check_perm(&self.permission, &self.ask_tx, "bash", &cmd).await? {

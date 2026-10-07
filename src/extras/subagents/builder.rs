@@ -2,12 +2,12 @@ use crate::agent::tools;
 use crate::extras::subagents::prompt;
 use crate::provider::{AnyAgent, AnyModel, OpenAiAgent, OpenAiModel};
 use rig::agent::{Agent, AgentBuilder};
-use rig::completion::CompletionModel;
 
 #[allow(clippy::too_many_arguments)]
-fn build_explore_agent_inner<M: CompletionModel + 'static>(
+fn build_explore_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>>>(
     model: M,
     max_turns: usize,
+    max_tokens: Option<u64>,
     max_text_file_size: u64,
     max_read_lines: u64,
     max_grep_results: u64,
@@ -17,7 +17,7 @@ fn build_explore_agent_inner<M: CompletionModel + 'static>(
     additional_params: Option<serde_json::Value>,
     agents: Option<&str>,
     #[cfg(feature = "archmd")] architecture: Option<&str>,
-) -> Agent<M> {
+) -> Agent {
     let mut preamble = prompt::explore_prompt();
 
     if let Some(agents) = agents
@@ -41,33 +41,39 @@ fn build_explore_agent_inner<M: CompletionModel + 'static>(
     }
 
     let context_tracker = tools::new_context_tracker(std::iter::empty());
-    let tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
-        Box::new(
-            tools::ReadTool::new(None, None, Some(max_text_file_size), max_read_lines)
-                .with_context_tracker(context_tracker.clone()),
-        ),
-        Box::new(
-            tools::GrepTool::new(None, None, max_grep_results)
-                .with_context_tracker(context_tracker.clone()),
-        ),
-        Box::new(
-            tools::FindFilesTool::new(None, None, max_find_results)
-                .with_context_tracker(context_tracker.clone()),
-        ),
-        Box::new(
-            tools::ListDirTool::new(None, None, max_list_dir_entries)
-                .with_context_tracker(context_tracker.clone()),
-        ),
-        #[cfg(feature = "memory")]
-        Box::new(crate::extras::memory::MemoryRead::new(None, None)),
-        #[cfg(feature = "memory")]
-        Box::new(crate::extras::memory::MemorySearch::new(None, None)),
-    ];
-
     let mut builder = AgentBuilder::new(model)
         .preamble(&preamble)
         .default_max_turns(max_turns)
-        .tools(tools);
+        .tool(
+            tools::ReadTool::new(None, None, Some(max_text_file_size), max_read_lines)
+                .with_context_tracker(context_tracker.clone()),
+        )
+        .tool(
+            tools::GrepTool::new(None, None, max_grep_results)
+                .with_context_tracker(context_tracker.clone()),
+        )
+        .tool(
+            tools::FindFilesTool::new(None, None, max_find_results)
+                .with_context_tracker(context_tracker.clone()),
+        )
+        .tool(
+            tools::ListDirTool::new(None, None, max_list_dir_entries)
+                .with_context_tracker(context_tracker.clone()),
+        );
+
+    #[cfg(feature = "memory")]
+    {
+        builder = builder.tool(crate::extras::memory::MemoryRead::new(None, None));
+    }
+
+    #[cfg(feature = "memory")]
+    {
+        builder = builder.tool(crate::extras::memory::MemorySearch::new(None, None));
+    }
+
+    if let Some(max_tokens) = max_tokens {
+        builder = builder.max_tokens(max_tokens);
+    }
 
     if let Some(params) = additional_params {
         builder = builder.additional_params(params);
@@ -104,6 +110,7 @@ pub(crate) async fn build_explore_agent(
         AnyModel::OpenRouter(m, extra) => AnyAgent::OpenRouter(build_explore_agent_inner(
             m,
             max_turns,
+            None,
             max_text_file_size,
             max_read_lines,
             max_grep_results,
@@ -118,6 +125,7 @@ pub(crate) async fn build_explore_agent(
             OpenAiModel::Responses(m) => OpenAiAgent::Responses(build_explore_agent_inner(
                 m,
                 max_turns,
+                None,
                 max_text_file_size,
                 max_read_lines,
                 max_grep_results,
@@ -131,6 +139,7 @@ pub(crate) async fn build_explore_agent(
             OpenAiModel::Completions(m) => OpenAiAgent::Completions(build_explore_agent_inner(
                 m,
                 max_turns,
+                None,
                 max_text_file_size,
                 max_read_lines,
                 max_grep_results,
@@ -144,6 +153,7 @@ pub(crate) async fn build_explore_agent(
             OpenAiModel::Codex(m) => OpenAiAgent::Codex(build_explore_agent_inner(
                 m,
                 max_turns,
+                None,
                 max_text_file_size,
                 max_read_lines,
                 max_grep_results,
@@ -158,6 +168,7 @@ pub(crate) async fn build_explore_agent(
                 OpenAiAgent::Responses(build_explore_agent_inner(
                     m,
                     max_turns,
+                    None,
                     max_text_file_size,
                     max_read_lines,
                     max_grep_results,
@@ -173,6 +184,7 @@ pub(crate) async fn build_explore_agent(
                 OpenAiAgent::OpenCodeGoCompletions(build_explore_agent_inner(
                     m,
                     max_turns,
+                    None,
                     max_text_file_size,
                     max_read_lines,
                     max_grep_results,
@@ -186,9 +198,10 @@ pub(crate) async fn build_explore_agent(
             }
         }),
         AnyModel::OpenCodeGoMessages(m, model) => {
-            let mut agent = build_explore_agent_inner(
+            let agent = build_explore_agent_inner(
                 m,
                 max_turns,
+                Some(crate::cli::Cli::default().resolve_max_tokens(cfg)),
                 max_text_file_size,
                 max_read_lines,
                 max_grep_results,
@@ -199,12 +212,12 @@ pub(crate) async fn build_explore_agent(
                 #[cfg(feature = "archmd")]
                 arch_ref,
             );
-            agent.max_tokens = Some(crate::cli::Cli::default().resolve_max_tokens(cfg));
             AnyAgent::Anthropic(agent)
         }
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(build_explore_agent_inner(
             m,
             max_turns,
+            None,
             max_text_file_size,
             max_read_lines,
             max_grep_results,
@@ -218,6 +231,7 @@ pub(crate) async fn build_explore_agent(
         AnyModel::Gemini(m) => AnyAgent::Gemini(build_explore_agent_inner(
             m,
             max_turns,
+            None,
             max_text_file_size,
             max_read_lines,
             max_grep_results,
@@ -231,6 +245,7 @@ pub(crate) async fn build_explore_agent(
         AnyModel::Ollama(m) => AnyAgent::Ollama(build_explore_agent_inner(
             m,
             max_turns,
+            None,
             max_text_file_size,
             max_read_lines,
             max_grep_results,

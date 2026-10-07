@@ -142,7 +142,7 @@ fn media_to_messages_produces_user_messages() {
     let Message::User { content } = &messages[0] else {
         unreachable!()
     };
-    let UserContent::Image(image) = content.first_ref() else {
+    let UserContent::Image(image) = content.first().unwrap() else {
         panic!("expected image content")
     };
     assert!(matches!(image.data, DocumentSourceKind::Base64(_)));
@@ -150,7 +150,7 @@ fn media_to_messages_produces_user_messages() {
     let Message::User { content } = &messages[1] else {
         unreachable!()
     };
-    let UserContent::Document(document) = content.first_ref() else {
+    let UserContent::Document(document) = content.first().unwrap() else {
         panic!("expected document content")
     };
     assert!(matches!(document.data, DocumentSourceKind::Base64(_)));
@@ -209,7 +209,7 @@ fn convert_history_replays_persisted_attachment_with_its_turn() {
     let Message::User { content } = &history[0] else {
         panic!("expected media user message")
     };
-    assert!(matches!(content.first_ref(), UserContent::Image(_)));
+    assert!(matches!(content.first().unwrap(), UserContent::Image(_)));
     assert!(matches!(&history[1], Message::User { .. }));
 
     crate::session::storage::set_test_data_dir(previous);
@@ -250,11 +250,14 @@ fn convert_history_replays_image_tool_result() {
     let Message::User { content } = &history[1] else {
         panic!("expected tool result user message")
     };
-    assert!(matches!(content.first_ref(), UserContent::ToolResult(_)));
+    assert!(matches!(
+        content.first().unwrap(),
+        UserContent::ToolResult(_)
+    ));
     let Message::User { content } = &history[2] else {
         panic!("expected separate image user message")
     };
-    assert!(matches!(content.first_ref(), UserContent::Image(_)));
+    assert!(matches!(content.first().unwrap(), UserContent::Image(_)));
 
     crate::session::storage::set_test_data_dir(previous);
     std::fs::remove_dir_all(dir).unwrap();
@@ -299,7 +302,7 @@ fn corrupt_persisted_tool_image_replays_as_warning() {
     let Message::User { content } = history.last().unwrap() else {
         panic!("expected tool result")
     };
-    let UserContent::ToolResult(result) = content.first_ref() else {
+    let UserContent::ToolResult(result) = content.first().unwrap() else {
         panic!("expected tool result")
     };
     assert!(result.content.iter().any(|item| matches!(

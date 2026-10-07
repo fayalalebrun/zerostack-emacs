@@ -1,4 +1,3 @@
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::crc::crc32_hex;
@@ -586,14 +585,8 @@ async fn handle_hashedit(
 
 // ── Tool implementation ──────────────────────────────────────────────────
 
-impl Tool for EditTool {
-    const NAME: &'static str = "edit";
-
-    type Error = ToolError;
-    type Args = EditArgs;
-    type Output = String;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
+impl EditTool {
+    fn metadata(&self) -> (String, serde_json::Value) {
         let (desc, params) = match edit_system() {
             EditSystem::Similarity => (
                 "Edit a file using aider-style SEARCH/REPLACE blocks. Each block finds exact text and replaces it. Multiple blocks in one call are applied atomically. If the search text is not an exact match, whitespace normalization and fuzzy matching are attempted as fallbacks.".to_string(),
@@ -632,14 +625,30 @@ impl Tool for EditTool {
             ),
         };
 
-        ToolDefinition {
-            name: "edit".to_string(),
-            description: desc,
-            parameters: params,
-        }
+        (desc, params)
+    }
+}
+
+impl Tool for EditTool {
+    const NAME: &'static str = "edit";
+
+    type Error = ToolError;
+    type Args = EditArgs;
+    type Output = String;
+
+    fn description(&self) -> String {
+        self.metadata().0
     }
 
-    async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        self.metadata().1
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: EditArgs,
+    ) -> Result<String, ToolError> {
         let path = crate::fs::expand_tilde(&args.path);
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "edit", &path).await?;
 

@@ -21,21 +21,21 @@ fn reset_todo_list() {
 #[tokio::test]
 async fn definition_name() {
     let tool = WriteTodoList::new(None, None);
-    let def = tool.definition(String::new()).await;
+    let def = rig::tool::tool_definition(&tool);
     assert_eq!(def.name, "todo_write");
 }
 
 #[tokio::test]
 async fn definition_description_non_empty() {
     let tool = WriteTodoList::new(None, None);
-    let def = tool.definition(String::new()).await;
+    let def = rig::tool::tool_definition(&tool);
     assert!(!def.description.is_empty());
 }
 
 #[tokio::test]
 async fn definition_parameters_has_required_fields() {
     let tool = WriteTodoList::new(None, None);
-    let def = tool.definition(String::new()).await;
+    let def = rig::tool::tool_definition(&tool);
     let params = def.parameters.as_object().unwrap();
     assert!(params.contains_key("properties"));
     let props = params["properties"].as_object().unwrap();
@@ -47,7 +47,7 @@ async fn call_with_empty_todos() {
     reset_todo_list();
     let tool = WriteTodoList::new(None, None);
     let args = TodoWriteArgs { todos: vec![] };
-    let result = tool.call(args).await;
+    let result = tool.call(&mut rig::tool::ToolContext::new(), args).await;
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(output.contains("cleared"), "got: {}", output);
@@ -66,7 +66,7 @@ async fn call_formats_todo_items_with_icons() {
             item("Low priority task", "low", "low"),
         ],
     };
-    let result = tool.call(args).await;
+    let result = tool.call(&mut rig::tool::ToolContext::new(), args).await;
     assert!(result.is_ok());
     let output = result.unwrap();
     assert!(output.contains("[x]"));
@@ -91,7 +91,7 @@ async fn call_updates_global_todo_list() {
             item("Task 2", "pending", "medium"),
         ],
     };
-    let _ = tool.call(args).await;
+    let _ = tool.call(&mut rig::tool::ToolContext::new(), args).await;
 
     let list = TODO_LIST
         .lock()
@@ -109,12 +109,12 @@ async fn call_overwrites_previous_list() {
     let args1 = TodoWriteArgs {
         todos: vec![item("First", "pending", "high")],
     };
-    let _ = tool.call(args1).await;
+    let _ = tool.call(&mut rig::tool::ToolContext::new(), args1).await;
 
     let args2 = TodoWriteArgs {
         todos: vec![item("Second", "completed", "low")],
     };
-    let _ = tool.call(args2).await;
+    let _ = tool.call(&mut rig::tool::ToolContext::new(), args2).await;
 
     let list = TODO_LIST
         .lock()

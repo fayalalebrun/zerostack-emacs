@@ -599,8 +599,11 @@ MCP tool schemas with missing types are normalized before being sent to the
 model, including schema-valued `additionalProperties` used by Notion tools.
 An explicit union of all JSON types preserves unrestricted values; existing
 types, references, composition, constraints, and tool arguments are unchanged.
-Codex requests explicitly disable strict mode for tools with open-ended
-`additionalProperties`, since strict mode cannot represent dictionary values.
+Rig 0.44 sends OpenAI Responses function tools in non-strict mode without
+forcing optional properties into `required`. Linear arguments such as
+`statusUpdateType` and `customView` can therefore be omitted rather than filled
+with placeholders. Codex requests retain explicit non-strict mode for tools
+with open-ended `additionalProperties`.
 Codex tool schemas also omit unsupported `format: "uri"` annotations used by
 Linear; the MCP server remains responsible for validating tool arguments.
 

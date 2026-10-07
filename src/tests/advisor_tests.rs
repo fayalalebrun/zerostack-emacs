@@ -6,6 +6,11 @@ fn msg(role: MessageRole, content: &str) -> SessionMessage {
         role,
         content: content.into(),
         estimated_tokens: 0,
+        provider_reasoning: Vec::new(),
+        provider_usage: None,
+        tool_call: None,
+        tool_result: None,
+        attachments: Vec::new(),
     }
 }
 

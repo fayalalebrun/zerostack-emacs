@@ -1,6 +1,5 @@
 use ignore::WalkBuilder;
 use regex::Regex;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{
@@ -57,36 +56,40 @@ impl Tool for GrepTool {
     type Args = GrepArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "grep".to_string(),
-            description: "Search file contents using a regex pattern (Rust regex syntax). Respects .gitignore. Skips binary files, node_modules, and target.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Regex pattern to search for (supports Rust regex syntax)"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory to search in (defaults to current working directory)"
-                    },
-                    "include": {
-                        "type": "string",
-                        "description": "Optional file glob pattern to filter (e.g. '*.rs', '*.{ts,tsx}')"
-                    },
-                    "context_lines": {
-                        "type": "integer",
-                        "description": "Number of context lines to show before and after each match (like grep -C)"
-                    }
-                },
-                "required": ["pattern"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Search file contents using a regex pattern (Rust regex syntax). Respects .gitignore. Skips binary files, node_modules, and target.".to_string()
     }
 
-    async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to search for (supports Rust regex syntax)"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search in (defaults to current working directory)"
+                },
+                "include": {
+                    "type": "string",
+                    "description": "Optional file glob pattern to filter (e.g. '*.rs', '*.{ts,tsx}')"
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of context lines to show before and after each match (like grep -C)"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: GrepArgs,
+    ) -> Result<String, ToolError> {
         let coaching = check_perm(&self.permission, &self.ask_tx, "grep", &args.pattern).await?;
 
         let re = Regex::new(&args.pattern)

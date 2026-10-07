@@ -1,8 +1,6 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rig::completion::ToolDefinition;
-use rig::streaming::StreamingChat;
 use rig::tool::Tool;
 use serde::Deserialize;
 use tokio::sync::oneshot;
@@ -58,8 +56,15 @@ where
     F: FnOnce(&AdvisorToolConfig) -> R,
 {
     let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    let cfg = guard.as_ref().expect("advisor config not initialized");
-    f(cfg)
+    f(guard.as_ref().expect("advisor config not initialized"))
+}
+
+pub fn is_enabled() -> bool {
+    CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|cfg| cfg.enabled)
 }
 
 pub fn update_client(client: AnyClient) {
@@ -96,7 +101,7 @@ impl Tool for AdvisorTool {
     type Args = AdvisorArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
+    fn description(&self) -> String {
         let human_handoff = CONFIG
             .lock()
             .ok()
@@ -119,25 +124,29 @@ Describe your question clearly — the advisor already sees the full \
 conversation, so focus your question on the specific decision you need help with."
         };
 
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: desc.to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "Your question for the advisor. The advisor \
-            already sees the full conversation transcript. Focus on the specific decision, \
-            approach, or problem you need guidance on."
-                    }
-                },
-                "required": ["question"]
-            }),
-        }
+        desc.to_string()
     }
 
-    async fn call(&self, args: AdvisorArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Your question for the advisor. The advisor \
+        already sees the full conversation transcript. Focus on the specific decision, \
+        approach, or problem you need guidance on."
+                }
+            },
+            "required": ["question"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: AdvisorArgs,
+    ) -> Result<String, ToolError> {
         if args.question.is_empty() {
             return Err(ToolError::Msg("advisor: question must not be empty".into()));
         }
@@ -215,10 +224,16 @@ async fn run_advisor_completion(
             OpenAiModel::Responses(m) => advisor_call(m, prompt).await,
             OpenAiModel::Completions(m) => advisor_call(m, prompt).await,
             OpenAiModel::Codex(m) => advisor_call(m, prompt).await,
+            OpenAiModel::OpenCodeGoResponses(m, _) | OpenAiModel::OpenCodeGoCompletions(m, _) => {
+                advisor_call(m, prompt).await
+            }
         },
+        AnyModel::OpenCodeGoMessages(m, _) => advisor_call(m, prompt).await,
         AnyModel::Anthropic(m) => advisor_call(m, prompt).await,
         AnyModel::Gemini(m) => advisor_call(m, prompt).await,
         AnyModel::Ollama(m) => advisor_call(m, prompt).await,
+        #[cfg(test)]
+        AnyModel::Test(_) => anyhow::bail!("test model does not support advisor completion"),
     }
 }
 
@@ -304,11 +319,10 @@ pub(crate) fn format_conversation(msgs: &[SessionMessage], kilobytes_limit: u32)
     result
 }
 
-async fn advisor_call<M>(model: M, prompt: String) -> anyhow::Result<String>
-where
-    M: rig::completion::CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-{
+async fn advisor_call(
+    model: rig::DynModel<rig::operation::Completion>,
+    prompt: String,
+) -> anyhow::Result<String> {
     let mut preamble = ADVISOR_SYSTEM_PROMPT.to_string();
     if let Some(s) = crate::session::storage::load_suffix() {
         preamble.push_str("\n\n---\n\n");
@@ -320,14 +334,13 @@ where
         .build();
 
     use futures::StreamExt;
-    let history: Vec<rig::completion::Message> = vec![];
-    let mut stream = agent.stream_chat(prompt, history).multi_turn(1).await;
+    let mut stream = agent.prompt(prompt).max_turns(1).stream();
 
     let mut response = String::new();
     while let Some(item) = stream.next().await {
         match item {
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
-                response = res.response().to_string();
+                response = res.output();
                 break;
             }
             Err(e) => return Err(anyhow::anyhow!("Advisor call failed: {e}")),
@@ -354,6 +367,9 @@ mod tests {
             estimated_tokens: 0,
             provider_reasoning: Vec::new(),
             provider_usage: None,
+            tool_call: None,
+            tool_result: None,
+            attachments: Vec::new(),
         }
     }
 

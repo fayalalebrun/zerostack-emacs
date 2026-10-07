@@ -284,7 +284,7 @@ async fn run_prompt(
         ask_tx,
         sandbox,
         false,
-        crate::config::resolve_reasoning_effort(&state.cli, &state.cfg, &provider, &model_str)
+        crate::config::resolve_reasoning_effort(&state.cli, &state.cfg, &provider_str, &model_str)
             .as_deref(),
         temperature,
         extra_body,
@@ -373,6 +373,17 @@ async fn run_prompt(
             AgentEvent::CompletionCall { .. } => {
                 // Mid-stream provider usage; ACP has no status bar to update, so
                 // there is nothing to surface for this event.
+            }
+            AgentEvent::Retry { message, .. } => {
+                let chunk =
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(message.to_string())));
+                let notif = SessionNotification::new(
+                    session_id.clone(),
+                    SessionUpdate::AgentThoughtChunk(chunk),
+                );
+                if let Err(e) = cx.send_notification(notif) {
+                    tracing::warn!("ACP failed to send retry notification: {}", e);
+                }
             }
             AgentEvent::Done { .. } => {
                 break;

@@ -25,7 +25,7 @@ fn args(content: &str, status: &str) -> GoalUpdateArgs {
 async fn definition_name() {
     let _guard = TEST_LOCK.lock().unwrap();
     let tool = UpdateGoal::new(None, None);
-    let def = tool.definition(String::new()).await;
+    let def = rig::tool::tool_definition(&tool);
     assert_eq!(def.name, "goal_update");
 }
 
@@ -35,13 +35,16 @@ async fn clear_goal() {
     reset_goal();
     let tool = UpdateGoal::new(None, None);
     let result = tool
-        .call(GoalUpdateArgs {
-            clear: true,
-            content: None,
-            status: None,
-            priority: None,
-            evidence: None,
-        })
+        .call(
+            &mut rig::tool::ToolContext::new(),
+            GoalUpdateArgs {
+                clear: true,
+                content: None,
+                status: None,
+                priority: None,
+                evidence: None,
+            },
+        )
         .await;
     assert!(result.is_ok());
     assert!(result.unwrap().contains("cleared"));
@@ -52,9 +55,12 @@ async fn open_goal_nudges_until_limit() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
-    tool.call(args("Ship feature", "in_progress"))
-        .await
-        .unwrap();
+    tool.call(
+        &mut rig::tool::ToolContext::new(),
+        args("Ship feature", "in_progress"),
+    )
+    .await
+    .unwrap();
 
     assert!(next_goal_nudge(2).unwrap().contains("nudge 1/2"));
     assert!(next_goal_nudge(2).unwrap().contains("nudge 2/2"));
@@ -67,7 +73,12 @@ async fn blocked_goal_requires_concrete_external_reason() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
-    let result = tool.call(args("Ship feature", "blocked")).await;
+    let result = tool
+        .call(
+            &mut rig::tool::ToolContext::new(),
+            args("Ship feature", "blocked"),
+        )
+        .await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("external reason"));
@@ -82,7 +93,7 @@ async fn blocked_goal_with_reason_runs_evaluator() {
     goal.evidence =
         Some("Permission denied for the required production deploy command.".to_string());
 
-    let result = tool.call(goal).await;
+    let result = tool.call(&mut rig::tool::ToolContext::new(), goal).await;
 
     assert!(result.is_err());
     assert!(
@@ -100,7 +111,9 @@ async fn cancelled_goal_does_not_nudge_when_evidence_is_provided() {
     let tool = UpdateGoal::new(None, None);
     let mut goal = args("Ship feature", "cancelled");
     goal.evidence = Some("User explicitly requested dropping this goal from scope.".to_string());
-    tool.call(goal).await.unwrap();
+    tool.call(&mut rig::tool::ToolContext::new(), goal)
+        .await
+        .unwrap();
 
     assert!(next_goal_nudge(2).is_none());
 }
@@ -110,7 +123,12 @@ async fn completed_goal_requires_evidence() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_goal();
     let tool = UpdateGoal::new(None, None);
-    let result = tool.call(args("Ship feature", "completed")).await;
+    let result = tool
+        .call(
+            &mut rig::tool::ToolContext::new(),
+            args("Ship feature", "completed"),
+        )
+        .await;
 
     assert!(result.is_err());
     assert!(
@@ -146,13 +164,16 @@ async fn cannot_clear_after_failed_evaluator_verdict() {
     let tool = UpdateGoal::new(None, None);
 
     let result = tool
-        .call(GoalUpdateArgs {
-            clear: true,
-            content: None,
-            status: None,
-            priority: None,
-            evidence: None,
-        })
+        .call(
+            &mut rig::tool::ToolContext::new(),
+            GoalUpdateArgs {
+                clear: true,
+                content: None,
+                status: None,
+                priority: None,
+                evidence: None,
+            },
+        )
         .await;
 
     assert!(result.is_err());
@@ -168,7 +189,7 @@ async fn completed_goal_runs_evaluator() {
     let mut goal = args("Ship feature", "completed");
     goal.evidence = Some("cargo test passed".to_string());
 
-    let result = tool.call(goal).await;
+    let result = tool.call(&mut rig::tool::ToolContext::new(), goal).await;
 
     assert!(result.is_err());
     assert!(
@@ -186,7 +207,10 @@ async fn in_progress_goal_with_evidence_is_accepted_without_evaluator() {
     let tool = UpdateGoal::new(None, None);
     let mut goal = args("Ship feature", "in_progress");
     goal.evidence = Some("cargo test passed".to_string());
-    let output = tool.call(goal).await.unwrap();
+    let output = tool
+        .call(&mut rig::tool::ToolContext::new(), goal)
+        .await
+        .unwrap();
 
     assert!(output.contains("evidence: cargo test passed"));
     assert_eq!(current_goal_state().unwrap().content, "Ship feature");

@@ -6,12 +6,10 @@ use std::time::Duration;
 use compact_str::CompactString;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rig::agent::Agent;
-use rig::client::{CompletionClient, ModelListingClient};
-use rig::completion::{CompletionModel, Message};
+use rig::completion::Message;
 use rig::http_client;
 use rig::http_client::{HttpClientExt, MultipartForm};
-use rig::providers::{anthropic, gemini, ollama, openai, openrouter};
-use rig::streaming::StreamingChat;
+use rig::providers::{anthropic, gemini, ollama, openai};
 use tokio::sync::mpsc;
 
 use crate::agent::builder;
@@ -122,10 +120,10 @@ fn resolve_base_url(config: &ProviderConfig) -> Option<String> {
 }
 
 /// rig 0.37 exposes two distinct OpenAI client types:
-/// - `openai::Client`            -> Responses API (`/responses`). Real OpenAI,
+/// - `openai::OpenAI`            -> Responses API (`/responses`). Real OpenAI,
 ///   including GPT-5; rig maps `max_tokens` to `max_output_tokens`, so it does
 ///   not hit the GPT-5 400.
-/// - `openai::CompletionsClient` -> Chat Completions API (`/chat/completions`).
+/// - `openai::OpenAI` -> Chat Completions API (`/chat/completions`).
 ///   Most OpenAI-compatible gateways (vLLM / LiteLLM / self-hosted) implement
 ///   only this endpoint.
 ///
@@ -133,50 +131,48 @@ fn resolve_base_url(config: &ProviderConfig) -> Option<String> {
 /// `ApiStyle` decide which one to build.
 #[derive(Clone)]
 pub enum OpenAiClient {
-    Responses(openai::Client),
-    Completions(openai::CompletionsClient),
-    DeepSeek(openai::CompletionsClient),
-    Codex(openai::Client<CodexHttpClient>),
+    Responses(openai::OpenAI),
+    Completions(openai::OpenAI),
+    DeepSeek(openai::OpenAI),
+    Codex(openai::OpenAI),
 }
 
 impl OpenAiClient {
     fn completion_model(&self, name: String) -> OpenAiModel {
         match self {
-            OpenAiClient::Responses(c) => OpenAiModel::Responses(c.completion_model(name)),
-            OpenAiClient::Completions(c) => OpenAiModel::Completions(c.completion_model(name)),
-            OpenAiClient::DeepSeek(c) => OpenAiModel::Completions(c.completion_model(name)),
-            OpenAiClient::Codex(c) => OpenAiModel::Codex(c.completion_model(name)),
+            OpenAiClient::Responses(c) => OpenAiModel::Responses(c.responses(name).into()),
+            OpenAiClient::Completions(c) => OpenAiModel::Completions(c.chat(name).into()),
+            OpenAiClient::DeepSeek(c) => OpenAiModel::Completions(c.chat(name).into()),
+            OpenAiClient::Codex(c) => OpenAiModel::Codex(c.responses(name).into()),
         }
     }
 }
 
 pub enum OpenAiModel {
-    Responses(openai::responses_api::ResponsesCompletionModel),
-    Completions(openai::completion::CompletionModel),
-    Codex(openai::responses_api::ResponsesCompletionModel<CodexHttpClient>),
-    OpenCodeGoResponses(openai::responses_api::ResponsesCompletionModel, String),
-    OpenCodeGoCompletions(
-        openai::completion::CompletionModel<OpenCodeGoHttpClient>,
-        String,
-    ),
+    Responses(rig::DynModel<rig::operation::Completion>),
+    Completions(rig::DynModel<rig::operation::Completion>),
+    Codex(rig::DynModel<rig::operation::Completion>),
+    OpenCodeGoResponses(rig::DynModel<rig::operation::Completion>, String),
+    OpenCodeGoCompletions(rig::DynModel<rig::operation::Completion>, String),
 }
 
 #[derive(Clone)]
 pub enum OpenAiAgent {
-    Responses(Agent<openai::responses_api::ResponsesCompletionModel>),
-    Completions(Agent<openai::completion::CompletionModel>),
-    OpenCodeGoCompletions(Agent<openai::completion::CompletionModel<OpenCodeGoHttpClient>>),
-    Codex(Agent<openai::responses_api::ResponsesCompletionModel<CodexHttpClient>>),
+    Responses(Agent),
+    Completions(Agent),
+    OpenCodeGoCompletions(Agent),
+    Codex(Agent),
 }
 
 #[derive(Clone)]
 pub struct OpenCodeGoClient {
-    completions: openai::CompletionsClient<OpenCodeGoHttpClient>,
-    responses: openai::Client,
-    messages: anthropic::Client,
+    completions: openai::OpenAI,
+    responses: openai::OpenAI,
+    messages: anthropic::Anthropic,
     models_url: String,
     http_client: reqwest::Client,
     api_key: String,
+    headers: HeaderMap,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,12 +222,18 @@ fn parse_opencode_go_models(body: &str) -> anyhow::Result<Vec<ModelEntry>> {
 
 #[derive(Clone, Debug, Default)]
 pub struct OpenCodeGoHttpClient {
-    inner: reqwest::Client,
+    inner: rig::http_client::ReqwestClient,
+    headers: HeaderMap,
+    patch_reasoning: bool,
 }
 
 impl OpenCodeGoHttpClient {
     fn new(inner: reqwest::Client) -> Self {
-        Self { inner }
+        Self {
+            inner: inner.into(),
+            headers: HeaderMap::new(),
+            patch_reasoning: true,
+        }
     }
 
     fn patch_reasoning_content(body: bytes::Bytes) -> http_client::Result<bytes::Bytes> {
@@ -274,17 +276,22 @@ impl OpenCodeGoClient {
     fn completion_model(&self, name: String) -> AnyModel {
         match opencode_go_api(&name) {
             OpenCodeGoApi::Completions => AnyModel::OpenAI(OpenAiModel::OpenCodeGoCompletions(
-                self.completions.completion_model(name.clone()),
+                {
+                    let mut model = self.completions.chat(name.clone());
+                    if name.starts_with("deepseek-") {
+                        model.wire.provider.dialect.quirks.reasoning_field =
+                            Some("reasoning_content");
+                    }
+                    model.into()
+                },
                 name,
             )),
             OpenCodeGoApi::Responses => AnyModel::OpenAI(OpenAiModel::OpenCodeGoResponses(
-                self.responses.completion_model(name.clone()),
+                self.responses.responses(name.clone()).into(),
                 name,
             )),
             OpenCodeGoApi::Messages => AnyModel::OpenCodeGoMessages(
-                self.messages
-                    .completion_model(name.clone())
-                    .with_prompt_caching(),
+                cached_anthropic_model(&self.messages, name.clone()),
                 name,
             ),
         }
@@ -294,7 +301,7 @@ impl OpenCodeGoClient {
         let body = self
             .http_client
             .get(&self.models_url)
-            .headers(self.responses.headers().clone())
+            .headers(self.headers.clone())
             .bearer_auth(&self.api_key)
             .send()
             .await?
@@ -320,7 +327,12 @@ impl HttpClientExt for OpenCodeGoHttpClient {
         let (mut parts, body) = req.into_parts();
         let body = body.into();
         async move {
-            let body = Self::patch_reasoning_content(body)?;
+            parts.headers.extend(this.headers.clone());
+            let body = if this.patch_reasoning {
+                Self::patch_reasoning_content(body)?
+            } else {
+                body
+            };
             parts.headers.remove(reqwest::header::CONTENT_LENGTH);
             this.inner
                 .send(http_client::Request::from_parts(parts, body))
@@ -351,7 +363,12 @@ impl HttpClientExt for OpenCodeGoHttpClient {
         let (mut parts, body) = req.into_parts();
         let body = body.into();
         async move {
-            let body = Self::patch_reasoning_content(body)?;
+            parts.headers.extend(this.headers.clone());
+            let body = if this.patch_reasoning {
+                Self::patch_reasoning_content(body)?
+            } else {
+                body
+            };
             parts.headers.remove(reqwest::header::CONTENT_LENGTH);
             this.inner
                 .send_streaming(http_client::Request::from_parts(parts, body))
@@ -362,14 +379,14 @@ impl HttpClientExt for OpenCodeGoHttpClient {
 
 #[derive(Clone, Debug, Default)]
 pub struct CodexHttpClient {
-    inner: reqwest::Client,
+    inner: rig::http_client::ReqwestClient,
     prompt_cache_key: Option<String>,
 }
 
 impl CodexHttpClient {
     fn new(inner: reqwest::Client, prompt_cache_key: Option<String>) -> Self {
         Self {
-            inner,
+            inner: inner.into(),
             prompt_cache_key,
         }
     }
@@ -689,12 +706,12 @@ pub(crate) struct TestClient {
 
 #[derive(Clone)]
 pub enum AnyClient {
-    OpenRouter(openrouter::Client),
+    OpenRouter(openai::OpenAI),
     OpenAI(OpenAiClient),
     OpenCodeGo(OpenCodeGoClient),
-    Anthropic(anthropic::Client),
-    Gemini(gemini::Client),
-    Ollama(ollama::Client),
+    Anthropic(anthropic::Anthropic),
+    Gemini(gemini::Gemini),
+    Ollama(ollama::Ollama),
     #[cfg(test)]
     Test(TestClient),
 }
@@ -901,15 +918,13 @@ impl AnyClient {
         match self {
             AnyClient::OpenRouter(c) => {
                 let extra = openrouter_anthropic_routing(&name);
-                AnyModel::OpenRouter(c.completion_model(name).with_prompt_caching(), extra)
+                AnyModel::OpenRouter(c.chat(name).into(), extra)
             }
             AnyClient::OpenAI(c) => AnyModel::OpenAI(c.completion_model(name)),
             AnyClient::OpenCodeGo(c) => c.completion_model(name),
-            AnyClient::Anthropic(c) => {
-                AnyModel::Anthropic(c.completion_model(name).with_prompt_caching())
-            }
-            AnyClient::Gemini(c) => AnyModel::Gemini(c.completion_model(name)),
-            AnyClient::Ollama(c) => AnyModel::Ollama(c.completion_model(name)),
+            AnyClient::Anthropic(c) => AnyModel::Anthropic(cached_anthropic_model(c, name)),
+            AnyClient::Gemini(c) => AnyModel::Gemini(c.completion(name).into()),
+            AnyClient::Ollama(c) => AnyModel::Ollama(c.native_completion(name).into()),
             #[cfg(test)]
             AnyClient::Test(c) => AnyModel::Test(c.clone()),
         }
@@ -948,7 +963,7 @@ pub struct ModelEntry {
 }
 
 impl ModelEntry {
-    fn from_rig(m: &rig::model::listing::Model) -> Self {
+    fn from_rig(m: &rig::model::listing::ModelInfo) -> Self {
         Self {
             id: m.id.clone(),
             display: m.display_name().to_string(),
@@ -1117,8 +1132,7 @@ async fn summarize_with_model(
 
 async fn run_summarizer<M>(model: M, prompt: String) -> anyhow::Result<CompressionResult>
 where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
+    M: Into<rig::DynModel<rig::operation::Completion>>,
 {
     let mut preamble = "You are a conversation summarizer.".to_string();
     if let Some(s) = crate::session::storage::load_suffix() {
@@ -1132,9 +1146,10 @@ where
 
     let mut started = std::time::Instant::now();
     let mut stream = agent
-        .stream_chat(prompt.clone(), Vec::<Message>::new())
-        .multi_turn(1)
-        .await;
+        .prompt(prompt.clone())
+        .history(Vec::<Message>::new())
+        .max_turns(1)
+        .stream();
 
     let mut response = String::new();
     let mut provider_call = None;
@@ -1143,8 +1158,8 @@ where
     while let Some(item) = stream.next().await {
         match item {
             Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                rig::streaming::StreamedAssistantContent::Text(text),
-            )) => response.push_str(&text.text),
+                rig::streaming::Item::Event(rig::streaming::StreamEvent::Text { text, .. }),
+            )) => response.push_str(&text),
             Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
                 provider_call = Some(crate::event::ProviderCall {
                     call_index: call.call_index,
@@ -1153,7 +1168,7 @@ where
                 });
             }
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
-                response = res.response().to_string();
+                response = res.output().to_string();
                 break;
             }
             Err(e) => {
@@ -1164,9 +1179,10 @@ where
                     runner::sleep_for_retry(delay_ms).await;
                     started = std::time::Instant::now();
                     stream = agent
-                        .stream_chat(prompt.clone(), Vec::<Message>::new())
-                        .multi_turn(1)
-                        .await;
+                        .prompt(prompt.clone())
+                        .history(Vec::<Message>::new())
+                        .max_turns(1)
+                        .stream();
                     continue;
                 }
                 return Err(anyhow::anyhow!("Compression failed: {}", e));
@@ -1218,25 +1234,25 @@ pub enum AnyModel {
     /// breakpoints (Bedrock/Vertex silently drop them). `None` for every other
     /// OpenRouter model, which caches automatically and needs no routing.
     OpenRouter(
-        openrouter::completion::CompletionModel,
+        rig::DynModel<rig::operation::Completion>,
         Option<serde_json::Value>,
     ),
     OpenAI(OpenAiModel),
-    OpenCodeGoMessages(anthropic::completion::CompletionModel, String),
-    Anthropic(anthropic::completion::CompletionModel),
-    Gemini(gemini::completion::CompletionModel),
-    Ollama(ollama::CompletionModel),
+    OpenCodeGoMessages(rig::DynModel<rig::operation::Completion>, String),
+    Anthropic(rig::DynModel<rig::operation::Completion>),
+    Gemini(rig::DynModel<rig::operation::Completion>),
+    Ollama(rig::DynModel<rig::operation::Completion>),
     #[cfg(test)]
     Test(TestClient),
 }
 
 #[derive(Clone)]
 pub enum AnyAgent {
-    OpenRouter(Agent<openrouter::completion::CompletionModel>),
+    OpenRouter(Agent),
     OpenAI(OpenAiAgent),
-    Anthropic(Agent<anthropic::completion::CompletionModel>),
-    Gemini(Agent<gemini::completion::CompletionModel>),
-    Ollama(Agent<ollama::CompletionModel>),
+    Anthropic(Agent),
+    Gemini(Agent),
+    Ollama(Agent),
     #[cfg(test)]
     Test(TestAgent),
 }
@@ -1477,36 +1493,15 @@ fn build_openai_client(
 ) -> anyhow::Result<OpenAiClient> {
     let style = resolve_api_style(base_url, custom);
 
-    match style {
-        ApiStyle::Responses => {
-            let client = match base_url {
-                Some(u) => openai::Client::builder()
-                    .api_key(key)
-                    .base_url(u)
-                    .http_client(http_client)
-                    .build()?,
-                None => openai::Client::builder()
-                    .api_key(key)
-                    .http_client(http_client)
-                    .build()?,
-            };
-            Ok(OpenAiClient::Responses(client))
-        }
-        ApiStyle::Completions => {
-            let client = match base_url {
-                Some(u) => openai::CompletionsClient::builder()
-                    .api_key(key)
-                    .base_url(u)
-                    .http_client(http_client)
-                    .build()?,
-                None => openai::CompletionsClient::builder()
-                    .api_key(key)
-                    .http_client(http_client)
-                    .build()?,
-            };
-            Ok(OpenAiClient::Completions(client))
-        }
+    let mut config = openai::OpenAIConfig::new(key);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url);
     }
+    let client = config.connect(rig::http_client::ReqwestClient::from(http_client));
+    Ok(match style {
+        ApiStyle::Responses => OpenAiClient::Responses(client),
+        ApiStyle::Completions => OpenAiClient::Completions(client),
+    })
 }
 
 pub fn create_client(
@@ -1600,11 +1595,9 @@ fn create_client_inner(
             let custom = custom_providers.get(provider_name);
             let http_client =
                 build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
-            let client = openai::CompletionsClient::builder()
-                .api_key(&key)
-                .base_url(base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL))
-                .http_client(http_client)
-                .build()?;
+            let client = openai::OpenAIConfig::new(key.as_str())
+                .with_base_url(base_url.as_deref().unwrap_or(DEEPSEEK_BASE_URL))
+                .connect(rig::http_client::ReqwestClient::from(http_client));
             Ok(AnyClient::OpenAI(OpenAiClient::DeepSeek(client)))
         }
         ProviderKind::OpenCodeGo => {
@@ -1630,14 +1623,12 @@ fn build_codex_client(
     http_client: reqwest::Client,
     prompt_cache_key: Option<&str>,
 ) -> anyhow::Result<OpenAiClient> {
-    let client = openai::Client::builder()
-        .api_key("dynamic-codex-auth")
-        .base_url(OPENAI_CODEX_BASE_URL)
-        .http_client(CodexHttpClient::new(
+    let client = openai::OpenAIConfig::new("dynamic-codex-auth")
+        .with_base_url(OPENAI_CODEX_BASE_URL)
+        .connect(CodexHttpClient::new(
             http_client,
             prompt_cache_key.map(ToOwned::to_owned),
-        ))
-        .build()?;
+        ));
     Ok(OpenAiClient::Codex(client))
 }
 
@@ -1663,72 +1654,85 @@ fn build_opencode_go_client(
     let messages_base_url = openai_base_url
         .strip_suffix("/v1")
         .unwrap_or(openai_base_url);
+    let transport = OpenCodeGoHttpClient {
+        inner: http_client.clone().into(),
+        headers: headers.clone(),
+        patch_reasoning: false,
+    };
     Ok(OpenCodeGoClient {
         models_url: format!("{openai_base_url}/models"),
-        http_client: http_client.clone(),
+        http_client,
         api_key: key.to_string(),
-        completions: openai::CompletionsClient::builder()
-            .api_key(key)
-            .base_url(openai_base_url)
-            .http_headers(headers.clone())
-            .http_client(OpenCodeGoHttpClient::new(http_client.clone()))
-            .build()?,
-        responses: openai::Client::builder()
-            .api_key(key)
-            .base_url(openai_base_url)
-            .http_headers(headers.clone())
-            .http_client(http_client.clone())
-            .build()?,
-        messages: anthropic::Client::builder()
-            .api_key(key)
-            .base_url(messages_base_url)
-            .http_headers(headers)
-            .http_client(http_client)
-            .build()?,
+        headers,
+        completions: openai::OpenAIConfig::new(key)
+            .with_base_url(openai_base_url)
+            .connect(OpenCodeGoHttpClient {
+                patch_reasoning: true,
+                ..transport.clone()
+            }),
+        responses: openai::OpenAIConfig::new(key)
+            .with_base_url(openai_base_url)
+            .connect(transport.clone()),
+        messages: anthropic::AnthropicConfig::new(key)
+            .with_base_url(messages_base_url)
+            .connect(transport),
     })
 }
 
-macro_rules! build_provider_client {
-    ($client_ty:ty, $variant:ident, $key_expr:expr, $base_url:expr) => {{
-        let key = $key_expr;
-        let builder = match $base_url {
-            Some(u) => <$client_ty>::builder().api_key(key).base_url(u),
-            None => <$client_ty>::builder().api_key(key),
-        };
-        Ok(AnyClient::$variant(builder.build()?))
-    }};
+fn cached_anthropic_model(
+    client: &anthropic::Anthropic,
+    name: String,
+) -> rig::DynModel<rig::operation::Completion> {
+    let mut model = client.completion(name);
+    model.wire = model.wire.with_prompt_caching();
+    model.into()
 }
 
 fn build_anthropic_client(key: &str, base_url: Option<&str>) -> anyhow::Result<AnyClient> {
-    build_provider_client!(anthropic::Client, Anthropic, key, base_url)
+    let mut config = anthropic::AnthropicConfig::new(key);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url);
+    }
+    Ok(AnyClient::Anthropic(config.client()))
 }
 
 fn build_gemini_client(key: &str, base_url: Option<&str>) -> anyhow::Result<AnyClient> {
-    build_provider_client!(gemini::Client, Gemini, key, base_url)
+    let mut config = gemini::GeminiConfig::new(key);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url);
+    }
+    Ok(AnyClient::Gemini(config.client()))
 }
 
 fn build_ollama_client(key: &str, base_url: Option<&str>) -> anyhow::Result<AnyClient> {
-    build_provider_client!(
-        ollama::Client,
-        Ollama,
-        ollama::OllamaApiKey::from(key),
-        base_url
-    )
+    let mut config = ollama::OllamaConfig::new().with_api_key(key);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url);
+    }
+    Ok(AnyClient::Ollama(config.client()))
 }
 
 fn build_openrouter_client(key: &str, base_url: Option<&str>) -> anyhow::Result<AnyClient> {
-    // Expanded from `build_provider_client!` so we can chain OpenRouter's
-    // builder-only app-identity calls: these set `X-OpenRouter-Title` /
-    // `HTTP-Referer` / `X-OpenRouter-Categories` so zerostack's traffic is
-    // attributed in OpenRouter's dashboards instead of showing up anonymously.
-    let builder = match base_url {
-        Some(u) => openrouter::Client::builder().api_key(key).base_url(u),
-        None => openrouter::Client::builder().api_key(key),
-    };
-    let builder = builder
-        .with_app_identity("zerostack", "https://github.com/gi-dellav/zerostack")
-        .with_app_categories(&["cli-agent", "coding"]);
-    Ok(AnyClient::OpenRouter(builder.build()?))
+    let mut config = openai::OpenAIConfig::with_key(&openai::wire::OPENROUTER, key);
+    if let Some(url) = base_url {
+        config = config.with_base_url(url);
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("x-openrouter-title", HeaderValue::from_static("zerostack"));
+    headers.insert(
+        "http-referer",
+        HeaderValue::from_static("https://github.com/gi-dellav/zerostack"),
+    );
+    headers.insert(
+        "x-openrouter-categories",
+        HeaderValue::from_static("cli-agent,coding"),
+    );
+    let http = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()?;
+    Ok(AnyClient::OpenRouter(
+        config.connect(rig::http_client::ReqwestClient::from(http)),
+    ))
 }
 
 fn openai_reasoning_params(effort: Option<&str>) -> Option<serde_json::Value> {
@@ -2040,6 +2044,7 @@ impl TestAgent {
                         call_id: None,
                         name: CompactString::new("bash"),
                         args: serde_json::json!({ "command": "bash -c 'sleep 500'" }),
+                        reasoning: Vec::new(),
                     })
                     .await;
                 let _ = self.sandbox.output_command("bash -c 'sleep 500'").await;

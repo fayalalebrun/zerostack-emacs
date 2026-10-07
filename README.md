@@ -87,13 +87,14 @@ in
 pkgs.zerostack
 ```
 
-Development commands should be run through the flake shell so Emacs, TeX, and
-other native-client test tools are available:
+The development shell pins Rust 1.99.0, including Cargo, rustfmt, Clippy,
+rust-analyzer, and rust-src. Rig 0.44 requires Rust 1.95 or newer.
+Run development commands through the Nix shell:
 
 ```bash
-nix develop --no-write-lock-file -c cargo fmt
-nix develop --no-write-lock-file -c cargo test
-nix develop --no-write-lock-file -c cargo install --path . --debug
+nix develop --file shell.nix --command cargo fmt
+nix develop --file shell.nix --command cargo test
+nix develop --file shell.nix --command cargo install --path . --debug
 ```
 
 ### Cargo

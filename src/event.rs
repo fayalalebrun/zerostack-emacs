@@ -15,12 +15,12 @@ pub struct TokenUsage {
 impl From<rig::completion::Usage> for TokenUsage {
     fn from(usage: rig::completion::Usage) -> Self {
         Self {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            total_tokens: usage.total_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens,
-            reasoning_tokens: usage.reasoning_tokens,
+            input_tokens: usage.input_tokens.unwrap_or_default(),
+            output_tokens: usage.output_tokens.unwrap_or_default(),
+            total_tokens: usage.total_tokens.unwrap_or_default(),
+            cached_input_tokens: usage.cached_input_tokens.unwrap_or_default(),
+            cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or_default(),
+            reasoning_tokens: usage.reasoning_tokens.unwrap_or_default(),
         }
     }
 }
@@ -118,6 +118,7 @@ pub enum AgentEvent {
         call_id: Option<CompactString>,
         name: CompactString,
         args: serde_json::Value,
+        reasoning: Vec<ProviderReasoning>,
     },
     ToolResult {
         id: CompactString,

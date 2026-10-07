@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use ignore::WalkBuilder;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{
@@ -65,24 +64,28 @@ impl Tool for ListDirTool {
     type Args = ListDirArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_dir".to_string(),
-            description: "List files and directories in a directory. Respects .gitignore. Shows type, size, entry count for subdirectories. Sorted: directories first, then alphabetical.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory path (defaults to current working directory)"
-                    }
-                },
-                "required": []
-            }),
-        }
+    fn description(&self) -> String {
+        "List files and directories in a directory. Respects .gitignore. Shows type, size, entry count for subdirectories. Sorted: directories first, then alphabetical.".to_string()
     }
 
-    async fn call(&self, args: ListDirArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path (defaults to current working directory)"
+                }
+            },
+            "required": []
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: ListDirArgs,
+    ) -> Result<String, ToolError> {
         let path = crate::fs::expand_tilde(args.path.as_deref().unwrap_or("."));
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "list_dir", &path).await?;
         let loaded = crate::context::nested_agents_for_dir(

@@ -5,10 +5,9 @@ use std::time::Duration;
 use base64::Engine;
 use compact_str::CompactString;
 use futures::StreamExt;
-use rig::OneOrMany;
-use rig::agent::{Agent, MultiTurnStreamItem, StreamingError, StreamingResult};
+use rig::agent::{Agent, MultiTurnStreamItem, StreamingResult};
 #[cfg(feature = "subagents")]
-use rig::agent::{InvalidToolCallContext, InvalidToolCallHookAction, PromptHook};
+use rig::agent::{AgentHook, HookContext, InvalidToolCallAction, InvalidToolCallContext};
 use rig::completion::message::{
     AssistantContent, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
 };
@@ -16,8 +15,8 @@ use rig::completion::message::{
 use rig::completion::message::{
     AudioMediaType, Document, DocumentMediaType, DocumentSourceKind, ImageMediaType, MimeType,
 };
-use rig::completion::{CompletionError, CompletionModel, Message, PromptError};
-use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
+use rig::completion::{Message, PromptError};
+use rig::streaming::{Item, StreamEvent};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep, sleep_until};
 
@@ -25,6 +24,33 @@ use crate::event::{AgentEvent, BtwEvent, ProviderCall, TokenUsage};
 use crate::session::{
     MessageRole, ProviderReasoning, Session, SessionMessage, assistant_message_with_reasoning,
 };
+
+#[derive(Clone, Default)]
+struct ProviderTurnHook(std::sync::Arc<std::sync::Mutex<Option<rig::message::AssistantMessage>>>);
+
+impl ProviderTurnHook {
+    fn take(&self) -> Option<rig::message::AssistantMessage> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+}
+
+impl rig::agent::AgentHook for ProviderTurnHook {
+    async fn on_outcome(
+        &self,
+        _ctx: &rig::agent::HookContext,
+        event: rig::agent::OutcomeEvent<'_>,
+    ) -> rig::agent::OutcomeAction {
+        if let Ok(rig::effect::Outcome::Completion(response)) = event.outcome
+            && let Some(Message::Assistant(message)) = response.message()
+        {
+            *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(message);
+        }
+        rig::agent::OutcomeAction::Proceed
+    }
+}
 
 pub struct AgentRunner {
     pub event_rx: mpsc::Receiver<AgentEvent>,
@@ -62,36 +88,32 @@ fn done_usages(
     (billing_usage, context_usage)
 }
 
-fn streamed_reasoning_text<R>(content: &StreamedAssistantContent<R>) -> Option<CompactString> {
+fn streamed_reasoning_text(content: &Item<StreamEvent>) -> Option<CompactString> {
     match content {
-        StreamedAssistantContent::Reasoning(reasoning) => {
-            let text = reasoning.display_text();
-            (!text.is_empty()).then(|| CompactString::new(text))
-        }
-        StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-            if reasoning.is_empty() {
-                None
-            } else {
-                Some(CompactString::from(reasoning.as_str()))
-            }
+        Item::Event(StreamEvent::Reasoning { text, .. }) if !text.is_empty() => {
+            Some(CompactString::new(text))
         }
         _ => None,
     }
 }
 
-fn streamed_provider_reasoning<R>(
-    content: &StreamedAssistantContent<R>,
-) -> Option<ProviderReasoning> {
+fn streamed_provider_reasoning(content: &Item<StreamEvent>) -> Option<ProviderReasoning> {
     match content {
-        StreamedAssistantContent::Reasoning(reasoning) => ProviderReasoning::from_rig(reasoning),
+        Item::Event(StreamEvent::End {
+            content: AssistantContent::Reasoning(reasoning),
+            ..
+        }) => ProviderReasoning::from_rig(reasoning),
         _ => None,
     }
 }
 
-fn streamed_assistant_content_has_output<R>(content: &StreamedAssistantContent<R>) -> bool {
+fn streamed_assistant_content_has_output(content: &Item<StreamEvent>) -> bool {
     match content {
-        StreamedAssistantContent::Text(text) => !text.text.is_empty(),
-        StreamedAssistantContent::ToolCall { .. } => true,
+        Item::Event(StreamEvent::Text { text, .. }) => !text.is_empty(),
+        Item::Event(StreamEvent::End {
+            content: AssistantContent::ToolCall(_),
+            ..
+        }) => true,
         _ => {
             streamed_reasoning_text(content).is_some()
                 || streamed_provider_reasoning(content).is_some()
@@ -103,47 +125,21 @@ const PROVIDER_RETRY_INITIAL_DELAY_MS: u64 = 2_000;
 const PROVIDER_RETRY_MAX_DELAY_MS: u64 = 30_000;
 const PROVIDER_RETRY_CONTINUE_PROMPT: &str = "Go";
 
-pub(crate) fn retry_delay_ms(attempt: usize, error: &StreamingError) -> Option<u64> {
-    is_retryable_streaming_error(error).then(|| {
+pub(crate) fn retry_delay_ms(attempt: usize, error: &PromptError) -> Option<u64> {
+    let retryable = match error {
+        PromptError::Provider(error) => {
+            error.is_retryable() || is_retryable_provider_error(&error.to_string())
+        }
+        PromptError::Report(report) => {
+            report.retryable || is_retryable_provider_error(&report.to_string())
+        }
+        _ => false,
+    };
+    retryable.then(|| {
         PROVIDER_RETRY_INITIAL_DELAY_MS
             .saturating_mul(1_u64 << attempt.min(4))
             .min(PROVIDER_RETRY_MAX_DELAY_MS)
     })
-}
-
-fn is_retryable_streaming_error(error: &StreamingError) -> bool {
-    match error {
-        StreamingError::Completion(error) => is_retryable_completion_error(error),
-        StreamingError::Prompt(error) => match error.as_ref() {
-            PromptError::CompletionError(error) => is_retryable_completion_error(error),
-            _ => false,
-        },
-        StreamingError::Tool(_) => false,
-    }
-}
-
-fn is_retryable_completion_error(error: &CompletionError) -> bool {
-    match error {
-        CompletionError::HttpError(error) => match error {
-            rig::http_client::Error::InvalidStatusCode(status)
-            | rig::http_client::Error::InvalidStatusCodeWithMessage(status, _) => {
-                is_retryable_http_status(status.as_u16())
-            }
-            rig::http_client::Error::StreamEnded => true,
-            rig::http_client::Error::Instance(source) => source
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(|error| {
-                    error.is_timeout()
-                        || error.is_connect()
-                        || error
-                            .status()
-                            .is_some_and(|status| is_retryable_http_status(status.as_u16()))
-                }),
-            _ => false,
-        },
-        CompletionError::ProviderError(message) => is_retryable_provider_error(message),
-        _ => false,
-    }
 }
 
 fn is_retryable_http_status(status: u16) -> bool {
@@ -245,13 +241,14 @@ pub(crate) async fn sleep_for_retry(delay_ms: u64) {
 }
 
 fn push_tool_call(tool_interactions: &mut Vec<Message>, tool_call: ToolCall) {
-    if let Some(Message::Assistant { content, .. }) = tool_interactions.last_mut() {
+    if let Some(Message::Assistant(rig::message::AssistantMessage { content, .. })) =
+        tool_interactions.last_mut()
+    {
         content.push(AssistantContent::ToolCall(tool_call));
     } else {
-        tool_interactions.push(Message::Assistant {
-            id: None,
-            content: OneOrMany::one(AssistantContent::ToolCall(tool_call)),
-        });
+        tool_interactions.push(Message::Assistant(rig::message::AssistantMessage::new(
+            vec![AssistantContent::ToolCall(tool_call)],
+        )));
     }
 }
 
@@ -282,29 +279,25 @@ fn prepare_retry_continuation(
 /// is delivered as a single [`BtwEvent::Done`] (or [`BtwEvent::Error`]) tagged
 /// with `id`. Unlike [`spawn_agent`], it never registers a subagent event sink
 /// and never mutates the session.
-pub fn spawn_btw<M, P>(
-    agent: Agent<M, P>,
+pub fn spawn_btw(
+    agent: Agent,
     prompt: String,
     history: Vec<Message>,
     event_tx: mpsc::Sender<BtwEvent>,
     id: u32,
-) -> BtwRunner
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+) -> BtwRunner {
     let join = tokio::spawn(async move {
-        let mut stream = agent.stream_chat(prompt, history).await;
+        let mut stream = agent.prompt(prompt).history(history).stream();
         let mut acc = String::new();
 
         while let Some(item) = stream.next().await {
             match item {
-                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
                     text,
-                ))) => acc.push_str(&text.text),
+                    ..
+                }))) => acc.push_str(&text),
                 Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                    let response_text = res.response();
+                    let response_text = res.output();
                     let usage = res.usage();
                     let response = if response_text.is_empty() {
                         CompactString::from(acc.as_str())
@@ -401,10 +394,22 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
                 }
                 messages.push(Message::user(msg.content.to_string()));
             }
-            MessageRole::Assistant => messages.push(assistant_message_with_reasoning(
-                &msg.content,
-                &msg.provider_reasoning,
-            )),
+            MessageRole::Assistant => {
+                let mut message =
+                    assistant_message_with_reasoning(&msg.content, &msg.provider_reasoning);
+                if let Message::Assistant(turn) = &mut message
+                    && turn.origin.is_none()
+                    && session.provider == "opencode-go"
+                    && session.model.starts_with("deepseek-")
+                {
+                    turn.origin = Some(rig::message::Origin::new(
+                        "openai.chat",
+                        "openai",
+                        session.model.to_string(),
+                    ));
+                }
+                messages.push(message);
+            }
             // Convert non-user transcript records to Assistant for the
             // same reason as the summary above: the templates that reject
             // mid-stream System/tool roles tolerate Assistant, and code-symmetry with
@@ -418,13 +423,19 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
                         tool_call_message(msg, requires_call_id)
                 {
                     replayed_tool_call_ids.insert(call.id.to_string(), (replayed_id, call_id));
-                    if let Message::Assistant {
+                    if let Message::Assistant(rig::message::AssistantMessage {
                         content: tool_content,
                         ..
-                    } = &message
-                        && let Some(Message::Assistant { content, .. }) = messages.last_mut()
+                    }) = &message
+                        && let Some(Message::Assistant(rig::message::AssistantMessage {
+                            content,
+                            ..
+                        })) = messages.last_mut()
                     {
-                        content.push(tool_content.first());
+                        for item in tool_content {
+                            let native = session.messages.iter().filter_map(|msg| msg.provider_reasoning.iter().find_map(ProviderReasoning::native_message)).flat_map(|message| message.content).find(|candidate| matches!((candidate, item), (AssistantContent::ToolCall(a), AssistantContent::ToolCall(b)) if a.id == b.id));
+                            content.push(native.unwrap_or_else(|| item.clone()));
+                        }
                     } else {
                         messages.push(message);
                     }
@@ -463,30 +474,24 @@ fn tool_call_message(
     requires_call_id: bool,
 ) -> Option<(Message, String, Option<String>)> {
     let call = msg.tool_call.as_ref()?;
-    let missing_call_id = call.call_id.is_none() && requires_call_id;
-    let id = if missing_call_id {
-        format!("fc_{}", call.id)
-    } else {
-        call.id.to_string()
-    };
-    let call_id = call
+    let id = call
         .call_id
-        .as_ref()
-        .map(ToString::to_string)
-        .or_else(|| missing_call_id.then(|| call.id.to_string()));
+        .as_deref()
+        .filter(|id| !id.starts_with("fc_"))
+        .unwrap_or(call.id.as_str())
+        .to_string();
+    let name = rig::message::ToolName::new(call.name.to_string()).ok()?;
+    let tool_call = ToolCall::new(
+        rig::message::CallId::from_wire(id.clone()),
+        ToolFunction::new(name, call.arguments.clone()),
+    );
+    let _ = requires_call_id;
     Some((
-        Message::Assistant {
-            id: None,
-            content: OneOrMany::one(AssistantContent::ToolCall(ToolCall {
-                id: id.clone(),
-                call_id: call_id.clone(),
-                function: ToolFunction::new(call.name.to_string(), call.arguments.clone()),
-                signature: None,
-                additional_params: None,
-            })),
-        },
-        id,
-        call_id,
+        Message::Assistant(rig::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(tool_call),
+        ])),
+        id.clone(),
+        Some(id),
     ))
 }
 
@@ -512,20 +517,19 @@ fn tool_result_messages(
     messages.insert(
         0,
         Message::User {
-            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                id: id.to_string(),
-                call_id: call_id.map(ToString::to_string),
-                content: OneOrMany::one(ToolResultContent::Text(Text::new(output))),
-            })),
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: rig::message::CallId::from_wire(call_id.unwrap_or(id)),
+                name: rig::message::ToolName::new(result.name.to_string()).ok()?,
+                is_error: false,
+                content: vec![ToolResultContent::Text(Text::new(output))],
+            })],
         },
     );
     Some(messages)
 }
 
 #[cfg(feature = "multimodal")]
-fn tool_result_images(
-    content: &OneOrMany<ToolResultContent>,
-) -> Vec<crate::event::ToolResultImage> {
+fn tool_result_images(content: &[ToolResultContent]) -> Vec<crate::event::ToolResultImage> {
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
 
@@ -562,32 +566,31 @@ fn tool_result_output(msg: &SessionMessage) -> String {
 pub fn media_to_messages(media: &[crate::extras::multimodal::MediaAttachment]) -> Vec<Message> {
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
-    use rig::OneOrMany;
     use rig::completion::message::UserContent;
 
     media
         .iter()
         .map(|m| match m {
             crate::extras::multimodal::MediaAttachment::Image { data, mime, .. } => Message::User {
-                content: OneOrMany::one(UserContent::image_base64(
+                content: vec![UserContent::image_base64(
                     BASE64_STANDARD.encode(data),
                     Some(image_media_type(mime)),
                     None,
-                )),
+                )],
             },
             crate::extras::multimodal::MediaAttachment::Audio { data, mime, .. } => Message::User {
-                content: OneOrMany::one(UserContent::audio(
-                    BASE64_STANDARD.encode(data),
-                    Some(audio_media_type(mime)),
-                )),
+                content: vec![UserContent::Audio(rig::message::Audio {
+                    data: DocumentSourceKind::Base64(BASE64_STANDARD.encode(data)),
+                    media_type: Some(audio_media_type(mime)),
+                })],
             },
             crate::extras::multimodal::MediaAttachment::Document { data, mime, .. } => {
                 Message::User {
-                    content: OneOrMany::one(UserContent::Document(Document {
+                    content: vec![UserContent::Document(Document {
                         data: DocumentSourceKind::Base64(BASE64_STANDARD.encode(data)),
                         media_type: Some(document_media_type(mime)),
                         additional_params: None,
-                    })),
+                    })],
                 }
             }
         })
@@ -595,7 +598,7 @@ pub fn media_to_messages(media: &[crate::extras::multimodal::MediaAttachment]) -
 }
 
 #[cfg(feature = "multimodal")]
-fn image_media_type(mime: &str) -> ImageMediaType {
+pub(crate) fn image_media_type(mime: &str) -> ImageMediaType {
     match mime {
         "image/png" => ImageMediaType::PNG,
         "image/jpeg" => ImageMediaType::JPEG,
@@ -626,22 +629,20 @@ fn document_media_type(mime: &str) -> DocumentMediaType {
     }
 }
 
-async fn continue_prompt_injector<M, P>(
-    agent: &Agent<M, P>,
+async fn continue_prompt_injector(
+    agent: &Agent,
     retry_prompt: &str,
     retry_history: &[Message],
     tool_interactions: &[Message],
-) -> StreamingResult<M::StreamingResponse>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+) -> StreamingResult {
     let mut new_history = retry_history.to_vec();
     new_history.extend_from_slice(tool_interactions);
     new_history.push(Message::user(retry_prompt.to_string()));
     new_history.push(Message::assistant(String::new()));
-    agent.stream_chat("Please continue.", new_history).await
+    agent
+        .prompt("Please continue.")
+        .history(new_history)
+        .stream()
 }
 
 /// Builds the forked context for a `/btw` side question: the committed
@@ -666,12 +667,7 @@ pub fn build_btw_snapshot(
     snapshot
 }
 
-pub fn spawn_agent<M, P>(agent: Agent<M, P>, prompt: String, history: Vec<Message>) -> AgentRunner
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> AgentRunner {
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(32);
 
     #[cfg(feature = "subagents")]
@@ -682,8 +678,8 @@ where
         let mut retry_history: Vec<Message> = history.clone();
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
-        let mut tool_names: HashMap<String, String> = HashMap::new();
-        let mut tool_starts: HashMap<String, Instant> = HashMap::new();
+        let mut tool_names: HashMap<rig::message::CallId, String> = HashMap::new();
+        let mut tool_starts: HashMap<rig::message::CallId, Instant> = HashMap::new();
         let mut usage_total = TokenUsage::default();
         let mut latest_usage: Option<TokenUsage> = None;
         let mut response_reasoning: Vec<ProviderReasoning> = Vec::new();
@@ -692,7 +688,12 @@ where
         let mut partial_text = String::new();
 
         let mut provider_call_started = Instant::now();
-        let mut stream = agent.stream_chat(prompt, history).await;
+        let provider_turn = ProviderTurnHook::default();
+        let mut stream = agent
+            .prompt(prompt)
+            .history(history)
+            .add_hook(provider_turn.clone())
+            .stream();
 
         loop {
             while let Some(item) = stream.next().await {
@@ -712,35 +713,40 @@ where
                         }
 
                         match content {
-                            StreamedAssistantContent::Text(text) => {
-                                partial_text.push_str(&text.text);
+                            Item::Event(StreamEvent::Text { text, .. }) => {
+                                partial_text.push_str(&text);
                                 let _ = event_tx
-                                    .send(AgentEvent::Token(CompactString::from(text.text)))
-                                    .await;
-                            }
-                            StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                                response_reasoning.clear();
-                                last_tool_name = Some(tool_call.function.name.clone());
-                                tool_names
-                                    .insert(tool_call.id.clone(), tool_call.function.name.clone());
-                                tool_starts.insert(tool_call.id.clone(), Instant::now());
-                                push_tool_call(&mut tool_interactions, tool_call.clone());
-                                let _ = event_tx
-                                    .send(AgentEvent::ToolCall {
-                                        id: CompactString::from(tool_call.id),
-                                        call_id: tool_call.call_id.map(CompactString::from),
-                                        name: CompactString::from(tool_call.function.name),
-                                        args: tool_call.function.arguments,
-                                    })
+                                    .send(AgentEvent::Token(CompactString::from(text)))
                                     .await;
                             }
                             _ => {}
                         }
                     }
-                    Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                        tool_result,
-                        ..
-                    })) => {
+                    Ok(MultiTurnStreamItem::ToolCall { mut tool_call }) => {
+                        let reasoning = provider_turn.take().map(|message| {
+                            if let Some(AssistantContent::ToolCall(call)) = message.content.iter().find(|content| matches!(content, AssistantContent::ToolCall(call) if call.id == tool_call.id)) { tool_call = call.clone(); }
+                            vec![ProviderReasoning::from_message(&message)]
+                        }).unwrap_or_else(|| std::mem::take(&mut response_reasoning));
+                        response_reasoning.clear();
+                        last_tool_name = Some(tool_call.function.name.to_string());
+                        tool_names
+                            .insert(tool_call.id.clone(), tool_call.function.name.to_string());
+                        tool_starts.insert(tool_call.id.clone(), Instant::now());
+                        push_tool_call(&mut tool_interactions, tool_call.clone());
+                        let _ = event_tx
+                            .send(AgentEvent::ToolCall {
+                                id: CompactString::new(tool_call.id.to_string()),
+                                call_id: tool_call
+                                    .id
+                                    .provider()
+                                    .map(|id| CompactString::new(id.as_str())),
+                                name: CompactString::new(tool_call.function.name.as_str()),
+                                args: serde_json::Value::Object(tool_call.function.arguments),
+                                reasoning,
+                            })
+                            .await;
+                    }
+                    Ok(MultiTurnStreamItem::ToolResult { tool_result }) => {
                         stream_had_output = true;
                         let mut output = String::new();
                         for c in tool_result.content.iter() {
@@ -756,7 +762,7 @@ where
                         #[cfg(not(feature = "multimodal"))]
                         let images = Vec::new();
                         let name = tool_names
-                            .remove(&tool_result.id)
+                            .remove(&tool_result.call)
                             .or_else(|| last_tool_name.take())
                             .unwrap_or_default();
                         let loaded_context = if name == "read" {
@@ -765,7 +771,7 @@ where
                             Vec::new()
                         };
                         let duration_ms = tool_starts
-                            .remove(&tool_result.id)
+                            .remove(&tool_result.call)
                             .map(|start| start.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
                             .unwrap_or(0);
                         let display_artifact = if name == "edit" {
@@ -775,8 +781,11 @@ where
                         };
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
-                                id: CompactString::new(tool_result.id.clone()),
-                                call_id: tool_result.call_id.clone().map(CompactString::from),
+                                id: CompactString::new(tool_result.call.to_string()),
+                                call_id: tool_result
+                                    .call
+                                    .provider()
+                                    .map(|id| CompactString::new(id.as_str())),
                                 name: CompactString::new(name),
                                 output: CompactString::from(output.clone()),
                                 images: images.clone(),
@@ -788,21 +797,20 @@ where
                         #[cfg(feature = "multimodal")]
                         if !images.is_empty() {
                             tool_interactions.push(Message::User {
-                                content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                                    id: tool_result.id,
-                                    call_id: tool_result.call_id,
-                                    content: OneOrMany::one(ToolResultContent::Text(Text::new(
-                                        output,
-                                    ))),
-                                })),
+                                content: vec![UserContent::ToolResult(ToolResult {
+                                    call: tool_result.call,
+                                    name: tool_result.name,
+                                    is_error: tool_result.is_error,
+                                    content: vec![ToolResultContent::Text(Text::new(output))],
+                                })],
                             });
                             for image in images {
                                 tool_interactions.push(Message::User {
-                                    content: OneOrMany::one(UserContent::image_base64(
+                                    content: vec![UserContent::image_base64(
                                         base64::prelude::BASE64_STANDARD.encode(image.data),
                                         Some(image_media_type(&image.mime)),
                                         None,
-                                    )),
+                                    )],
                                 });
                             }
                             break;
@@ -811,13 +819,16 @@ where
                         provider_call_started = Instant::now();
                     }
                     Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                        let response_text = res.response();
+                        let response_text = res.output();
                         let final_usage = res.usage().into();
 
                         if !response_text.is_empty() {
                             let (usage, context_usage) =
                                 done_usages(usage_total, latest_usage, final_usage);
-                            let reasoning = std::mem::take(&mut response_reasoning);
+                            let reasoning = provider_turn
+                                .take()
+                                .map(|message| vec![ProviderReasoning::from_message(&message)])
+                                .unwrap_or_else(|| std::mem::take(&mut response_reasoning));
                             let _ = event_tx
                                 .send(AgentEvent::Done {
                                     response: CompactString::from(response_text),
@@ -848,6 +859,7 @@ where
                             .await;
                         provider_call_started = Instant::now();
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         let message = e.to_string();
                         if let Some(delay_ms) = retry_delay_ms(retry_attempts, &e) {
@@ -874,8 +886,10 @@ where
                             sleep_for_retry(delay_ms).await;
                             provider_call_started = Instant::now();
                             stream = agent
-                                .stream_chat(retry_prompt.clone(), retry_history.clone())
-                                .await;
+                                .prompt(retry_prompt.clone())
+                                .history(retry_history.clone())
+                                .add_hook(provider_turn.clone())
+                                .stream();
                             continue;
                         }
                         let reasoning = std::mem::take(&mut response_reasoning);
@@ -887,7 +901,6 @@ where
                             .await;
                         return;
                     }
-                    _ => {}
                 }
             }
 
@@ -907,22 +920,18 @@ where
     }
 }
 
-pub async fn run_print<M, P>(
-    agent: &Agent<M, P>,
+pub async fn run_print(
+    agent: &Agent,
     prompt: &str,
     max_turns: usize,
     pure_stdout: bool,
-) -> anyhow::Result<PrintRunResult>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+) -> anyhow::Result<PrintRunResult> {
     let mut provider_call_started = Instant::now();
     let mut stream = agent
-        .stream_chat(prompt.to_string(), Vec::<Message>::new())
-        .multi_turn(max_turns)
-        .await;
+        .prompt(prompt.to_string())
+        .history(Vec::<Message>::new())
+        .max_turns(max_turns)
+        .stream();
 
     let mut full_response = String::new();
     let mut response_reasoning = Vec::new();
@@ -933,34 +942,33 @@ where
 
     while let Some(item) = stream.next().await {
         match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
-                full_response.push_str(&text.text);
-                print!("{}", text.text);
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+                text,
+                ..
+            }))) => {
+                full_response.push_str(&text);
+                print!("{}", text);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
-                r,
-            ))) => {
-                eprint!("{}", r.display_text());
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
+                content: AssistantContent::Reasoning(r),
+                ..
+            }))) => {
                 if let Some(reasoning) = ProviderReasoning::from_rig(&r) {
                     response_reasoning.push(reasoning);
                 }
                 let _ = std::io::Write::flush(&mut std::io::stderr());
             }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-                tool_call,
-                ..
-            })) if pure_stdout => {
+            Ok(MultiTurnStreamItem::ToolCall { tool_call }) if pure_stdout => {
                 let name = &tool_call.function.name;
-                last_tool_name = Some(name.clone());
-                let summary = format_tool_args_summary(&tool_call.function.arguments);
+                last_tool_name = Some(name.to_string());
+                let summary = format_tool_args_summary(&serde_json::Value::Object(
+                    tool_call.function.arguments.clone(),
+                ));
                 println!("\n◈ {} {}", name, summary);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
-            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                tool_result,
-                ..
-            })) => {
+            Ok(MultiTurnStreamItem::ToolResult { tool_result }) => {
                 if pure_stdout {
                     let name = last_tool_name.take().unwrap_or_default();
                     let mut output = String::new();
@@ -987,6 +995,13 @@ where
                 }
                 provider_call_started = Instant::now();
             }
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Reasoning {
+                text,
+                ..
+            }))) => {
+                eprint!("{text}");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
             Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                 let duration_ms = provider_call_started
                     .elapsed()
@@ -1003,7 +1018,12 @@ where
                 });
                 provider_call_started = Instant::now();
             }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
+            Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                if let Some(Message::Assistant(message)) = response.messages.last() {
+                    response_reasoning = vec![ProviderReasoning::from_message(message)];
+                }
+                break;
+            }
             Ok(_) => {}
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -1131,14 +1151,14 @@ const SUBAGENT_INVALID_TOOL_RETRIES: usize = 2;
 struct SubagentPromptHook;
 
 #[cfg(feature = "subagents")]
-impl<M: CompletionModel> PromptHook<M> for SubagentPromptHook {
+impl AgentHook for SubagentPromptHook {
     async fn on_invalid_tool_call(
         &self,
+        _ctx: &HookContext,
         context: &InvalidToolCallContext,
-    ) -> InvalidToolCallHookAction {
-        InvalidToolCallHookAction::retry(subagent_invalid_tool_feedback(
-            &context.tool_name,
-            &context.allowed_tools,
+    ) -> Option<InvalidToolCallAction> {
+        Some(InvalidToolCallAction::retry(
+            subagent_invalid_tool_feedback(&context.tool_name, &context.allowed_tools),
         ))
     }
 }
@@ -1156,27 +1176,23 @@ fn subagent_invalid_tool_feedback(tool_name: &str, allowed_tools: &[String]) -> 
 }
 
 #[cfg(feature = "subagents")]
-pub async fn run_subagent<M, P>(
-    agent: &Agent<M, P>,
+pub async fn run_subagent(
+    agent: &Agent,
     prompt: &str,
     max_turns: usize,
     event_tx: Option<&mpsc::Sender<AgentEvent>>,
     limits: Option<SubagentLimits>,
-) -> anyhow::Result<String>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+) -> anyhow::Result<String> {
     let mut retry_prompt = prompt.to_string();
     let mut retry_history = Vec::<Message>::new();
     let mut tool_interactions = Vec::<Message>::new();
     let mut stream = agent
-        .stream_chat(retry_prompt.clone(), retry_history.clone())
-        .with_hook(SubagentPromptHook)
+        .prompt(retry_prompt.clone())
+        .history(retry_history.clone())
+        .add_hook(SubagentPromptHook)
         .max_invalid_tool_call_retries(SUBAGENT_INVALID_TOOL_RETRIES)
-        .multi_turn(max_turns)
-        .await;
+        .max_turns(max_turns)
+        .stream();
 
     let mut full_response = String::new();
     let mut preserved_response = String::new();
@@ -1204,30 +1220,27 @@ where
         };
         let Some(item) = item else { break };
         match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
-                stream_had_output |= !text.text.is_empty();
-                full_response.push_str(&text.text);
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-                tool_call,
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+                text,
                 ..
-            })) => {
+            }))) => {
+                stream_had_output |= !text.is_empty();
+                full_response.push_str(&text);
+            }
+            Ok(MultiTurnStreamItem::ToolCall { tool_call }) => {
                 stream_had_output = true;
                 push_tool_call(&mut tool_interactions, tool_call.clone());
                 tool_notes.push(format!("called tool `{}`", tool_call.function.name));
                 if let Some(tx) = event_tx {
                     let _ = tx
                         .send(AgentEvent::SubagentToolCall {
-                            name: CompactString::from(tool_call.function.name),
-                            args: tool_call.function.arguments,
+                            name: CompactString::new(tool_call.function.name.as_str()),
+                            args: serde_json::Value::Object(tool_call.function.arguments),
                         })
                         .await;
                 }
             }
-            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                tool_result,
-                ..
-            })) => {
+            Ok(MultiTurnStreamItem::ToolResult { tool_result }) => {
                 let mut output = String::new();
                 for c in tool_result.content.iter() {
                     if let ToolResultContent::Text(t) = c {
@@ -1264,7 +1277,7 @@ where
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                full_response = res.response().to_string();
+                full_response = res.output().to_string();
                 break;
             }
             Ok(_) => {}
@@ -1284,11 +1297,12 @@ where
                     stream_had_output = false;
                     sleep_for_retry(delay_ms).await;
                     stream = agent
-                        .stream_chat(retry_prompt.clone(), retry_history.clone())
-                        .with_hook(SubagentPromptHook)
+                        .prompt(retry_prompt.clone())
+                        .history(retry_history.clone())
+                        .add_hook(SubagentPromptHook)
                         .max_invalid_tool_call_retries(SUBAGENT_INVALID_TOOL_RETRIES)
-                        .multi_turn(max_turns)
-                        .await;
+                        .max_turns(max_turns)
+                        .stream();
                     continue;
                 }
                 return Err(anyhow::anyhow!("subagent error: {}", e));
@@ -1315,19 +1329,14 @@ fn truncate_for_subagent_note(text: &str) -> String {
 }
 
 #[cfg(feature = "subagents")]
-async fn subagent_context_cutoff_response<M, P>(
-    agent: &Agent<M, P>,
+async fn subagent_context_cutoff_response(
+    agent: &Agent,
     original_prompt: &str,
     partial_response: &str,
     tool_notes: &[String],
     context_tokens: u64,
     context_window: u64,
-) -> anyhow::Result<String>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+) -> anyhow::Result<String> {
     let prompt = subagent_cutoff_prompt(
         original_prompt,
         partial_response,
@@ -1344,17 +1353,12 @@ where
 }
 
 #[cfg(feature = "subagents")]
-async fn subagent_timeout_cutoff_response<M, P>(
-    agent: &Agent<M, P>,
+async fn subagent_timeout_cutoff_response(
+    agent: &Agent,
     original_prompt: &str,
     partial_response: &str,
     tool_notes: &[String],
-) -> anyhow::Result<String>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+) -> anyhow::Result<String> {
     let prompt = subagent_cutoff_prompt(
         original_prompt,
         partial_response,
@@ -1369,29 +1373,23 @@ where
 }
 
 #[cfg(feature = "subagents")]
-async fn run_subagent_cutoff_stream<M, P>(
-    agent: &Agent<M, P>,
-    prompt: String,
-) -> anyhow::Result<String>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
-{
+async fn run_subagent_cutoff_stream(agent: &Agent, prompt: String) -> anyhow::Result<String> {
     let mut retry_attempts = 0;
     'retry: loop {
         let mut stream = agent
-            .stream_chat(prompt.clone(), Vec::<Message>::new())
-            .await;
+            .prompt(prompt.clone())
+            .history(Vec::<Message>::new())
+            .stream();
         let mut response = String::new();
         while let Some(item) = stream.next().await {
             match item {
-                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
                     text,
-                ))) => response.push_str(&text.text),
+                    ..
+                }))) => response.push_str(&text),
                 Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                    if !res.response().is_empty() {
-                        response = res.response().to_string();
+                    if !res.output().is_empty() {
+                        response = res.output().to_string();
                     }
                     return Ok(response);
                 }
@@ -1448,18 +1446,19 @@ mod tests {
         streamed_assistant_content_has_output, streamed_provider_reasoning,
         streamed_reasoning_text,
     };
+    use crate::session::assistant_message_with_reasoning;
     use crate::session::{MessageRole, ProviderReasoning, ProviderReasoningContent, Session};
-    use rig::agent::StreamingError;
     use rig::completion::message::{
-        AssistantContent, Reasoning, ReasoningContent, Text, ToolCall, ToolFunction, UserContent,
+        AssistantContent, Reasoning, ToolCall, ToolFunction, UserContent,
     };
-    use rig::completion::{CompletionError, Message};
-    use rig::streaming::StreamedAssistantContent;
+    use rig::completion::{Message, PromptError};
+    use rig::error::ProviderError;
+    use rig::streaming::{Item, StreamEvent};
 
     fn provider_retry_delay(attempt: usize, message: &str) -> Option<u64> {
         retry_delay_ms(
             attempt,
-            &StreamingError::Completion(CompletionError::ProviderError(message.to_string())),
+            &PromptError::Provider(ProviderError::Provider(message.to_string())),
         )
     }
 
@@ -1528,13 +1527,15 @@ mod tests {
         assert!(prompt.contains("Do not call tools"));
     }
 
+    fn stream_item(event: serde_json::Value) -> Item<StreamEvent> {
+        serde_json::from_value(serde_json::json!({"item":"event", "value":event})).unwrap()
+    }
+
     #[test]
     fn streamed_reasoning_delta_is_forwardable_as_reasoning_text() {
-        let content = StreamedAssistantContent::<()>::ReasoningDelta {
-            id: Some("rs_demo".to_string()),
-            reasoning: "thinking in progress".to_string(),
-        };
-
+        let content = stream_item(
+            serde_json::json!({"event":"reasoning", "part":0, "text":"thinking in progress"}),
+        );
         assert_eq!(
             streamed_reasoning_text(&content).as_deref(),
             Some("thinking in progress")
@@ -1543,65 +1544,55 @@ mod tests {
 
     #[test]
     fn empty_reasoning_delta_is_ignored() {
-        let content = StreamedAssistantContent::<()>::ReasoningDelta {
-            id: None,
-            reasoning: String::new(),
-        };
-
+        let content = stream_item(serde_json::json!({"event":"reasoning", "part":0, "text":""}));
         assert!(streamed_reasoning_text(&content).is_none());
         assert!(!streamed_assistant_content_has_output(&content));
-        assert!(!streamed_assistant_content_has_output(
-            &StreamedAssistantContent::<()>::Text(Text::new(""))
-        ));
+        assert!(!streamed_assistant_content_has_output(&stream_item(
+            serde_json::json!({"event":"text", "part":0, "text":""})
+        )));
     }
 
     #[test]
     fn streamed_encrypted_reasoning_is_preserved() {
-        let mut reasoning =
-            Reasoning::summaries(vec!["short summary".to_string()]).with_id("rs_1".to_string());
-        reasoning
-            .content
-            .push(ReasoningContent::Encrypted("enc_blob".to_string()));
-        let content = StreamedAssistantContent::<()>::Reasoning(reasoning);
-
+        let mut reasoning = Reasoning::new("short summary");
+        reasoning.native = Some(rig::message::Native {
+            item: serde_json::json!({"type":"reasoning", "id":"rs_1", "summary":[{"type":"summary_text", "text":"short summary"}], "encrypted_content":"enc_blob"}),
+            fingerprint: rig::message::Fingerprint::of(&reasoning),
+        });
+        let content = stream_item(
+            serde_json::json!({"event":"end", "part":0, "content":AssistantContent::Reasoning(reasoning.clone())}),
+        );
         let stored = streamed_provider_reasoning(&content).unwrap();
         assert_eq!(stored.id, "rs_1");
+        let replay = assistant_message_with_reasoning("", &[stored]);
+        let Message::Assistant(message) = replay else {
+            panic!("assistant");
+        };
         assert_eq!(
-            stored.content,
-            vec![
-                ProviderReasoningContent::Summary("short summary".to_string()),
-                ProviderReasoningContent::Encrypted("enc_blob".to_string()),
-            ]
+            message.content,
+            vec![AssistantContent::Reasoning(reasoning)]
         );
     }
 
     #[test]
     fn streamed_text_reasoning_without_an_id_is_preserved_for_replay() {
-        let content = StreamedAssistantContent::<()>::Reasoning(Reasoning::new_with_signature(
-            "hidden chain of thought",
-            Some("signature".to_string()),
-        ));
-
+        let mut reasoning = Reasoning::new("hidden chain of thought");
+        reasoning.native = Some(rig::message::Native {
+            item: serde_json::json!({"type":"thinking", "thinking":reasoning.text, "signature":"signature"}),
+            fingerprint: rig::message::Fingerprint::of(&reasoning),
+        });
+        let content = stream_item(
+            serde_json::json!({"event":"end", "part":0, "content":AssistantContent::Reasoning(reasoning.clone())}),
+        );
         let stored = streamed_provider_reasoning(&content).unwrap();
         assert!(stored.id.is_empty());
-        assert_eq!(
-            stored.content,
-            vec![ProviderReasoningContent::Text {
-                text: "hidden chain of thought".to_string(),
-                signature: Some("signature".to_string()),
-            }]
-        );
-
-        let replay = crate::session::assistant_message_with_reasoning("answer", &[stored]);
-        let Message::Assistant { content, .. } = replay else {
-            panic!("expected assistant message");
+        let serialized = serde_json::to_string(&stored).unwrap();
+        let stored = serde_json::from_str(&serialized).unwrap();
+        let replay = assistant_message_with_reasoning("answer", &[stored]);
+        let Message::Assistant(message) = replay else {
+            panic!("assistant");
         };
-        assert!(
-            matches!(content.first(), AssistantContent::Reasoning(reasoning)
-            if reasoning.id.is_none()
-                && matches!(reasoning.content.first(), Some(ReasoningContent::Text { text, signature })
-                    if text == "hidden chain of thought" && signature.as_deref() == Some("signature")))
-        );
+        assert_eq!(message.content[0], AssistantContent::Reasoning(reasoning));
     }
 
     #[test]
@@ -1617,22 +1608,22 @@ mod tests {
         session.add_tool_result_structured("read", "file contents", "call_1", Some("fc_1"));
 
         let history = convert_history(&session);
-        let Message::Assistant { content, .. } = &history[1] else {
+        let Message::Assistant(rig::message::AssistantMessage { content, .. }) = &history[1] else {
             panic!("expected assistant tool call message");
         };
         let call_items = content.iter().collect::<Vec<_>>();
         assert!(matches!(call_items[0], AssistantContent::ToolCall(call)
-            if call.id == "call_1"
-                && call.call_id.as_deref() == Some("fc_1")
+            if call.id.to_string() == "call_1"
+                && call.id.provider().map(|id| id.as_str()) == Some("call_1")
                 && call.function.name == "read"
-                && call.function.arguments == serde_json::json!({ "path": "src/main.rs" })));
+                && serde_json::Value::Object(call.function.arguments.clone()) == serde_json::json!({ "path": "src/main.rs" })));
 
         let Message::User { content } = &history[2] else {
             panic!("expected user tool result message");
         };
         let result_items = content.iter().collect::<Vec<_>>();
         assert!(matches!(result_items[0], UserContent::ToolResult(result)
-            if result.id == "call_1" && result.call_id.as_deref() == Some("fc_1")));
+            if result.call.to_string() == "call_1" && result.call.provider().map(|id| id.as_str()) == Some("call_1")));
     }
 
     #[test]
@@ -1647,17 +1638,21 @@ mod tests {
         session.add_tool_result_structured("read", "file contents", "call_1", None);
 
         let history = convert_history(&session);
-        let Message::Assistant { content, .. } = &history[0] else {
+        let Message::Assistant(rig::message::AssistantMessage { content, .. }) = &history[0] else {
             panic!("expected assistant tool call message");
         };
-        assert!(matches!(content.first(), AssistantContent::ToolCall(call)
-            if call.id == "fc_call_1" && call.call_id.as_deref() == Some("call_1")));
+        assert!(
+            matches!(content.first().unwrap(), AssistantContent::ToolCall(call)
+            if call.id.to_string() == "call_1" && call.id.provider().map(|id| id.as_str()) == Some("call_1"))
+        );
 
         let Message::User { content } = &history[1] else {
             panic!("expected user tool result message");
         };
-        assert!(matches!(content.first(), UserContent::ToolResult(result)
-            if result.id == "fc_call_1" && result.call_id.as_deref() == Some("call_1")));
+        assert!(
+            matches!(content.first().unwrap(), UserContent::ToolResult(result)
+            if result.call.to_string() == "call_1" && result.call.provider().map(|id| id.as_str()) == Some("call_1"))
+        );
     }
 
     #[test]
@@ -1675,7 +1670,7 @@ mod tests {
 
         let history = convert_history(&session);
 
-        let Message::Assistant { content, .. } = &history[1] else {
+        let Message::Assistant(rig::message::AssistantMessage { content, .. }) = &history[1] else {
             panic!("expected combined assistant text and tool call");
         };
         let items = content.iter().collect::<Vec<_>>();
@@ -1711,10 +1706,13 @@ mod tests {
 
         let history = convert_history(&session);
         assert_eq!(history.len(), 3);
-        assert!(matches!(history[1], Message::Assistant { .. }));
+        assert!(matches!(
+            history[1],
+            Message::Assistant(rig::message::AssistantMessage { .. })
+        ));
         assert!(matches!(&history[2], Message::User { content }
-            if matches!(content.first(), UserContent::ToolResult(result)
-                if result.id == "fc_call_1" && result.call_id.as_deref() == Some("call_1"))));
+            if matches!(content.first().unwrap(), UserContent::ToolResult(result)
+                if result.call.to_string() == "call_1" && result.call.provider().map(|id| id.as_str()) == Some("call_1"))));
     }
 
     #[test]
@@ -1744,8 +1742,9 @@ mod tests {
 
     #[test]
     fn retry_classification_retries_transient_provider_failures() {
-        let http_error = StreamingError::Completion(CompletionError::HttpError(
-            rig::http_client::Error::InvalidStatusCode(http::StatusCode::BAD_GATEWAY),
+        let http_error = PromptError::Provider(ProviderError::from_http_response(
+            http::StatusCode::BAD_GATEWAY,
+            "bad gateway",
         ));
         assert_eq!(retry_delay_ms(0, &http_error), Some(2_000));
         assert_eq!(
@@ -1797,14 +1796,18 @@ mod tests {
             push_tool_call(
                 &mut interactions,
                 ToolCall::new(
-                    id.to_string(),
-                    ToolFunction::new("read".to_string(), serde_json::json!({})),
+                    rig::message::CallId::from_wire(id),
+                    ToolFunction::new(
+                        rig::message::ToolName::new("read").unwrap(),
+                        serde_json::json!({}),
+                    ),
                 ),
             );
         }
 
         assert_eq!(interactions.len(), 1);
-        let Message::Assistant { content, .. } = &interactions[0] else {
+        let Message::Assistant(rig::message::AssistantMessage { content, .. }) = &interactions[0]
+        else {
             panic!("expected assistant tool-call message");
         };
         assert_eq!(content.len(), 2);
@@ -1826,19 +1829,24 @@ mod tests {
         assert_eq!(prompt, "Go");
 
         assert!(matches!(&history[0], Message::User { content } if
-            matches!(content.first(), UserContent::Text(text) if text.text == "original")));
-        assert!(matches!(&history[1], Message::Assistant { content, .. } if
-            matches!(content.first(), AssistantContent::Text(text) if text.text == "first half")));
+            matches!(content.first().unwrap(), UserContent::Text(text) if text.text == "original")));
+        assert!(
+            matches!(&history[1], Message::Assistant(rig::message::AssistantMessage { content, .. }) if
+            matches!(content.first().unwrap(), AssistantContent::Text(text) if text.text == "first half"))
+        );
         assert!(matches!(&history[2], Message::User { content } if
-            matches!(content.first(), UserContent::Text(text) if text.text == "Go")));
-        assert!(matches!(&history[3], Message::Assistant { content, .. } if
-            matches!(content.first(), AssistantContent::Text(text) if text.text == "second half")));
+            matches!(content.first().unwrap(), UserContent::Text(text) if text.text == "Go")));
+        assert!(
+            matches!(&history[3], Message::Assistant(rig::message::AssistantMessage { content, .. }) if
+            matches!(content.first().unwrap(), AssistantContent::Text(text) if text.text == "second half"))
+        );
     }
 
     #[test]
     fn retry_classification_does_not_retry_terminal_errors() {
-        let http_error = StreamingError::Completion(CompletionError::HttpError(
-            rig::http_client::Error::InvalidStatusCode(http::StatusCode::BAD_REQUEST),
+        let http_error = PromptError::Provider(ProviderError::from_http_response(
+            http::StatusCode::BAD_REQUEST,
+            "bad request",
         ));
         assert_eq!(retry_delay_ms(0, &http_error), None);
         assert_eq!(provider_retry_delay(0, "context_length_exceeded"), None);
@@ -1866,12 +1874,12 @@ mod tests {
         );
 
         let history = convert_history(&session);
-        let Message::Assistant { content, .. } = &history[0] else {
+        let Message::Assistant(rig::message::AssistantMessage { content, .. }) = &history[0] else {
             panic!("expected assistant message");
         };
         let items = content.iter().collect::<Vec<_>>();
         assert!(
-            matches!(items[0], AssistantContent::Reasoning(reasoning) if reasoning.id.as_deref() == Some("rs_1"))
+            matches!(items[0], AssistantContent::Reasoning(reasoning) if reasoning.native.as_ref().is_some_and(|native| native.item["id"] == "rs_1"))
         );
         assert!(matches!(items[1], AssistantContent::Text(text) if text.text == "final answer"));
     }

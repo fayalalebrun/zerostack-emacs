@@ -3,7 +3,6 @@ use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compact_str::CompactString;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
 use tokio::process::Command;
@@ -51,7 +50,12 @@ impl Tool for TaskTool {
     type Args = SpawnRequest;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
+    fn description(&self) -> String {
+        "Spawn a fresh zerostack process for an isolated task. Read access uses the current workspace. Write access creates a persistent copy-on-write workspace containing all in-progress edits. The result includes the child response, session transcript, and workspace paths. The parent can access both paths. The soft deadline interrupts active work and starts one tool-free final turn; that final turn has no timeout."
+                .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
         let model_options = with_config(|cfg| {
             cfg.model_options
                 .iter()
@@ -59,29 +63,28 @@ impl Tool for TaskTool {
                 .collect::<Vec<_>>()
         });
         let default_model = model_options.first().cloned().unwrap_or_default();
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Spawn a fresh zerostack process for an isolated task. Read access uses the current workspace. Write access creates a persistent copy-on-write workspace containing all in-progress edits. The result includes the child response, session transcript, and workspace paths. The parent can access both paths. The soft deadline interrupts active work and starts one tool-free final turn; that final turn has no timeout."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task": { "type": "string", "description": "Standalone task for the subagent." },
-                    "access": { "type": "string", "enum": ["read", "write"], "description": "Filesystem access level." },
-                    "timeout": { "type": "integer", "minimum": 1, "description": "Soft deadline in seconds. When elapsed, active work is interrupted and exactly one tool-free final turn begins without a hard timeout." },
-                    "model": {
-                        "type": "string",
-                        "enum": model_options,
-                        "description": format!("Optional permitted subagent model. Omit to use the default: {default_model}.")
-                    },
-                    "reasoning": { "type": "string", "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Optional reasoning effort." }
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": { "type": "string", "description": "Standalone task for the subagent." },
+                "access": { "type": "string", "enum": ["read", "write"], "description": "Filesystem access level." },
+                "timeout": { "type": "integer", "minimum": 1, "description": "Soft deadline in seconds. When elapsed, active work is interrupted and exactly one tool-free final turn begins without a hard timeout." },
+                "model": {
+                    "type": "string",
+                    "enum": model_options,
+                    "description": format!("Optional permitted subagent model. Omit to use the default: {default_model}.")
                 },
-                "required": ["task", "access", "timeout"]
-            }),
-        }
+                "reasoning": { "type": "string", "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Optional reasoning effort." }
+            },
+            "required": ["task", "access", "timeout"]
+        })
     }
 
-    async fn call(&self, args: SpawnRequest) -> Result<String, ToolError> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: SpawnRequest,
+    ) -> Result<String, ToolError> {
         if !crate::extras::subagents::is_enabled() {
             return Err(ToolError::Msg(
                 "task: subagents are disabled for this session".into(),

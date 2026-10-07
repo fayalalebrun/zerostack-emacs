@@ -878,6 +878,7 @@ async fn main() -> anyhow::Result<()> {
                     provider_usage: None,
                     tool_call: None,
                     tool_result: None,
+                    attachments: Vec::new(),
                 });
                 crate::extras::advisor::set_session_messages(msgs);
             }
@@ -1020,8 +1021,9 @@ async fn run_subagent_child(
                 call_id,
                 name,
                 args,
+                reasoning,
             } => {
-                session.add_partial_assistant_output(&response_buf, Vec::new());
+                session.add_partial_assistant_output(&response_buf, reasoning);
                 response_buf.clear();
                 session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
                 session::storage::save_session(session)?;

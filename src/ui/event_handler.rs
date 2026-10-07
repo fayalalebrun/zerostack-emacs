@@ -191,13 +191,14 @@ pub async fn handle_agent_event(
             call_id,
             name,
             args,
+            reasoning,
         } => {
             *was_reasoning = false;
             if *agent_line_started {
                 renderer.write_line("", Color::White)?;
                 *agent_line_started = false;
             }
-            session.add_partial_assistant_output(response_buf, Vec::new());
+            session.add_partial_assistant_output(response_buf, reasoning);
             response_buf.clear();
             *response_start_line = None;
             session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());

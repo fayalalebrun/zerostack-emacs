@@ -1,8 +1,7 @@
 { mkShell
-, clippy
+, zerostack-toolchain
 , lib
-, rust-analyzer
-, rustfmt
+
 , stdenv
 , zerostack
 }:
@@ -13,8 +12,6 @@ mkShell {
   RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,-rpath,${stdenv.cc.cc.lib}/lib";
 
   buildInputs = [
-    clippy
-    rust-analyzer
-    rustfmt
+    zerostack-toolchain
   ];
 }

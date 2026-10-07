@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{AskSender, PermCheck, ToolError, WriteArgs, check_perm_path};
@@ -34,22 +33,26 @@ impl Tool for WriteTool {
     type Args = WriteArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "write".to_string(),
-            description: "Create a new file with the given content. Fails if the file already exists — use edit for existing files. Automatically creates parent directories.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                    "content": { "type": "string", "description": "Content to write to the file" }
-                },
-                "required": ["path", "content"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Create a new file with the given content. Fails if the file already exists — use edit for existing files. Automatically creates parent directories.".to_string()
     }
 
-    async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                "content": { "type": "string", "description": "Content to write to the file" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: WriteArgs,
+    ) -> Result<String, ToolError> {
         let expanded = crate::fs::expand_tilde(&args.path);
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "write", &expanded).await?;
 

@@ -1,27 +1,14 @@
 use std::borrow::Cow;
-use std::fmt;
 
 use compact_str::CompactString;
 use rig::completion::ToolDefinition;
-use rig::tool::{ToolDyn, ToolError};
-use rig::wasm_compat::WasmBoxedFuture;
+use rig::tool::{DynamicTool, ToolExecutionError, ToolOutput};
 use rmcp::model::{CallToolRequestParams, JsonObject, RawContent};
 use rmcp::service::{Peer, RoleClient};
 
 use crate::agent::tools::check_perm;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
-
-#[derive(Debug)]
-pub struct McpToolError(pub CompactString);
-
-impl fmt::Display for McpToolError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for McpToolError {}
 
 pub struct McpTool {
     pub server_name: CompactString,
@@ -87,6 +74,39 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn linear_responses_serialization_preserves_optional_fields_and_non_strict_mode() {
+        let mut parameters = json!({
+            "type":"object",
+            "properties":{
+                "id":{"type":"string"},
+                "statusUpdateType":{"type":"string", "enum":["onTrack","atRisk","offTrack"]},
+                "customView":{"type":"object", "properties":{"id":{"type":"string"}}}
+            },
+            "required":["id"]
+        });
+        let original = parameters.clone();
+        normalize_schema(&mut parameters);
+        let definition = rig::completion::ToolDefinition {
+            name: rig::message::ToolName::new("linear_update_project").unwrap(),
+            description: "Update a Linear project".into(),
+            parameters,
+        };
+        let responses =
+            rig::providers::openai::responses_api::ResponsesToolDefinition::from(definition);
+        let wire = serde_json::to_value(responses).unwrap();
+        assert_eq!(wire["type"], "function");
+        assert_eq!(wire["strict"], false);
+        assert_eq!(wire["parameters"], original);
+        assert_eq!(wire["parameters"]["required"], json!(["id"]));
+        assert!(wire["parameters"].get("additionalProperties").is_none());
+        assert!(
+            wire["parameters"]["properties"]["customView"]
+                .get("required")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn notion_additional_properties_gets_explicit_unrestricted_type() {
         let mut schema = json!({"type":"object", "additionalProperties":{}, "properties":{
             "filters":{"type":"object", "additionalProperties":{"description":"Any value"}}
@@ -134,32 +154,38 @@ mod tests {
     }
 }
 
-impl ToolDyn for McpTool {
-    fn name(&self) -> String {
-        self.definition.name.to_string()
-    }
-
-    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-        let name = self.definition.name.to_string();
-        let description = self
-            .definition
-            .description
-            .clone()
-            .unwrap_or(Cow::from(""))
-            .to_string();
+impl McpTool {
+    pub fn tool_definition(&self) -> Result<ToolDefinition, rig::message::EmptyToolName> {
         let mut parameters =
             serde_json::to_value(&self.definition.input_schema).unwrap_or_default();
         normalize_schema(&mut parameters);
-        Box::pin(async move {
-            ToolDefinition {
-                name,
-                description,
-                parameters,
-            }
+        Ok(ToolDefinition {
+            name: rig::message::ToolName::new(self.definition.name.to_string())?,
+            description: self
+                .definition
+                .description
+                .clone()
+                .unwrap_or(Cow::from(""))
+                .to_string(),
+            parameters,
         })
     }
 
-    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+    pub fn into_dynamic(self) -> Result<DynamicTool, rig::message::EmptyToolName> {
+        let definition = self.tool_definition()?;
+        let tool = std::sync::Arc::new(self);
+        Ok(DynamicTool::new(
+            definition.name,
+            definition.description,
+            definition.parameters,
+            move |args| {
+                let tool = tool.clone();
+                Box::pin(async move { tool.call(args).await.map(ToolOutput::text) })
+            },
+        ))
+    }
+
+    async fn call(&self, args: serde_json::Value) -> Result<String, ToolExecutionError> {
         let server_name = self.server_name.clone();
         let tool_name = self.definition.name.to_string();
         let peer = self.peer.clone();
@@ -167,7 +193,7 @@ impl ToolDyn for McpTool {
         let ask_tx = self.ask_tx.clone();
         let timeout = self.timeout;
 
-        Box::pin(async move {
+        async move {
             let perm_key = format!("mcp_tool:{server_name}:{tool_name}");
             let coaching = super::trace_operation(
                 "permission",
@@ -176,14 +202,11 @@ impl ToolDyn for McpTool {
                 check_perm(&permission, &ask_tx, "mcp_tool", &perm_key),
             )
             .await
-            .map_err(|e| {
-                ToolError::ToolCallError(Box::new(McpToolError(CompactString::new(e.to_string()))))
-            })?;
+            .map_err(|e| ToolExecutionError::other(e.to_string()))?;
 
-            let arguments: Option<JsonObject> = serde_json::from_str(&args).unwrap_or_default();
-            let params = arguments
-                .map(|a| CallToolRequestParams::new(tool_name.clone()).with_arguments(a))
-                .unwrap_or_else(|| CallToolRequestParams::new(tool_name.clone()));
+            let arguments: JsonObject = serde_json::from_value(args)
+                .map_err(|e| ToolExecutionError::other(format!("Invalid MCP arguments: {e}")))?;
+            let params = CallToolRequestParams::new(tool_name.clone()).with_arguments(arguments);
 
             let result = super::timed_operation(
                 "call_tool",
@@ -193,14 +216,8 @@ impl ToolDyn for McpTool {
                 peer.call_tool(params),
             )
             .await
-            .map_err(|e| {
-                ToolError::ToolCallError(Box::new(McpToolError(CompactString::new(e.to_string()))))
-            })?
-            .map_err(|e| {
-                ToolError::ToolCallError(Box::new(McpToolError(CompactString::new(format!(
-                    "MCP tool error: {e}"
-                )))))
-            })?;
+            .map_err(|e| ToolExecutionError::other(e.to_string()))?
+            .map_err(|e| ToolExecutionError::other(format!("MCP tool error: {e}")))?;
 
             if result.is_error.unwrap_or(false) {
                 let error_msg = result
@@ -217,9 +234,7 @@ impl ToolDyn for McpTool {
                 } else {
                     error_msg
                 };
-                return Err(ToolError::ToolCallError(Box::new(McpToolError(
-                    CompactString::new(msg),
-                ))));
+                return Err(ToolExecutionError::other(msg));
             }
 
             let mut content = String::new();
@@ -244,6 +259,7 @@ impl ToolDyn for McpTool {
                 content = format!("{}\n\n{}", msg, content);
             }
             Ok(content)
-        })
+        }
+        .await
     }
 }

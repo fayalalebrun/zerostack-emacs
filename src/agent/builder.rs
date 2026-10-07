@@ -1,6 +1,4 @@
 use rig::agent::{Agent, AgentBuilder};
-use rig::completion::CompletionModel;
-use smallvec::SmallVec;
 
 use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
 use crate::agent::tools;
@@ -141,7 +139,7 @@ pub fn estimate_overhead(context: &ContextFiles, reasoning_enabled: bool) -> u64
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn build_agent_inner<M: CompletionModel + 'static>(
+pub async fn build_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>>>(
     model: M,
     cli: &Cli,
     cfg: &Config,
@@ -156,7 +154,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     // `None` for providers that need no extra routing.
     additional_params: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
-) -> Agent<M> {
+) -> Agent {
     let preamble = build_preamble(context, reasoning_enabled);
 
     let mut builder = AgentBuilder::new(model).preamble(&preamble);
@@ -184,48 +182,45 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         let max_grep_results = cfg.resolve_max_grep_results();
         let max_find_results = cfg.resolve_max_find_results();
         let max_list_dir_entries = cfg.resolve_max_list_dir_entries();
-        let base_tools: SmallVec<[Box<dyn rig::tool::ToolDyn>; 9]> = SmallVec::from_buf([
-            Box::new(tools::ReadTool::new(
+        let mut builder = builder
+            .tool(tools::ReadTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 max_text_file_size,
                 max_read_lines,
-            )),
-            Box::new(tools::WriteTool::new(
+            ))
+            .tool(tools::WriteTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 max_text_file_size,
-            )),
-            Box::new(tools::EditTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::BashTool::new(
+            ))
+            .tool(tools::EditTool::new(permission.clone(), ask_tx.clone()))
+            .tool(tools::BashTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 sandbox.clone(),
                 max_bash_output_lines,
-            )),
-            Box::new(tools::GrepTool::new(
+            ))
+            .tool(tools::GrepTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 max_grep_results,
-            )),
-            Box::new(tools::FindFilesTool::new(
+            ))
+            .tool(tools::FindFilesTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 max_find_results,
-            )),
-            Box::new(tools::ListDirTool::new(
+            ))
+            .tool(tools::ListDirTool::new(
                 permission.clone(),
                 ask_tx.clone(),
                 max_list_dir_entries,
-            )),
-            Box::new(tools::WriteTodoList::new(
+            ))
+            .tool(tools::WriteTodoList::new(
                 permission.clone(),
                 ask_tx.clone(),
-            )),
-            Box::new(tools::UpdateGoal::new(permission.clone(), ask_tx.clone())),
-        ]);
-
-        let mut builder = builder.tools(base_tools.into_vec());
+            ))
+            .tool(tools::UpdateGoal::new(permission.clone(), ask_tx.clone()));
 
         #[cfg(feature = "subagents")]
         if crate::extras::subagents::is_enabled() {
@@ -254,11 +249,18 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                 .collect_tools(permission.clone(), ask_tx.clone())
                 .await;
             if !mcp_tools.is_empty() {
-                let dyn_tools: Vec<Box<dyn rig::tool::ToolDyn>> = mcp_tools
-                    .into_iter()
-                    .map(|t| Box::new(t) as Box<dyn rig::tool::ToolDyn>)
-                    .collect();
-                builder = builder.tools(dyn_tools);
+                builder = builder.dynamic_tools(
+                    mcp_tools
+                        .into_iter()
+                        .filter_map(|tool| match tool.into_dynamic() {
+                            Ok(tool) => Some(tool),
+                            Err(error) => {
+                                tracing::warn!(%error, "invalid MCP tool name");
+                                None
+                            }
+                        })
+                        .collect(),
+                );
             }
         }
 
@@ -312,7 +314,7 @@ const BTW_MAX_TURNS: usize = 8;
 /// project context for reference, NO tools, and a single turn. Never mutates the
 /// session.
 #[allow(clippy::too_many_arguments)]
-pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
+pub fn build_btw_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>>>(
     model: M,
     cli: &Cli,
     cfg: &Config,
@@ -323,7 +325,7 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
     temperature: Option<f64>,
     // See `build_agent_inner`: OpenRouter `provider.order` pin for `anthropic/*`.
     additional_params: Option<serde_json::Value>,
-) -> Agent<M> {
+) -> Agent {
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
@@ -400,35 +402,31 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
     let max_grep_results = cfg.resolve_max_grep_results();
     let max_find_results = cfg.resolve_max_find_results();
     let max_list_dir_entries = cfg.resolve_max_list_dir_entries();
-    let read_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
-        Box::new(tools::ReadTool::new(
-            permission.clone(),
-            ask_tx.clone(),
-            max_text_file_size,
-            max_read_lines,
-        )),
-        Box::new(tools::GrepTool::new(
-            permission.clone(),
-            ask_tx.clone(),
-            max_grep_results,
-        )),
-        Box::new(tools::FindFilesTool::new(
-            permission.clone(),
-            ask_tx.clone(),
-            max_find_results,
-        )),
-        Box::new(tools::ListDirTool::new(
-            permission.clone(),
-            ask_tx.clone(),
-            max_list_dir_entries,
-        )),
-    ];
-
     let mut builder = AgentBuilder::new(model)
         .preamble(&preamble)
         .default_max_turns(BTW_MAX_TURNS)
         .max_tokens(max_tokens)
-        .tools(read_tools);
+        .tool(tools::ReadTool::new(
+            permission.clone(),
+            ask_tx.clone(),
+            max_text_file_size,
+            max_read_lines,
+        ))
+        .tool(tools::GrepTool::new(
+            permission.clone(),
+            ask_tx.clone(),
+            max_grep_results,
+        ))
+        .tool(tools::FindFilesTool::new(
+            permission.clone(),
+            ask_tx.clone(),
+            max_find_results,
+        ))
+        .tool(tools::ListDirTool::new(
+            permission.clone(),
+            ask_tx.clone(),
+            max_list_dir_entries,
+        ));
 
     if let Some(params) = additional_params {
         builder = builder.additional_params(params);

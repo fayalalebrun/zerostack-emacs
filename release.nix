@@ -9,7 +9,22 @@ let
   pkgs = import nixpkgs { 
     inherit system; 
     overlays = [
-      (import ./nix/overlay)
+      (import (builtins.fetchTarball "https://github.com/oxalica/rust-overlay/archive/8afee9fa8caa877a4feb65adc33e8d72f3747dc9.tar.gz"))
+      (final: prev: let
+        toolchain = final.rust-bin.stable."1.99.0".default.override {
+          extensions = [ "clippy" "rustfmt" "rust-src" "rust-analyzer" ];
+        };
+      in {
+        zerostack-toolchain = toolchain;
+      })
+      (final: prev: {
+        zerostack = final.callPackage ./nix/package/zerostack.nix {
+          rustPlatform = final.makeRustPlatform {
+            cargo = final.zerostack-toolchain;
+            rustc = final.zerostack-toolchain;
+          };
+        };
+      })
       (import ./nix/overlay/development.nix)
     ];
   };

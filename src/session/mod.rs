@@ -5,8 +5,7 @@ pub mod timing;
 use std::path::{Path, PathBuf};
 
 use compact_str::CompactString;
-use rig::OneOrMany;
-use rig::completion::message::{AssistantContent, Reasoning, ReasoningContent, Text};
+use rig::completion::message::{AssistantContent, Reasoning, Text};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::tools::goal::GoalState;
@@ -156,6 +155,7 @@ pub enum ProviderReasoningContent {
     Summary(String),
     Encrypted(String),
     Redacted(String),
+    Native(serde_json::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,57 +165,93 @@ pub struct ProviderReasoning {
 }
 
 impl ProviderReasoning {
+    pub fn from_message(message: &rig::message::AssistantMessage) -> Self {
+        Self {
+            id: String::new(),
+            content: vec![ProviderReasoningContent::Native(
+                serde_json::json!({"message":message}),
+            )],
+        }
+    }
+
+    pub fn native_message(&self) -> Option<rig::message::AssistantMessage> {
+        self.content.iter().find_map(|item| match item {
+            ProviderReasoningContent::Native(value) => {
+                serde_json::from_value(value.get("message")?.clone()).ok()
+            }
+            _ => None,
+        })
+    }
+
     pub fn from_rig(reasoning: &Reasoning) -> Option<Self> {
-        let content = reasoning
-            .content
-            .iter()
-            .filter_map(|item| match item {
-                ReasoningContent::Text { text, signature } => {
-                    Some(ProviderReasoningContent::Text {
-                        text: text.clone(),
-                        signature: signature.clone(),
-                    })
-                }
-                ReasoningContent::Summary(text) => {
-                    Some(ProviderReasoningContent::Summary(text.clone()))
-                }
-                ReasoningContent::Encrypted(data) => {
-                    Some(ProviderReasoningContent::Encrypted(data.clone()))
-                }
-                ReasoningContent::Redacted { data } => {
-                    Some(ProviderReasoningContent::Redacted(data.clone()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        (!content.is_empty()).then_some(Self {
-            id: reasoning.id.clone().unwrap_or_default(),
-            content,
+        if reasoning.text.is_empty() && reasoning.native.is_none() && !reasoning.redacted {
+            return None;
+        }
+        Some(Self {
+            id: reasoning
+                .native
+                .as_ref()
+                .and_then(|n| n.item.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            content: vec![ProviderReasoningContent::Native(
+                serde_json::json!({"reasoning": reasoning}),
+            )],
         })
     }
 
     fn to_rig(&self) -> Reasoning {
-        let mut reasoning = Reasoning::summaries(Vec::new());
-        if !self.id.is_empty() {
-            reasoning = reasoning.with_id(self.id.clone());
+        for item in &self.content {
+            if let ProviderReasoningContent::Native(value) = item
+                && let Ok(reasoning) = serde_json::from_value(value["reasoning"].clone())
+            {
+                return reasoning;
+            }
         }
-        reasoning.content = self
-            .content
-            .iter()
-            .map(|item| match item {
-                ProviderReasoningContent::Text { text, signature } => ReasoningContent::Text {
-                    text: text.clone(),
-                    signature: signature.clone(),
-                },
-                ProviderReasoningContent::Summary(text) => ReasoningContent::Summary(text.clone()),
-                ProviderReasoningContent::Encrypted(data) => {
-                    ReasoningContent::Encrypted(data.clone())
-                }
-                ProviderReasoningContent::Redacted(data) => {
-                    ReasoningContent::Redacted { data: data.clone() }
-                }
-            })
-            .collect();
+        let mut reasoning = Reasoning::new(
+            self.content
+                .iter()
+                .filter_map(|item| match item {
+                    ProviderReasoningContent::Text { text, .. }
+                    | ProviderReasoningContent::Summary(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let item = if let Some(data) = self.content.iter().find_map(|c| match c {
+            ProviderReasoningContent::Encrypted(data) => Some(data),
+            _ => None,
+        }) {
+            Some(
+                serde_json::json!({"type":"reasoning", "id":self.id, "summary":[], "encrypted_content":data}),
+            )
+        } else if let Some(signature) = self.content.iter().find_map(|c| match c {
+            ProviderReasoningContent::Text {
+                signature: Some(signature),
+                ..
+            } => Some(signature),
+            _ => None,
+        }) {
+            Some(
+                serde_json::json!({"type":"thinking", "thinking":reasoning.text, "signature":signature}),
+            )
+        } else if let Some(data) = self.content.iter().find_map(|c| match c {
+            ProviderReasoningContent::Redacted(data) => Some(data),
+            _ => None,
+        }) {
+            reasoning.redacted = true;
+            Some(serde_json::json!({"type":"redacted_thinking", "data":data}))
+        } else {
+            None
+        };
+        if let Some(item) = item {
+            reasoning.native = Some(rig::message::Native {
+                item,
+                fingerprint: rig::message::Fingerprint::of(&reasoning),
+            });
+        }
         reasoning
     }
 }
@@ -224,6 +260,12 @@ pub fn assistant_message_with_reasoning(
     content: &str,
     reasoning: &[ProviderReasoning],
 ) -> rig::completion::Message {
+    if let Some(mut message) = reasoning.iter().find_map(ProviderReasoning::native_message) {
+        message
+            .content
+            .retain(|content| !matches!(content, AssistantContent::ToolCall(_)));
+        return rig::completion::Message::Assistant(message);
+    }
     if reasoning.is_empty() {
         return rig::completion::Message::assistant(content.to_string());
     }
@@ -236,10 +278,7 @@ pub fn assistant_message_with_reasoning(
         items.push(AssistantContent::Text(Text::new(content.to_string())));
     }
 
-    rig::completion::Message::Assistant {
-        id: None,
-        content: OneOrMany::many(items).expect("assistant reasoning message is non-empty"),
-    }
+    rig::completion::Message::Assistant(rig::message::AssistantMessage::new(items))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

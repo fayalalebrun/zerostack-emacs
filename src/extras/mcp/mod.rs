@@ -189,7 +189,6 @@ mod tests {
     use std::time::Duration;
 
     use compact_str::CompactString;
-    use rig::tool::ToolDyn;
     use rmcp::model::*;
     use rmcp::service::{RequestContext, serve_client};
     use rmcp::{RoleServer, ServerHandler, ServiceExt};
@@ -362,7 +361,12 @@ mod tests {
             timeout: Some(Duration::from_millis(10)),
         };
 
-        let error = tool.call("{}".to_string()).await.unwrap_err();
+        let error = tool
+            .into_dynamic()
+            .unwrap()
+            .execute(serde_json::json!({}))
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("call_tool timed out"));
     }
 
