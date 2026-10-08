@@ -253,6 +253,7 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--socket nil)
 (defvar-local zerostack--session nil)
 (defvar-local zerostack--pid nil)
+(defvar-local zerostack--detached-restart nil)
 (defvar-local zerostack--session-title nil)
 (defvar-local zerostack--cwd nil)
 (defvar-local zerostack--worktree-dir nil)
@@ -1376,6 +1377,12 @@ The root is resolved with Projectile when available, then `project.el', then
          (thinking (and chat-buffer
                         (with-current-buffer chat-buffer zerostack--thinking))))
     (cond
+     ((and alive (equal (plist-get session :activity) "waiting-permission"))
+      'zerostack-board-input-face)
+     ((and alive (equal (plist-get session :activity) "running"))
+      'zerostack-board-thinking-face)
+     ((and alive (equal (plist-get session :activity) "idle"))
+      'zerostack-board-alive-face)
      (needs-input 'zerostack-board-input-face)
      (thinking 'zerostack-board-thinking-face)
      (alive 'zerostack-board-alive-face)
@@ -1961,7 +1968,19 @@ Return non-nil when DIRECTORY was newly added."
   (setq zerostack--server-args args)
   (let* ((client-buffer (current-buffer))
          (stderr-buffer (generate-new-buffer " *zerostack stderr*"))
-         (command (append (list zerostack-command "--emacs") args))
+         (setsid (or (executable-find "setsid")
+                     (user-error "Persistent sessions require setsid")))
+         (log-file (make-temp-file "zerostack-daemon-" nil ".log"))
+         (daemon-command (mapconcat #'shell-quote-argument
+                                    (append (list zerostack-command "--emacs") args) " "))
+         (command (list shell-file-name "-c"
+                        (format "%s --fork --wait %s -c %s </dev/null; status=$?; cat %s >&2; exit \"$status\""
+                                (shell-quote-argument setsid)
+                                (shell-quote-argument shell-file-name)
+                                (shell-quote-argument
+                                 (format "exec %s >%s 2>&1" daemon-command
+                                         (shell-quote-argument log-file)))
+                                (shell-quote-argument log-file))))
          (process (make-process
                    :name "zerostack-server"
                    :buffer nil
@@ -1969,6 +1988,8 @@ Return non-nil when DIRECTORY was newly added."
                    :stderr stderr-buffer
                    :noquery t
                    :sentinel #'zerostack--server-sentinel)))
+    (process-put process 'zerostack-log-file log-file)
+    (process-put process 'zerostack-startup-deadline (+ (float-time) 30))
     (process-put process 'zerostack-buffer client-buffer)
     (process-put process 'zerostack-stderr-buffer stderr-buffer)
     (setq zerostack--server-process process)
@@ -1985,16 +2006,39 @@ Return non-nil when DIRECTORY was newly added."
           (cancel-timer zerostack--startup-timer)
           (setq zerostack--startup-timer nil)))))
   (when (and (buffer-live-p client-buffer) (buffer-live-p stderr-buffer))
+    (let* ((process (buffer-local-value 'zerostack--server-process client-buffer))
+           (log-file (and process (process-get process 'zerostack-log-file))))
+      (when (and log-file (file-readable-p log-file))
+        (with-current-buffer stderr-buffer
+          (erase-buffer)
+          (insert-file-contents log-file)))
+      (when (and process
+                 (> (float-time) (process-get process 'zerostack-startup-deadline)))
+        (with-current-buffer client-buffer
+          (cancel-timer zerostack--startup-timer)
+          (setq zerostack--startup-timer nil)
+          (zerostack--append-local-line
+           (format "startup timed out; daemon may still be starting. Log: %s" log-file)
+           'zs-error)
+          (when (bound-and-true-p zerostack--detached-restart)
+            (message "Detached restart startup timed out; log: %s" log-file)
+            (setq zerostack--detached-restart nil)
+            (kill-buffer client-buffer)))))
     (with-current-buffer stderr-buffer
-      (when (save-excursion
-              (goto-char (point-min))
-              (re-search-forward "^socket \\(.*\\)$" nil t))
+      (when (and (buffer-live-p client-buffer)
+                 (save-excursion
+                   (goto-char (point-min))
+                   (re-search-forward "^socket \\(.*\\)$" nil t)))
         (let ((socket (match-string 1)))
           (with-current-buffer client-buffer
             (when zerostack--startup-timer
               (cancel-timer zerostack--startup-timer)
               (setq zerostack--startup-timer nil))
-            (zerostack--connect-buffer socket)))))))
+            (if zerostack--detached-restart
+                (progn
+                  (setq zerostack--detached-restart nil)
+                  (kill-buffer client-buffer))
+              (zerostack--connect-buffer socket))))))))
 
 (defun zerostack--server-sentinel (process event)
   "Record zerostack server PROCESS EVENT in its client buffer when possible."
@@ -2014,7 +2058,11 @@ Return non-nil when DIRECTORY was newly added."
                   (not (string-empty-p stderr-text)))
              (format "server %s: %s" (string-trim event) stderr-text)
            (format "server %s" (string-trim event)))
-         (if (zerop (process-exit-status process)) 'zs-muted 'zs-error))))))
+         (if (zerop (process-exit-status process)) 'zs-muted 'zs-error))
+        (when (and terminal (bound-and-true-p zerostack--detached-restart))
+          (message "Detached restart server %s: %s" (string-trim event) stderr-text)
+          (setq zerostack--detached-restart nil)
+          (kill-buffer buffer))))))
 
 (defun zerostack--server-stderr-text (process)
   "Return user-facing stderr text recorded for server PROCESS."
@@ -2033,10 +2081,13 @@ Return non-nil when DIRECTORY was newly added."
   "Show the stderr log for this buffer's locally owned zerostack server."
   (interactive)
   (if-let* ((process zerostack--server-process)
+            (log-file (process-get process 'zerostack-log-file)))
+      (find-file-other-window log-file)
+    (if-let* ((process zerostack--server-process)
             (buffer (process-get process 'zerostack-stderr-buffer))
             ((buffer-live-p buffer)))
       (pop-to-buffer buffer)
-    (user-error "No local zerostack server log for this session")))
+      (user-error "No local zerostack server log for this session"))))
 
 (defun zerostack--connect-buffer (socket)
   "Connect the current zerostack buffer to SOCKET."
@@ -2821,14 +2872,14 @@ _o_ artifact                                              _R_ restart
 (defun zerostack-restart-daemon ()
   "Restart this buffer's zerostack daemon without closing the buffer."
   (interactive)
+  (when zerostack--startup-timer
+    (user-error "Wait for daemon startup before restarting"))
   (let ((args (or zerostack--server-args
                   (and zerostack--session (list "--session" zerostack--session))))
-        (pid (if (process-live-p zerostack--server-process)
-                 (process-id zerostack--server-process)
-               (and (process-live-p zerostack--process) zerostack--pid))))
+        (pid zerostack--pid))
     (when (and (process-live-p zerostack--process) (not pid))
       (user-error "Attached daemon has not reported its process id yet"))
-    (when (and pid (not (process-live-p zerostack--server-process)))
+    (when pid
       (unless (and (integerp pid) (> pid 1)
                    zerostack--socket
                    (equal (string-trim
@@ -2852,8 +2903,13 @@ _o_ artifact                                              _R_ restart
   (cond
    ((and pid (process-attributes pid))
     (if (>= (float-time) deadline)
-        (zerostack--append-local-line
-         "restart failed: daemon did not exit; no replacement started" 'zs-error)
+        (progn
+          (zerostack--append-local-line
+           "restart failed: daemon did not exit; no replacement started" 'zs-error)
+          (when (bound-and-true-p zerostack--detached-restart)
+            (message "Detached restart failed: daemon %s did not exit" pid)
+            (setq zerostack--detached-restart nil)
+            (kill-buffer (current-buffer))))
       (let ((buffer (current-buffer)))
         (setq zerostack--startup-timer
               (run-at-time 0.05 nil
@@ -2865,34 +2921,55 @@ _o_ artifact                                              _R_ restart
     (setq zerostack--socket nil zerostack--pid nil)
     (zerostack--start-server args))))
 
+(defun zerostack--restart-detached-session (session)
+  "Restart detached SESSION using a temporary, undisplayed controller buffer."
+  (let ((buffer (generate-new-buffer " *zerostack detached restart*")))
+    (condition-case err
+        (with-current-buffer buffer
+          (zerostack-mode)
+          (setq-local zerostack--detached-restart t)
+          (setq zerostack--session (plist-get session :id)
+                zerostack--socket (plist-get session :socket)
+                zerostack--pid (plist-get session :pid)
+                default-directory (file-name-as-directory (plist-get session :cwd)))
+          (zerostack-restart-daemon))
+      (error
+       (kill-buffer buffer)
+       (signal (car err) (cdr err))))))
+
 ;;;###autoload
 (defun zerostack-restart-idle-sessions ()
-  "Restart each idle zerostack daemon owned by an open chat buffer."
+  "Restart all live idle sessions, including detached and legacy daemons."
   (interactive)
-  (let* ((sessions (cl-remove-if-not #'zerostack--chat-buffer-p (buffer-list)))
-         (owned (cl-remove-if-not
-                 (lambda (buffer)
-                   (with-current-buffer buffer
-                     (process-live-p zerostack--server-process)))
-                 sessions))
-         (idle (cl-remove-if-not
-                (lambda (buffer)
-                  (with-current-buffer buffer
-                    (and (not zerostack--thinking)
-                         (not zerostack--startup-timer)
-                         (zerop (hash-table-count zerostack--pending-permissions)))))
-                owned)))
-    (dolist (buffer idle)
-      (with-current-buffer buffer
-        (zerostack-restart-daemon)))
-    (message "Restarted %d idle zerostack session%s; skipped %d busy, %d without an owned daemon"
-             (length idle)
-             (if (= (length idle) 1) "" "s")
-             (- (length owned) (length idle))
-             (- (length sessions) (length owned)))))
+  (let* ((zerostack-board--snapshot (zerostack-board--fetch))
+         (seen (make-hash-table :test 'equal))
+         (restarted 0) (skipped 0) (failed 0))
+    (dolist (session (zerostack-board--all-sessions))
+      (let* ((id (plist-get session :id))
+             (buffer (zerostack--find-chat-buffer id (plist-get session :socket))))
+        (when (and (plist-get session :alive) (not (gethash id seen)))
+          (puthash id t seen)
+          (if (or (and (plist-get session :activity)
+                       (not (equal (plist-get session :activity) "idle")))
+                  (and buffer (buffer-local-value 'zerostack--startup-timer buffer)))
+              (cl-incf skipped)
+            (condition-case err
+                (progn
+                  (if buffer
+                      (with-current-buffer buffer
+                        (setq zerostack--pid (plist-get session :pid)
+                              zerostack--socket (plist-get session :socket))
+                        (zerostack-restart-daemon))
+                    (zerostack--restart-detached-session session))
+                  (cl-incf restarted))
+              (error
+               (cl-incf failed)
+               (message "Could not restart %s: %s" id (error-message-string err))))))))
+    (message "Requested restart of %d idle sessions; skipped %d busy/starting, %d failed"
+             restarted skipped failed)))
 
 (defun zerostack-disconnect ()
-  "Disconnect from zerostack and stop a server process started by this buffer."
+  "Disconnect from zerostack without stopping its persistent daemon."
   (interactive)
   (zerostack--cleanup-clipboard-temp-files)
   (zerostack--delete-current-processes)

@@ -57,6 +57,8 @@ mod imp {
         pub context_window: u64,
         pub protocol: u32,
         pub socket: String,
+        #[serde(default)]
+        pub activity: Option<String>,
         #[serde(default = "default_thinking_level")]
         pub thinking: String,
         #[serde(default)]
@@ -122,6 +124,34 @@ mod imp {
         active_response: Option<(u64, String)>,
         last_error: Option<String>,
         finalizing: bool,
+    }
+
+    fn session_activity(mutable: &MutableState) -> &'static str {
+        if mutable
+            .pending_permissions
+            .values()
+            .any(|request| !request.reply.is_closed())
+        {
+            return "waiting-permission";
+        }
+        #[cfg(feature = "loop")]
+        if mutable
+            .loop_state
+            .as_ref()
+            .is_some_and(|state| state.active)
+        {
+            return "running";
+        }
+        if mutable.running
+            || mutable
+                .driver_abort_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+        {
+            "running"
+        } else {
+            "idle"
+        }
     }
 
     enum SubagentInitialOutcome {
@@ -800,6 +830,7 @@ mod imp {
                 context_window: session.context_window,
                 protocol: PROTOCOL_VERSION,
                 socket: socket_path.to_string_lossy().to_string(),
+                activity: Some("idle".to_string()),
                 thinking: "on".to_string(),
                 reasoning_effort_supported: false,
                 reasoning_effort: None,
@@ -832,6 +863,19 @@ mod imp {
         }
 
         async fn broadcast_event(&self, event_type: &str, fields: String) {
+            if matches!(
+                event_type,
+                "loop-started"
+                    | "loop-iteration"
+                    | "loop-stopped"
+                    | "compact-started"
+                    | "compact-done"
+                    | "aborted"
+                    | "permission-request"
+                    | "permission-answered"
+            ) {
+                self.update_meta_from_session().await;
+            }
             let form = self.event_form(event_type, fields).await;
             let _ = self.events.send(form);
         }
@@ -882,6 +926,7 @@ mod imp {
             if let Some(last_event_at) = mutable.last_event_at.clone() {
                 meta.updated_at = last_event_at;
             }
+            meta.activity = Some(session_activity(&mutable).to_string());
             meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
             apply_reasoning_effort_meta(&mut meta, &self.cfg, &mutable);
             if let Err(e) = write_meta_atomic(&self.registry_dir, &meta) {
@@ -2392,6 +2437,7 @@ mod imp {
             mutable.turn = mutable.turn.saturating_add(1);
             mutable.turn
         };
+        server.update_meta_from_session().await;
         dismiss_attention_marker(&server).await;
         let run_server = server.clone();
         let task = tokio::spawn(run_prompt(run_server, text, turn));
@@ -2939,6 +2985,7 @@ mod imp {
     ) -> anyhow::Result<()> {
         stop_loop_state(server, false).await;
         let aborted = interrupt_running_prompt(server, true).await?;
+        server.update_meta_from_session().await;
         send_ok(
             out,
             request_arg(cmd),
@@ -3133,6 +3180,7 @@ mod imp {
         };
         {
             let mutable = server.mutable.lock().await;
+            meta.activity = Some(session_activity(&mutable).to_string());
             meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
             apply_reasoning_effort_meta(&mut meta, &server.cfg, &mutable);
         }
@@ -3178,6 +3226,17 @@ mod imp {
             };
             prompt = next_prompt;
         }
+        finish_driver(&server, current_turn).await;
+    }
+
+    async fn finish_driver(server: &Arc<Server>, turn: u64) {
+        {
+            let mut mutable = server.mutable.lock().await;
+            if mutable.turn == turn {
+                mutable.driver_abort_handle = None;
+            }
+        }
+        server.update_meta_from_session().await;
     }
 
     async fn run_prompt_once(
@@ -3220,6 +3279,7 @@ mod imp {
             }
         };
         if cleared_current_turn {
+            server.update_meta_from_session().await;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -3282,6 +3342,7 @@ mod imp {
                 NextLoop::None => break,
             }
         }
+        finish_driver(&server, turn).await;
     }
 
     async fn run_prompt_inner(
@@ -6223,7 +6284,7 @@ mod imp {
 
     fn meta_to_sexp(meta: &SessionMeta) -> String {
         format!(
-            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {} :reasoning-efforts {})",
+            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {} :reasoning-efforts {} :activity {})",
             sexp_quote(&meta.session_id),
             meta.pid,
             sexp_quote(&meta.cwd),
@@ -6248,6 +6309,10 @@ mod imp {
                 .map(sexp_quote)
                 .unwrap_or_else(|| "nil".to_string()),
             string_list_to_sexp(&meta.reasoning_efforts),
+            meta.activity
+                .as_deref()
+                .map(sexp_quote)
+                .unwrap_or_else(|| "nil".to_string()),
         )
     }
 
@@ -8232,6 +8297,63 @@ mod imp {
             assert!(response.contains("read-only"));
             assert!(prompts.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
             let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn activity_is_published_without_a_connected_client() {
+            let (server, registration, _listener) = test_server(Arc::default());
+            let read_activity = || {
+                let meta: SessionMeta = serde_json::from_slice(
+                    &std::fs::read(registration.dir.join("meta.json")).unwrap(),
+                )
+                .unwrap();
+                meta.activity.unwrap()
+            };
+            server.update_meta_from_session().await;
+            assert_eq!(read_activity(), "idle");
+            server.mutable.lock().await.running = true;
+            server.update_meta_from_session().await;
+            assert_eq!(read_activity(), "running");
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            server.mutable.lock().await.pending_permissions.insert(
+                1,
+                AskRequest {
+                    tool: "bash".into(),
+                    input: "command".into(),
+                    reply,
+                },
+            );
+            server
+                .broadcast_event("permission-request", String::new())
+                .await;
+            assert_eq!(read_activity(), "waiting-permission");
+            drop(receiver);
+            server.mutable.lock().await.running = false;
+            server.update_meta_from_session().await;
+            assert_eq!(read_activity(), "idle");
+            let driver = tokio::spawn(std::future::pending::<()>());
+            server.mutable.lock().await.driver_abort_handle = Some(driver.abort_handle());
+            server.update_meta_from_session().await;
+            assert_eq!(read_activity(), "running");
+            driver.abort();
+            finish_driver(&server, 0).await;
+            assert_eq!(read_activity(), "idle");
+            #[cfg(feature = "loop")]
+            {
+                server.mutable.lock().await.loop_state =
+                    Some(crate::extras::r#loop::LoopState::new(
+                        "goal".into(),
+                        PathBuf::from("plan.md"),
+                        None,
+                        None,
+                    ));
+                server.update_meta_from_session().await;
+                assert_eq!(read_activity(), "running");
+                server.mutable.lock().await.loop_state = None;
+            }
+            let legacy = serde_json::json!({"session_id":"old", "pid":1, "cwd":"/tmp", "model":"test", "provider":"test", "created_at":"now", "updated_at":"now", "title":"test", "tokens":0, "context_window":0, "protocol":1, "socket":"/tmp/sock"});
+            let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+            assert!(meta.activity.is_none());
         }
 
         fn test_server(

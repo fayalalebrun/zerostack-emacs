@@ -232,8 +232,11 @@ follow up with a normal message asking the agent about it.
 ## Native Emacs Protocol
 
 `M-x zerostack-restart-idle-sessions`, or `R` on the zerostack board, restarts
-all idle session daemons owned by open chat buffers while leaving busy and
-externally attached sessions untouched.
+all live idle sessions, including detached sessions without open chat buffers.
+It fetches a fresh daemon-published snapshot and skips running, permission-waiting,
+and starting sessions. Legacy daemons without activity metadata count as idle.
+Detached sessions restart through an undisplayed temporary controller that closes
+once startup succeeds; failures are reported without stopping other restarts.
 
 `M-x zerostack-timing` opens a separate buffer with individual commands and
 text-generation blocks for the current session, sorted from slowest to fastest.
@@ -601,6 +604,20 @@ Load it from a checkout:
 (require 'zerostack)
 ```
 
+Emacs launches persistent daemons using `setsid` (required on the host), with
+stdin detached and stdout/stderr redirected to a private temporary log file.
+Closing a chat buffer, disconnecting, or exiting Emacs leaves the daemon running.
+Reopen the board and press `RET` on a live session to reattach. Use the board's
+`s` action to explicitly stop a daemon, or the chat menu's `restart` action to
+replace it. Sessions do not automatically restart after logout or reboot.
+Startup failures are reported in the chat; startup polling stops after 30 seconds
+and displays the log path without killing a potentially slow-starting daemon.
+Existing daemons launched before this change must be restarted to detach them.
+The board reads daemon-published activity (`idle`, `running`, or
+`waiting-permission`) independently of open chat buffers. Active loops and
+unfinished prompt drivers remain busy between turns. Older daemons that do not
+publish activity count as idle for bulk restart, as a compatibility policy.
+
 Main entry points:
 
 | Command | Description |
@@ -648,7 +665,7 @@ Command menu actions:
 | `loop` | Start or stop the iterative loop. Starting prompts for objective, optional max iterations, and optional validation command. |
 | `skill` | Discover runtime skills from the same home/project skill roots and insert an explicit selected-skill directive into the input line. |
 | `artifact` | Open the most recent artifact. |
-| `log` | Open the stderr buffer for the session's locally owned `zerostack --emacs` daemon. |
+| `log` | Open the stdout/stderr log file for a daemon launched by this buffer. |
 
 The `attach` action sends `file-add` for path-based files. Clipboard attachment
 accepts actual PNG, JPEG, GIF, or WebP image data only; clipboard text, including

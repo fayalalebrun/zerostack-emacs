@@ -8,6 +8,64 @@
 (require 'cl-lib)
 (require 'zerostack)
 
+(ert-deftest zerostack-test-restart-idle-includes-detached-legacy-and-deduplicates ()
+  (let (restarted)
+    (cl-letf (((symbol-function 'zerostack-board--fetch)
+               (lambda ()
+                 '(zerostack-board :loose-workspaces
+                   ((:sessions ((:id "idle" :alive t :activity "idle")
+                                (:id "legacy" :alive t)
+                                (:id "busy" :alive t :activity "running")
+                                (:id "permission" :alive t :activity "waiting-permission")
+                                (:id "dead" :alive nil)
+                                (:id "idle" :alive t :activity "idle")))))))
+              ((symbol-function 'zerostack--find-chat-buffer) (lambda (&rest _) nil))
+              ((symbol-function 'zerostack--restart-detached-session)
+               (lambda (session) (push (plist-get session :id) restarted))))
+      (zerostack-restart-idle-sessions)
+      (should (equal (reverse restarted) '("idle" "legacy"))))))
+
+(ert-deftest zerostack-test-detached-restart-does-not-open-chat ()
+  (let (controller)
+    (unwind-protect
+        (cl-letf (((symbol-function 'zerostack-restart-daemon)
+                   (lambda ()
+                     (setq controller (current-buffer))
+                     (should (bound-and-true-p zerostack--detached-restart))
+                     (should (equal zerostack--session "detached"))
+                     (should (= zerostack--pid 1234))
+                     (should (equal default-directory "/tmp/")))))
+          (zerostack--restart-detached-session
+           '(:id "detached" :pid 1234 :socket "/tmp/sock" :cwd "/tmp"))
+          (should-not (get-buffer-window controller)))
+      (when (buffer-live-p controller) (kill-buffer controller)))))
+
+(ert-deftest zerostack-test-detached-controller-closes-on-startup ()
+  (let ((client (generate-new-buffer " *zerostack-detached-test*"))
+        (stderr (generate-new-buffer " *zerostack-detached-stderr*"))
+        connected)
+    (unwind-protect
+        (progn
+          (with-current-buffer client
+            (setq-local zerostack--detached-restart t))
+          (with-current-buffer stderr (insert "socket /tmp/daemon.sock\n"))
+          (cl-letf (((symbol-function 'zerostack--connect-buffer)
+                     (lambda (_) (setq connected t))))
+            (zerostack--poll-server-startup client stderr))
+          (should-not connected)
+          (should-not (buffer-live-p client)))
+      (when (buffer-live-p client) (kill-buffer client))
+      (kill-buffer stderr))))
+
+(ert-deftest zerostack-test-board-activity-without-chat-buffer ()
+  (cl-letf (((symbol-function 'zerostack--find-chat-buffer) (lambda (&rest _) nil)))
+    (dolist (case '(("idle" . zerostack-board-alive-face)
+                    ("running" . zerostack-board-thinking-face)
+                    ("waiting-permission" . zerostack-board-input-face)))
+      (should (eq (zerostack-board--session-face
+                   (list :id "detached" :alive t :activity (car case)))
+                  (cdr case))))))
+
 (ert-deftest zerostack-test-restart-attached-daemon ()
   (with-temp-buffer
     (setq-local zerostack--session "attached")
@@ -51,6 +109,102 @@
         (cl-letf (((symbol-function 'process-attributes) (lambda (_) nil)))
           (funcall callback)
           (should (equal started '("--session" "attached"))))))))
+
+(ert-deftest zerostack-test-daemon-survives-emacs-exit ()
+  (let* ((script (make-temp-file "zerostack-persistent-" nil ".sh"))
+         (pid-file (make-temp-file "zerostack-pid-"))
+         (library (locate-library "zerostack"))
+         (socket (make-temp-name (expand-file-name "zerostack-persist-" temporary-file-directory)))
+         pid log-file connection reply)
+    (unwind-protect
+        (progn
+          (with-temp-file script
+            (insert "#!/bin/sh\n"
+                    "echo $$ > " (shell-quote-argument pid-file) "\n"
+                    "exec "
+                    (mapconcat #'shell-quote-argument
+                               (list (expand-file-name invocation-name invocation-directory)
+                                     "--batch" "-Q" "--eval"
+                                     (prin1-to-string
+                                      `(progn
+                                         (make-network-process
+                                          :name "persistent-test" :family 'local
+                                          :service ,socket :server t :noquery t
+                                          :filter (lambda (process text)
+                                                    (process-send-string process text)))
+                                         (sleep-for 60))))
+                               " ")
+                    "\n"))
+          (set-file-modes script #o700)
+          (with-temp-buffer
+            (should
+             (zerop
+              (call-process
+               (expand-file-name invocation-name invocation-directory)
+               nil t nil "--batch" "-Q" "-l" library "--eval"
+               (prin1-to-string
+                `(progn
+                   (setq zerostack-command ,script)
+                   (zerostack--start-server nil)
+                   (princ (process-get zerostack--server-process 'zerostack-log-file))
+                   (let ((deadline (+ (float-time) 5)))
+                     (while (and (zerop (file-attribute-size (file-attributes ,pid-file)))
+                                 (< (float-time) deadline))
+                       (sleep-for 0.05)))
+                   (kill-emacs 0))))))
+            (setq log-file (string-trim (buffer-string))))
+          (setq pid (with-temp-buffer
+                      (insert-file-contents pid-file)
+                      (string-to-number (buffer-string))))
+          (should (> pid 1))
+          (should (process-attributes pid))
+          (zerostack-test--wait-until (lambda () (file-exists-p socket)))
+          (dotimes (_ 2)
+            (setq reply nil)
+            (setq connection
+                  (make-network-process
+                   :name "persistent-reattach" :family 'local :service socket
+                   :coding 'utf-8-unix :noquery t
+                   :filter (lambda (_process text) (setq reply text))))
+            (process-send-string connection "reattached\n")
+            (zerostack-test--wait-until (lambda () reply))
+            (should (equal reply "reattached\n"))
+            (delete-process connection)))
+      (when (and connection (process-live-p connection)) (delete-process connection))
+      (when (file-exists-p socket) (delete-file socket))
+      (when (and pid (> pid 1) (process-attributes pid))
+        (signal-process pid 'term))
+      (delete-file script)
+      (delete-file pid-file)
+      (when (and log-file (file-exists-p log-file)) (delete-file log-file)))))
+
+(ert-deftest zerostack-test-startup-timeout-keeps-daemon-running ()
+  (let ((client (generate-new-buffer " *zerostack-timeout*"))
+        (stderr (generate-new-buffer " *zerostack-timeout-log*"))
+        cancelled notice)
+    (unwind-protect
+        (progn
+          (with-current-buffer client
+            (setq-local zerostack--server-process 'monitor)
+            (setq-local zerostack--startup-timer 'timer))
+          (cl-letf (((symbol-function 'process-get)
+                     (lambda (_ key)
+                       (pcase key
+                         ('zerostack-startup-deadline 0)
+                         ('zerostack-log-file "/tmp/daemon.log"))))
+                    ((symbol-function 'file-readable-p) (lambda (_) nil))
+                    ((symbol-function 'cancel-timer) (lambda (timer) (setq cancelled timer)))
+                    ((symbol-function 'delete-process) (lambda (_) (ert-fail "must not stop daemon")))
+                    ((symbol-function 'zerostack--append-local-line)
+                     (lambda (text _) (setq notice text))))
+            (zerostack--poll-server-startup client stderr))
+          (should (eq cancelled 'timer))
+          (should (string-match-p "startup timed out" notice))
+          (with-current-buffer client
+            (should-not zerostack--startup-timer)
+            (should (eq zerostack--server-process 'monitor))))
+      (kill-buffer client)
+      (kill-buffer stderr))))
 
 (defmacro zerostack-test--with-buffer (&rest body)
   "Run BODY in a temporary `zerostack-mode' buffer."
@@ -1548,7 +1702,7 @@
        (should (string-empty-p zerostack--line-buffer))
        (should (string-match-p "restarting zerostack --emacs" (buffer-string)))))))
 
-(ert-deftest zerostack-test-restart-idle-sessions-skips-busy-and-unowned-sessions ()
+(ert-deftest zerostack-test-restart-idle-sessions-skips-busy-and-starting-sessions ()
   (let ((idle (generate-new-buffer " *zerostack-idle*"))
         (thinking (generate-new-buffer " *zerostack-thinking*"))
         (starting (generate-new-buffer " *zerostack-starting*"))
@@ -1569,7 +1723,18 @@
             (puthash 1 '(:tool "bash") zerostack--pending-permissions))
           (with-current-buffer unowned
             (setq zerostack--server-process nil))
-          (cl-letf (((symbol-function 'zerostack--chat-buffer-p)
+          (cl-letf (((symbol-function 'zerostack-board--fetch)
+                     (lambda ()
+                       '(zerostack-board :loose-workspaces
+                         ((:sessions ((:id "idle" :alive t :activity "idle")
+                                      (:id "thinking" :alive t :activity "running")
+                                      (:id "starting" :alive t :activity "idle")
+                                      (:id "permission" :alive t :activity "waiting-permission")))))))
+                    ((symbol-function 'zerostack--find-chat-buffer)
+                     (lambda (id &rest _)
+                       (cdr (assoc id `(("idle" . ,idle) ("thinking" . ,thinking)
+                                        ("starting" . ,starting) ("permission" . ,permission))))))
+                    ((symbol-function 'zerostack--chat-buffer-p)
                      (lambda (buffer)
                        (memq buffer (list idle thinking starting permission unowned))))
                     ((symbol-function 'process-live-p)

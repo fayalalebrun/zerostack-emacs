@@ -142,6 +142,7 @@ struct BoardSession {
     context_window: u64,
     cost: f64,
     alive: bool,
+    activity: Option<String>,
     pid: Option<u32>,
     socket: Option<String>,
 }
@@ -174,6 +175,8 @@ struct LiveSessionMeta {
     pid: u32,
     socket: String,
     updated_at: Option<String>,
+    #[serde(default)]
+    activity: Option<String>,
 }
 
 pub fn print_json() -> anyhow::Result<()> {
@@ -494,6 +497,7 @@ fn board_session(session: &StoredBoardSession, live: Option<&LiveSessionMeta>) -
         context_window: session.context_window,
         cost: session.total_cost,
         alive: live.is_some(),
+        activity: live.and_then(|meta| meta.activity.clone()),
         pid: live.map(|meta| meta.pid),
         socket: live.map(|meta| meta.socket.clone()),
     }
@@ -837,7 +841,7 @@ fn worktree_to_sexp(worktree: &BoardWorktree) -> String {
 
 fn session_to_sexp(session: &BoardSession) -> String {
     format!(
-        "(:id {} :short-id {} :title {} :cwd {} :model {} :provider {} :parent-session-id {} :subagent-access {} :subagents-enabled {} :created-at {} :updated-at {} :message-count {} :tokens {} :context-window {} :cost {:.6} :alive {} :pid {} :socket {})",
+        "(:id {} :short-id {} :title {} :cwd {} :model {} :provider {} :parent-session-id {} :subagent-access {} :subagents-enabled {} :created-at {} :updated-at {} :message-count {} :tokens {} :context-window {} :cost {:.6} :alive {} :pid {} :socket {} :activity {})",
         sexp_quote(&session.id),
         sexp_quote(short_id(&session.id)),
         sexp_quote(&session.title),
@@ -868,6 +872,11 @@ fn session_to_sexp(session: &BoardSession) -> String {
             .unwrap_or_else(|| "nil".to_string()),
         session
             .socket
+            .as_deref()
+            .map(sexp_quote)
+            .unwrap_or_else(|| "nil".to_string()),
+        session
+            .activity
             .as_deref()
             .map(sexp_quote)
             .unwrap_or_else(|| "nil".to_string()),
@@ -981,12 +990,37 @@ mod tests {
             pid: 123,
             socket: "/tmp/test.sock".into(),
             updated_at: Some("newer".into()),
+            activity: Some("running".into()),
         };
         let board = board_session(&stored, Some(&live));
         assert!(board.alive);
         assert_eq!(board.pid, Some(123));
         assert_eq!(board.socket.as_deref(), Some("/tmp/test.sock"));
         assert_eq!(board.updated_at, "newer");
+    }
+
+    #[test]
+    fn activity_survives_board_serialization_and_legacy_is_unknown() {
+        let session = crate::session::Session::new("test", "model", 1000);
+        let stored =
+            serde_json::from_str::<StoredBoardSession>(&serde_json::to_string(&session).unwrap())
+                .unwrap();
+        for activity in ["idle", "running", "waiting-permission"] {
+            let live: LiveSessionMeta = serde_json::from_value(serde_json::json!({
+                "session_id":session.id, "pid":123, "socket":"/tmp/sock", "activity":activity
+            }))
+            .unwrap();
+            let board = board_session(&stored, Some(&live));
+            assert_eq!(board.activity.as_deref(), Some(activity));
+            assert_eq!(serde_json::to_value(&board).unwrap()["activity"], activity);
+            assert!(session_to_sexp(&board).contains(&format!(":activity \"{activity}\"")));
+        }
+        let legacy: LiveSessionMeta = serde_json::from_value(serde_json::json!({
+            "session_id":session.id, "pid":123, "socket":"/tmp/sock"
+        }))
+        .unwrap();
+        assert!(board_session(&stored, Some(&legacy)).activity.is_none());
+        assert!(board_session(&stored, None).activity.is_none());
     }
 
     #[test]
@@ -1019,6 +1053,7 @@ mod tests {
             context_window: 100,
             cost: 0.0,
             alive,
+            activity: alive.then_some("idle".into()),
             pid: alive.then_some(123),
             socket: alive.then_some("/tmp/sock".to_string()),
         }
