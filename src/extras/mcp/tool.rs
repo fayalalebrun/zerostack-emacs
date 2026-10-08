@@ -171,8 +171,18 @@ impl McpTool {
         })
     }
 
+    #[cfg(test)]
     pub fn into_dynamic(self) -> Result<DynamicTool, rig::message::EmptyToolName> {
-        let definition = self.tool_definition()?;
+        let name = self.definition.name.to_string();
+        self.into_dynamic_named(&name)
+    }
+
+    pub(super) fn into_dynamic_named(
+        self,
+        name: &str,
+    ) -> Result<DynamicTool, rig::message::EmptyToolName> {
+        let mut definition = self.tool_definition()?;
+        definition.name = rig::message::ToolName::new(name)?;
         let tool = std::sync::Arc::new(self);
         Ok(DynamicTool::new(
             definition.name,

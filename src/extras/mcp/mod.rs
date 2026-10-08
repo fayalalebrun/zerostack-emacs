@@ -1,5 +1,6 @@
 pub mod client;
 pub mod config;
+pub(crate) mod discovery;
 pub mod oauth;
 pub mod tool;
 

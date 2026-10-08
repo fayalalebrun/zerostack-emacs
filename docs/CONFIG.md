@@ -595,6 +595,21 @@ Each server accepts `connect_timeout_secs`, `discovery_timeout_secs`, and
 Set a timeout to `0` to disable it for that server; this is useful for tools that
 legitimately run longer than five minutes.
 
+MCP tools are discovered locally on demand, independently of the provider.
+Initially the model receives only `mcp_search_tools`, with connected server names
+and tool counts, rather than every external tool's schema. Search accepts action
+keywords or an exact original tool name, plus an optional exact `server` filter.
+Up to five matching tools become directly callable with their full input schemas
+on the next model turn. Further searches accumulate available tools while their
+successful discovery results remain in conversation history; compaction that
+removes those results requires rediscovery. Saved sessions restore discovery
+from retained results, and rebuilt agents use the current server catalog.
+
+Exposed names include the server, original tool name, and a stable identity
+suffix to distinguish tools with the same name across servers. Calls still use
+the original MCP tool name and retain existing permission rules, OAuth, and
+timeouts. Search results contain brief descriptions, not copies of schemas.
+
 MCP tool schemas with missing types are normalized before being sent to the
 model, including schema-valued `additionalProperties` used by Notion tools.
 An explicit union of all JSON types preserves unrestricted values; existing

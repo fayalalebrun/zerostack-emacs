@@ -238,6 +238,8 @@ pub async fn build_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>
         }
 
         #[cfg(feature = "mcp")]
+        let mut discovery_hook = None;
+        #[cfg(feature = "mcp")]
         if let Some(manager) = &mcp_manager {
             let allow_all = cfg.allow_all_mcp_calls.unwrap_or(false);
             if allow_all && let Some(ref perm) = permission {
@@ -249,18 +251,9 @@ pub async fn build_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>
                 .collect_tools(permission.clone(), ask_tx.clone())
                 .await;
             if !mcp_tools.is_empty() {
-                builder = builder.dynamic_tools(
-                    mcp_tools
-                        .into_iter()
-                        .filter_map(|tool| match tool.into_dynamic() {
-                            Ok(tool) => Some(tool),
-                            Err(error) => {
-                                tracing::warn!(%error, "invalid MCP tool name");
-                                None
-                            }
-                        })
-                        .collect(),
-                );
+                let (tools, hook) = crate::extras::mcp::discovery::deferred_tools(mcp_tools);
+                builder = builder.dynamic_tools(tools).add_hook(hook.clone());
+                discovery_hook = Some(hook);
             }
         }
 
@@ -275,7 +268,15 @@ pub async fn build_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>
             builder = builder.tool(tools::VelesTool::new(permission.clone(), ask_tx.clone()));
         }
 
-        builder.build()
+        let agent = builder.build();
+        #[cfg(feature = "mcp")]
+        if let Some(hook) = discovery_hook {
+            crate::extras::mcp::discovery::eager_names(
+                &agent.tool_server_handle().static_tool_defs(),
+                &hook,
+            );
+        }
+        agent
     }
 }
 
