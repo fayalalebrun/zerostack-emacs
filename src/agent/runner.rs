@@ -26,18 +26,48 @@ use crate::session::{
 };
 
 #[derive(Clone, Default)]
-struct ProviderTurnHook(std::sync::Arc<std::sync::Mutex<Option<rig::message::AssistantMessage>>>);
+struct ProviderTurnHook {
+    message: std::sync::Arc<std::sync::Mutex<Option<rig::message::AssistantMessage>>>,
+    tool_results: Option<mpsc::UnboundedSender<(ToolResult, u64)>>,
+    tool_starts: std::sync::Arc<std::sync::Mutex<HashMap<rig::message::CallId, Instant>>>,
+}
 
 impl ProviderTurnHook {
     fn take(&self) -> Option<rig::message::AssistantMessage> {
-        self.0
+        self.message
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take()
     }
 }
 
+fn bash_live_output_dispatch(event: rig::agent::DispatchEvent<'_>) -> rig::agent::DispatchAction {
+    if event.tool_name() == Some("bash")
+        && let Some(call_id) = event.call_id
+        && let Some(args) = event.tool_args()
+        && let Ok(serde_json::Value::Object(mut args)) = serde_json::from_str(args)
+    {
+        args.insert("__zerostack_call_id".into(), call_id.to_string().into());
+        return rig::agent::DispatchAction::rewrite_tool_args(event.kind, args);
+    }
+    rig::agent::DispatchAction::Proceed
+}
+
 impl rig::agent::AgentHook for ProviderTurnHook {
+    async fn on_dispatch(
+        &self,
+        _ctx: &rig::agent::HookContext,
+        event: rig::agent::DispatchEvent<'_>,
+    ) -> rig::agent::DispatchAction {
+        if let Some(id) = event.call_id {
+            self.tool_starts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id.clone(), Instant::now());
+        }
+        bash_live_output_dispatch(event)
+    }
+
     async fn on_outcome(
         &self,
         _ctx: &rig::agent::HookContext,
@@ -46,9 +76,37 @@ impl rig::agent::AgentHook for ProviderTurnHook {
         if let Ok(rig::effect::Outcome::Completion(response)) = event.outcome
             && let Some(Message::Assistant(message)) = response.message()
         {
-            *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(message);
+            *self
+                .message
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(message);
         }
+        self.publish_tool_result(event);
         rig::agent::OutcomeAction::Proceed
+    }
+}
+
+impl ProviderTurnHook {
+    fn publish_tool_result(&self, event: rig::agent::OutcomeEvent<'_>) {
+        if let Some(result) = event.tool_result()
+            && let Some(id) = event.call_id
+            && let Some(name) = event.tool_name()
+            && let Ok(name) = rig::message::ToolName::new(name)
+            && let Some(sender) = &self.tool_results
+        {
+            let duration = self
+                .tool_starts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(id)
+                .map(|start| start.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+                .unwrap_or(0);
+            if let UserContent::ToolResult(result) =
+                rig::transcript::tool_result_output(id.clone(), name, result)
+            {
+                let _ = sender.send((result, duration));
+            }
+        }
     }
 }
 
@@ -287,7 +345,11 @@ pub fn spawn_btw(
     id: u32,
 ) -> BtwRunner {
     let join = tokio::spawn(async move {
-        let mut stream = agent.prompt(prompt).history(history).stream();
+        let mut stream = agent
+            .prompt(prompt)
+            .history(history)
+            .tool_concurrency(8)
+            .stream();
         let mut acc = String::new();
 
         while let Some(item) = stream.next().await {
@@ -634,6 +696,7 @@ async fn continue_prompt_injector(
     retry_prompt: &str,
     retry_history: &[Message],
     tool_interactions: &[Message],
+    provider_turn: &ProviderTurnHook,
 ) -> StreamingResult {
     let mut new_history = retry_history.to_vec();
     new_history.extend_from_slice(tool_interactions);
@@ -642,6 +705,8 @@ async fn continue_prompt_injector(
     agent
         .prompt("Please continue.")
         .history(new_history)
+        .add_hook(provider_turn.clone())
+        .tool_concurrency(8)
         .stream()
 }
 
@@ -688,15 +753,30 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
         let mut partial_text = String::new();
 
         let mut provider_call_started = Instant::now();
-        let provider_turn = ProviderTurnHook::default();
+        let (tool_result_tx, mut tool_result_rx) = mpsc::unbounded_channel();
+        let provider_turn = ProviderTurnHook {
+            tool_results: Some(tool_result_tx),
+            ..Default::default()
+        };
+        let mut surfaced_results = HashSet::new();
         let mut stream = agent
             .prompt(prompt)
             .history(history)
             .add_hook(provider_turn.clone())
+            .tool_concurrency(8)
             .stream();
 
         loop {
-            while let Some(item) = stream.next().await {
+            while let Some(item) = tokio::select! {
+                biased;
+                result = tool_result_rx.recv() => result.map(|(tool_result, duration)| {
+                    if !surfaced_results.contains(&tool_result.call) {
+                        tool_starts.insert(tool_result.call.clone(), Instant::now() - Duration::from_millis(duration));
+                    }
+                    Ok(MultiTurnStreamItem::ToolResult { tool_result })
+                }),
+                item = stream.next() => item,
+            } {
                 match item {
                     Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
                         stream_had_output |= streamed_assistant_content_has_output(&content);
@@ -747,6 +827,9 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
                             .await;
                     }
                     Ok(MultiTurnStreamItem::ToolResult { tool_result }) => {
+                        if !surfaced_results.insert(tool_result.call.clone()) {
+                            continue;
+                        }
                         stream_had_output = true;
                         let mut output = String::new();
                         for c in tool_result.content.iter() {
@@ -889,6 +972,7 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
                                 .prompt(retry_prompt.clone())
                                 .history(retry_history.clone())
                                 .add_hook(provider_turn.clone())
+                                .tool_concurrency(8)
                                 .stream();
                             continue;
                         }
@@ -908,9 +992,14 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
             stream_had_output = false;
             partial_text.clear();
             provider_call_started = Instant::now();
-            stream =
-                continue_prompt_injector(&agent, &retry_prompt, &retry_history, &tool_interactions)
-                    .await;
+            stream = continue_prompt_injector(
+                &agent,
+                &retry_prompt,
+                &retry_history,
+                &tool_interactions,
+                &provider_turn,
+            )
+            .await;
         }
     });
 
@@ -931,6 +1020,7 @@ pub async fn run_print(
         .prompt(prompt.to_string())
         .history(Vec::<Message>::new())
         .max_turns(max_turns)
+        .tool_concurrency(8)
         .stream();
 
     let mut full_response = String::new();
@@ -1192,6 +1282,7 @@ pub async fn run_subagent(
         .add_hook(SubagentPromptHook)
         .max_invalid_tool_call_retries(SUBAGENT_INVALID_TOOL_RETRIES)
         .max_turns(max_turns)
+        .tool_concurrency(8)
         .stream();
 
     let mut full_response = String::new();
@@ -1302,6 +1393,7 @@ pub async fn run_subagent(
                         .add_hook(SubagentPromptHook)
                         .max_invalid_tool_call_retries(SUBAGENT_INVALID_TOOL_RETRIES)
                         .max_turns(max_turns)
+                        .tool_concurrency(8)
                         .stream();
                     continue;
                 }
@@ -1379,6 +1471,7 @@ async fn run_subagent_cutoff_stream(agent: &Agent, prompt: String) -> anyhow::Re
         let mut stream = agent
             .prompt(prompt.clone())
             .history(Vec::<Message>::new())
+            .tool_concurrency(8)
             .stream();
         let mut response = String::new();
         while let Some(item) = stream.next().await {
@@ -1454,6 +1547,209 @@ mod tests {
     use rig::completion::{Message, PromptError};
     use rig::error::ProviderError;
     use rig::streaming::{Item, StreamEvent};
+
+    #[test]
+    fn bash_live_output_dispatch_uses_host_call_identity() {
+        let id = rig::message::CallId::from_wire("actual-call");
+        for name in ["bash", "read"] {
+            let kind = rig::effect::EffectKind::ToolCall {
+                name: name.into(),
+                args: r#"{"command":"same command","__zerostack_call_id":"forged"}"#.into(),
+            };
+            let event = rig::agent::DispatchEvent {
+                id: rig::effect::EffectId::from_raw(1),
+                kind: &kind,
+                turn: 1,
+                call_id: Some(&id),
+                context: None,
+            };
+            match super::bash_live_output_dispatch(event) {
+                rig::agent::DispatchAction::Patch(rig::effect::EffectKind::ToolCall {
+                    args,
+                    ..
+                }) => {
+                    assert_eq!(name, "bash");
+                    let args: crate::agent::tools::BashArgs = serde_json::from_str(&args).unwrap();
+                    assert_eq!(args.call_id.as_deref(), Some("actual-call"));
+                    assert_eq!(args.command, "same command");
+                }
+                rig::agent::DispatchAction::Proceed => assert_eq!(name, "read"),
+                _ => panic!("unexpected dispatch action"),
+            }
+        }
+        for args in ["broken", "[]"] {
+            let kind = rig::effect::EffectKind::ToolCall {
+                name: "bash".into(),
+                args: args.into(),
+            };
+            let event = rig::agent::DispatchEvent {
+                id: rig::effect::EffectId::from_raw(1),
+                kind: &kind,
+                turn: 1,
+                call_id: Some(&id),
+                context: None,
+            };
+            assert!(matches!(
+                super::bash_live_output_dispatch(event),
+                rig::agent::DispatchAction::Proceed
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_outcomes_surface_before_siblings_finish() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let hook = super::ProviderTurnHook {
+            tool_results: Some(tx),
+            ..Default::default()
+        };
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let slow_hook = hook.clone();
+        let slow = tokio::spawn(async move {
+            wait.await.unwrap();
+            publish_test_result(&slow_hook, "slow", false);
+        });
+        publish_test_result(&hook, "fast", false);
+        let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.call.to_string(), "fast");
+        assert!(!slow.is_finished());
+        assert!(rx.try_recv().is_err());
+        release.send(()).unwrap();
+        slow.await.unwrap();
+        assert_eq!(rx.recv().await.unwrap().0.call.to_string(), "slow");
+        publish_test_result(&hook, "failed", true);
+        let (result, _) = rx.recv().await.unwrap();
+        assert_eq!(result.call.to_string(), "failed");
+        assert!(result.is_error);
+        assert!(
+            matches!(&result.content[0], rig::message::ToolResultContent::Text(text) if text.text.contains("failure"))
+        );
+    }
+
+    fn publish_test_result(hook: &super::ProviderTurnHook, id: &str, failed: bool) {
+        let id = rig::message::CallId::from_wire(id);
+        hook.tool_starts
+            .lock()
+            .unwrap()
+            .insert(id.clone(), tokio::time::Instant::now());
+        let kind = rig::effect::EffectKind::ToolCall {
+            name: "bash".into(),
+            args: "{}".into(),
+        };
+        let result = if failed {
+            rig::tool::ToolResult::failed(rig::tool::ToolExecutionError::other("failure"))
+        } else {
+            rig::tool::ToolResult::success(rig::tool::ToolOutput::text("output"))
+        };
+        let outcome = Ok(rig::effect::Outcome::ToolResult { result });
+        hook.publish_tool_result(rig::agent::OutcomeEvent {
+            id: rig::effect::EffectId::from_raw(1),
+            kind: &kind,
+            outcome: &outcome,
+            turn: 1,
+            call_id: Some(&id),
+            context: None,
+        });
+        assert!(!hook.tool_starts.lock().unwrap().contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn spawned_agent_executes_sibling_tools_concurrently() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for turn in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = tokio::io::BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                let delta = if turn == 0 {
+                    serde_json::json!({"tool_calls":[
+                        {"index":0,"id":"a","type":"function","function":{"name":"barrier","arguments":"{}"}},
+                        {"index":1,"id":"b","type":"function","function":{"name":"barrier","arguments":"{}"}}
+                    ]})
+                } else {
+                    serde_json::json!({"content":"done"})
+                };
+                let chunk = serde_json::json!({"id":"test","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+                let end = serde_json::json!({"id":"test","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":if turn == 0 {"tool_calls"} else {"stop"}}]});
+                let body = format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let tool = rig::tool::DynamicTool::new(
+            rig::message::ToolName::new("barrier").unwrap(),
+            "Synchronize siblings",
+            serde_json::json!({"type":"object","properties":{}}),
+            move |_| {
+                let barrier = barrier.clone();
+                Box::pin(async move {
+                    barrier.wait().await;
+                    Ok(rig::tool::ToolOutput::text("complete"))
+                })
+            },
+        );
+        let client = rig::providers::openai::OpenAIConfig::new("test")
+            .with_base_url(base)
+            .connect(rig::http_client::ReqwestClient::from(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+            ));
+        let agent = rig::agent::AgentBuilder::new(client.chat("test"))
+            .default_max_turns(2)
+            .dynamic_tool(tool)
+            .build();
+        let mut runner = super::spawn_agent(agent, "parallel".into(), vec![]);
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut results = std::collections::HashSet::new();
+            while let Some(event) = runner.event_rx.recv().await {
+                match event {
+                    crate::event::AgentEvent::ToolResult { id, .. } => {
+                        assert!(results.insert(id));
+                    }
+                    crate::event::AgentEvent::Done { .. } => {
+                        assert_eq!(results.len(), 2);
+                        return;
+                    }
+                    crate::event::AgentEvent::Error { message, .. } => panic!("{message}"),
+                    _ => {}
+                }
+            }
+            panic!("runner ended without completion");
+        })
+        .await;
+        runner.abort_handle.abort();
+        assert!(
+            completed.is_ok(),
+            "sibling tools did not execute concurrently"
+        );
+        server.await.unwrap();
+    }
 
     fn provider_retry_delay(attempt: usize, message: &str) -> Option<u64> {
         retry_delay_ms(

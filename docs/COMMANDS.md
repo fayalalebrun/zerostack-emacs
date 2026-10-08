@@ -321,18 +321,29 @@ renderer and links. Events include an artifact plist:
                   :expires process-exit))
 ```
 
-Rendered lines may also carry `:artifact`, for example
-`(:text "  output: bash (17.9 KB)" :face zs-link :artifact (...))`. Bash tool
-calls in native Emacs sessions also create a live output artifact before the
-command starts and write combined stdout/stderr to that file while the command is
-running:
+Tool output links stay on their matching call row, for example
+`◈ bash(output 17.9 KB [1.2s]) cargo test`. Parallel calls are matched by call ID,
+not tool name or completion order. Reopened sessions use the same grouped layout.
+Agent runs execute up to eight tool calls concurrently, including calls to the
+same tool. Calls beyond that limit wait for an execution slot. Dependent
+operations must be issued in separate model turns rather than one parallel batch.
+Each tool outcome updates its row as soon as execution completes; display does
+not wait for slower sibling calls. Rig still commits the full batch to provider
+history before requesting the next model turn. Buffered batch events do not
+produce duplicate results.
+Bash calls create a live output artifact before the command starts and write
+combined stdout/stderr to that file while running. A `tool-row` event replaces
+only the tool-call row identified by `:message-index`, preserving neighboring
+calls, streamed text, and the input draft:
 
 ```lisp
-(event :type tool-render
+(event :type tool-row
        :turn 3
-       :replace-from 12
-       :lines ((:text "  live output: cargo test"
-                :face zs-link
+       :message-index 12
+       :lines ((:text "◈ bash(live output) cargo test"
+                :face zs-tool
+                :message-index 12
+                :role tool-call
                 :artifact (:kind live-tool-output
                            :path "/run/user/1000/zerostack/sessions/<id>/artifacts/turn-3/0002-bash-live-output.txt"
                            :mime "text/plain; charset=utf-8"

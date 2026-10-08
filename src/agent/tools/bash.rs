@@ -11,6 +11,7 @@ use crate::extras::truncate::head_lines;
 use crate::sandbox::Sandbox;
 
 pub(crate) struct BashLiveOutputRequest {
+    pub call_id: String,
     pub command: String,
     pub reply: oneshot::Sender<Option<PathBuf>>,
 }
@@ -239,37 +240,47 @@ impl Tool for BashTool {
         #[cfg(not(feature = "rtk"))]
         let command = args.command.clone();
 
-        let (stdout, stderr, exit_code) = if let Some(sender) = bash_live_output_sender() {
-            let (reply, response) = oneshot::channel();
-            let _ = sender
-                .send(BashLiveOutputRequest {
-                    command: args.command.clone(),
-                    reply,
-                })
-                .await;
-            if let Ok(Some(path)) = response.await {
-                let status = if let Some(secs) = args.timeout {
-                    match timeout(
-                        Duration::from_millis(secs),
-                        self.sandbox.output_command_to_file(&command, &path),
-                    )
-                    .await
-                    {
-                        Ok(status) => status,
-                        Err(_) => {
-                            self.sandbox.kill_active();
-                            return Err(ToolError::Msg("Command timed out".to_string()));
+        let (stdout, stderr, exit_code) =
+            if let Some(sender) = bash_live_output_sender().filter(|_| args.call_id.is_some()) {
+                let (reply, response) = oneshot::channel();
+                let _ = sender
+                    .send(BashLiveOutputRequest {
+                        call_id: args.call_id.clone().unwrap_or_default(),
+                        command: args.command.clone(),
+                        reply,
+                    })
+                    .await;
+                if let Ok(Some(path)) = response.await {
+                    let status = if let Some(secs) = args.timeout {
+                        match timeout(
+                            Duration::from_millis(secs),
+                            self.sandbox.output_command_to_file(&command, &path),
+                        )
+                        .await
+                        {
+                            Ok(status) => status,
+                            Err(_) => {
+                                self.sandbox.kill_active();
+                                return Err(ToolError::Msg("Command timed out".to_string()));
+                            }
                         }
-                    }
+                    } else {
+                        self.sandbox.output_command_to_file(&command, &path).await
+                    }?;
+                    let output = tokio::fs::read(&path).await?;
+                    (
+                        String::from_utf8_lossy(&output).to_string(),
+                        String::new(),
+                        status.code().unwrap_or(-1),
+                    )
                 } else {
-                    self.sandbox.output_command_to_file(&command, &path).await
-                }?;
-                let output = tokio::fs::read(&path).await?;
-                (
-                    String::from_utf8_lossy(&output).to_string(),
-                    String::new(),
-                    status.code().unwrap_or(-1),
-                )
+                    let output = self.run_buffered_command(&command, args.timeout).await?;
+                    (
+                        String::from_utf8_lossy(&output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                        output.status.code().unwrap_or(-1),
+                    )
+                }
             } else {
                 let output = self.run_buffered_command(&command, args.timeout).await?;
                 (
@@ -277,15 +288,7 @@ impl Tool for BashTool {
                     String::from_utf8_lossy(&output.stderr).to_string(),
                     output.status.code().unwrap_or(-1),
                 )
-            }
-        } else {
-            let output = self.run_buffered_command(&command, args.timeout).await?;
-            (
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-                output.status.code().unwrap_or(-1),
-            )
-        };
+            };
 
         let mut result = String::new();
         if !stdout.is_empty() {

@@ -3004,6 +3004,15 @@ _o_ artifact                                              _R_ restart
      (zerostack--flush-backfill)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
+    ('tool-row
+     (zerostack--flush-backfill)
+     (when-let ((index (cl-position-if
+                       (lambda (marker)
+                         (and (equal (get-text-property marker 'zerostack-message-index)
+                                     (plist-get plist :message-index))
+                              (eq (get-text-property marker 'zerostack-message-role) 'tool-call)))
+                       zerostack--line-markers)))
+       (zerostack--replace-lines index (plist-get plist :lines) 1)))
     ('loop-started
      (zerostack--update-loop-state plist)
      (zerostack--set-thinking t))
@@ -3298,7 +3307,7 @@ _o_ artifact                                              _R_ restart
           (goto-char saved-point)
           (set-marker saved-point nil))))))
 
-(defun zerostack--replace-lines (replace-from lines)
+(defun zerostack--replace-lines (replace-from lines &optional replace-count)
   "Replace rendered logical lines from REPLACE-FROM with LINES."
   (zerostack--ensure-prompt)
   (zerostack--without-undo
@@ -3310,9 +3319,15 @@ _o_ artifact                                              _R_ restart
                  (start (if (< keep (length zerostack--line-markers))
                             (marker-position (nth keep zerostack--line-markers))
                           (marker-position zerostack--notice-start-marker)))
-                 (end (marker-position zerostack--notice-start-marker))
-                 (old-tail (nthcdr keep zerostack--line-markers))
+                 (stop (if replace-count
+                           (min (+ keep replace-count) (length zerostack--line-markers))
+                         (length zerostack--line-markers)))
+                 (suffix (nthcdr stop zerostack--line-markers))
+                 (end (if suffix (marker-position (car suffix))
+                        (marker-position zerostack--notice-start-marker)))
+                 (old-tail (cl-subseq zerostack--line-markers keep stop))
                  (inhibit-read-only t))
+            (when suffix (set-marker-insertion-type (car suffix) t))
             (mapc (lambda (marker) (set-marker marker nil)) old-tail)
             (setq zerostack--line-markers prefix)
             (remove-overlays start end 'zerostack-latex t)
@@ -3322,8 +3337,10 @@ _o_ artifact                                              _R_ restart
               (let ((marker (copy-marker (point) nil)))
                 (push marker new-markers)
                 (zerostack--insert-wire-line line)))
-            (set-marker zerostack--notice-start-marker (point))
-            (setq zerostack--line-markers (append prefix (nreverse new-markers)))
+            (if suffix
+                (set-marker-insertion-type (car suffix) nil)
+              (set-marker zerostack--notice-start-marker (point)))
+            (setq zerostack--line-markers (append prefix (nreverse new-markers) suffix))
             (goto-char saved-point))
         (set-marker saved-point nil)))))
 

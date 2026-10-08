@@ -77,6 +77,7 @@ mod imp {
     }
 
     struct Server {
+        tool_render_lock: Mutex<()>,
         client: Mutex<AnyClient>,
         cli: Cli,
         cfg: Config,
@@ -96,6 +97,7 @@ mod imp {
     }
 
     struct ActiveLiveOutput {
+        artifact: ArtifactInfo,
         path: PathBuf,
         started_at: Instant,
     }
@@ -116,7 +118,7 @@ mod imp {
         next_permission_id: u64,
         pending_permissions: HashMap<u64, AskRequest>,
         last_event_at: Option<String>,
-        active_live_output: Option<ActiveLiveOutput>,
+        active_live_output: HashMap<String, ActiveLiveOutput>,
         active_response: Option<(u64, String)>,
         last_error: Option<String>,
         finalizing: bool,
@@ -591,6 +593,7 @@ mod imp {
         let socket_path = registration.socket_path.clone();
         let registry_dir = registration.dir.clone();
         let server = Arc::new(Server {
+            tool_render_lock: Mutex::new(()),
             client: Mutex::new(client),
             cli,
             cfg,
@@ -619,7 +622,7 @@ mod imp {
                 next_permission_id: 1,
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
-                active_live_output: None,
+                active_live_output: HashMap::new(),
                 active_response: None,
                 last_error: None,
                 finalizing: false,
@@ -2816,48 +2819,62 @@ mod imp {
     }
 
     async fn persist_interrupted_live_output(server: &Arc<Server>) -> anyhow::Result<bool> {
-        let active = server.mutable.lock().await.active_live_output.take();
-        let Some(active) = active else {
-            return Ok(false);
-        };
-        let bytes = tokio::fs::read(&active.path).await.unwrap_or_default();
-        let partial = String::from_utf8_lossy(&bytes);
-        let output = if partial.is_empty() {
-            "[interrupted: bash was aborted before producing output]".to_string()
-        } else {
-            format!("[interrupted: partial bash output captured before abort]\n{partial}")
-        };
-        let duration_ms = active
-            .started_at
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        let message = {
-            let mut session = server.session.lock().await;
-            if session
-                .add_tool_result_for_latest_unresolved_call(
+        let active = std::mem::take(&mut server.mutable.lock().await.active_live_output);
+        let mut persisted = false;
+        for (id, active) in active {
+            let bytes = tokio::fs::read(&active.path).await.unwrap_or_default();
+            let partial = String::from_utf8_lossy(&bytes);
+            let output = if partial.is_empty() {
+                "[interrupted: bash was aborted before producing output]".to_string()
+            } else {
+                format!("[interrupted: partial bash output captured before abort]\n{partial}")
+            };
+            let duration_ms = active
+                .started_at
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let message = {
+                let mut session = server.session.lock().await;
+                let call = session.messages.iter().find_map(|msg| {
+                    msg.tool_call
+                        .as_ref()
+                        .filter(|call| call.id == id || call.call_id.as_deref() == Some(&id))
+                        .cloned()
+                });
+                let Some(call) = call else {
+                    continue;
+                };
+                if session.messages.iter().any(|msg| {
+                    msg.tool_result
+                        .as_ref()
+                        .is_some_and(|result| result.id == call.id)
+                }) {
+                    continue;
+                }
+                session.add_tool_result_structured_with_context(
                     "bash",
                     &output,
+                    &call.id,
+                    call.call_id.as_deref(),
                     Vec::new(),
                     duration_ms,
-                )
-                .is_none()
-            {
-                return Ok(false);
-            }
-            if !server.cli.no_session {
-                crate::session::storage::save_session(&session)?;
-            }
-            session
-                .messages
-                .last()
-                .expect("tool result was added")
-                .clone()
-        };
-        let turn = server.mutable.lock().await.turn;
-        emit_tool_result_message(server, turn, &message).await;
-        Ok(true)
+                );
+                if !server.cli.no_session {
+                    crate::session::storage::save_session(&session)?;
+                }
+                session
+                    .messages
+                    .last()
+                    .expect("tool result was added")
+                    .clone()
+            };
+            let turn = server.mutable.lock().await.turn;
+            emit_tool_result_message(server, turn, &message).await;
+            persisted = true;
+        }
+        Ok(persisted)
     }
 
     async fn set_driver_abort_handle(
@@ -3395,7 +3412,7 @@ mod imp {
         {
             let mut mutable = server.mutable.lock().await;
             mutable.abort_handle = Some(runner.abort_handle.clone());
-            mutable.active_live_output = None;
+            mutable.active_live_output.clear();
             mutable.active_response = Some((turn, String::new()));
         }
 
@@ -3552,10 +3569,13 @@ mod imp {
                     // tool result. Start that as a new rendered segment so replacing
                     // `thinking: ...` does not delete the tool rows appended below.
                     reset_reasoning_render_segment(&mut reasoning_start_line);
+                    let _render_guard = server.tool_render_lock.lock().await;
                     let summary = format_tool_call_summary(&name, &args);
+                    let message_index;
                     {
                         let mut session = server.session.lock().await;
                         session.add_partial_assistant_output(&response_buf, reasoning);
+                        message_index = session.messages.len();
                         session.add_tool_call_structured(&name, &args, &id, call_id.as_deref());
                         if !server.cli.no_session {
                             crate::session::storage::save_session(&session)?;
@@ -3569,10 +3589,17 @@ mod imp {
                             .append_lines(
                                 "tool-render",
                                 turn,
-                                vec![WireLine::new(
-                                    format!("◈ {}", sanitize_output(&summary)),
-                                    "zs-tool",
-                                )],
+                                vec![{
+                                    let live = server
+                                        .mutable
+                                        .lock()
+                                        .await
+                                        .active_live_output
+                                        .get(id.as_str())
+                                        .map(|live| live.artifact.clone());
+                                    tool_call_row(&summary, live, "live output")
+                                        .with_source(message_index, MessageRole::ToolCall)
+                                }],
                             )
                             .await;
                         server
@@ -3631,7 +3658,12 @@ mod imp {
                     display_artifact,
                 } => {
                     if name == "bash" {
-                        server.mutable.lock().await.active_live_output = None;
+                        server
+                            .mutable
+                            .lock()
+                            .await
+                            .active_live_output
+                            .remove(id.as_str());
                     }
                     let message = {
                         let mut session = server.session.lock().await;
@@ -4242,21 +4274,23 @@ mod imp {
                 }
             };
             let path = artifact.path.clone();
-            server.mutable.lock().await.active_live_output = Some(ActiveLiveOutput {
-                path: path.clone(),
-                started_at: Instant::now(),
-            });
-            server
-                .append_lines(
-                    "tool-render",
-                    turn,
-                    vec![WireLine::with_artifact(
-                        live_output_line_text(&req.command),
-                        "zs-link",
-                        artifact,
-                    )],
-                )
-                .await;
+            let _render_guard = server.tool_render_lock.lock().await;
+            server.mutable.lock().await.active_live_output.insert(
+                req.call_id.clone(),
+                ActiveLiveOutput {
+                    artifact: artifact.clone(),
+                    path: path.clone(),
+                    started_at: Instant::now(),
+                },
+            );
+            update_tool_call_row(
+                &server,
+                turn,
+                &req.call_id,
+                Some(artifact),
+                &live_output_line_text(&req.command),
+            )
+            .await;
             let _ = req.reply.send(Some(path));
         }
     }
@@ -4326,7 +4360,77 @@ mod imp {
             ));
             out.push(blank_line());
         }
+        let results: HashMap<&str, usize> = session
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, msg)| {
+                msg.tool_result
+                    .as_ref()
+                    .map(|result| (result.id.as_str(), index))
+            })
+            .collect();
+        let mut grouped_results = std::collections::HashSet::new();
         for (message_index, msg) in session.messages.iter().enumerate() {
+            if grouped_results.contains(&message_index)
+                || (msg.role == MessageRole::Assistant && msg.content.is_empty())
+            {
+                continue;
+            }
+            if let Some(call) = msg.tool_call.as_ref()
+                && call.name != "task"
+                && call.name != "goal_update"
+            {
+                if let Some(&result_index) = results.get(call.id.as_str()) {
+                    let result_msg = &session.messages[result_index];
+                    let rendered =
+                        render_tool_result_message(result_msg, server, result_index as u64).await;
+                    if let Some(artifact) = rendered.artifact {
+                        let duration = result_msg
+                            .tool_result
+                            .as_ref()
+                            .map(|r| r.duration_ms)
+                            .unwrap_or(0);
+                        let label = format!(
+                            "output {}{}",
+                            format_bytes(artifact.bytes),
+                            tool_duration_suffix(duration)
+                        );
+                        out.push(
+                            tool_call_row(&msg.content, Some(artifact), &label)
+                                .with_source(message_index, msg.role),
+                        );
+                        out.extend(
+                            rendered
+                                .lines
+                                .into_iter()
+                                .filter(|line| {
+                                    !line.text.starts_with("  output:") && !line.text.is_empty()
+                                })
+                                .map(|line| {
+                                    line.with_source(result_index, MessageRole::ToolResult)
+                                }),
+                        );
+                        grouped_results.insert(result_index);
+                        continue;
+                    }
+                } else if let Some(server) = server {
+                    let live = server
+                        .mutable
+                        .lock()
+                        .await
+                        .active_live_output
+                        .get(call.id.as_str())
+                        .map(|live| live.artifact.clone());
+                    if live.is_some() {
+                        out.push(
+                            tool_call_row(&msg.content, live, "live output")
+                                .with_source(message_index, msg.role),
+                        );
+                        continue;
+                    }
+                }
+            }
             if msg.role == MessageRole::ToolCall
                 && msg
                     .tool_call
@@ -4432,15 +4536,99 @@ mod imp {
         }
     }
 
+    fn tool_call_row(summary: &str, artifact: Option<ArtifactInfo>, label: &str) -> WireLine {
+        let summary = sanitize_output(summary);
+        match artifact {
+            Some(artifact) => {
+                let (name, args) = summary.split_once(' ').unwrap_or((&summary, ""));
+                let text = format!(
+                    "◈ {name}({}){}{}",
+                    label.trim(),
+                    if args.is_empty() { "" } else { " " },
+                    args
+                );
+                WireLine::with_artifact(text, "zs-tool", artifact)
+            }
+            None => WireLine::new(format!("◈ {summary}"), "zs-tool"),
+        }
+    }
+
+    async fn update_tool_call_row(
+        server: &Arc<Server>,
+        turn: u64,
+        id: &str,
+        artifact: Option<ArtifactInfo>,
+        label: &str,
+    ) -> bool {
+        let call = server
+            .session
+            .lock()
+            .await
+            .messages
+            .iter()
+            .enumerate()
+            .find_map(|(index, msg)| {
+                msg.tool_call
+                    .as_ref()
+                    .filter(|call| call.id == id || call.call_id.as_deref() == Some(id))
+                    .map(|_| (index, msg.content.to_string()))
+            });
+        let Some((index, summary)) = call else {
+            return false;
+        };
+        let row =
+            tool_call_row(&summary, artifact, label).with_source(index, MessageRole::ToolCall);
+        server
+            .broadcast_event(
+                "tool-row",
+                format!(
+                    " :turn {turn} :message-index {index} :lines {}",
+                    lines_to_sexp(&[row])
+                ),
+            )
+            .await;
+        true
+    }
+
     async fn emit_tool_result_message(
         server: &Arc<Server>,
         turn: u64,
         msg: &crate::session::SessionMessage,
     ) {
         let rendered = render_tool_result_message(msg, Some(server), turn).await;
-        server
-            .append_lines("tool-render", turn, rendered.lines)
-            .await;
+        let _render_guard = server.tool_render_lock.lock().await;
+        let grouped = if let Some(result) = msg.tool_result.as_ref()
+            && result.name != "task"
+            && result.name != "goal_update"
+            && rendered.artifact.is_some()
+        {
+            update_tool_call_row(
+                server,
+                turn,
+                &result.id,
+                rendered.artifact.clone(),
+                &format!(
+                    "output {}{}",
+                    format_bytes(rendered.artifact.as_ref().unwrap().bytes),
+                    tool_duration_suffix(result.duration_ms)
+                ),
+            )
+            .await
+        } else {
+            false
+        };
+        let lines = if grouped {
+            rendered
+                .lines
+                .into_iter()
+                .filter(|line| !line.text.starts_with("  output:") && !line.text.is_empty())
+                .collect()
+        } else {
+            rendered.lines
+        };
+        if !lines.is_empty() {
+            server.append_lines("tool-render", turn, lines).await;
+        }
         let name = msg
             .tool_result
             .as_ref()
@@ -6958,7 +7146,7 @@ mod imp {
                 next_permission_id: 1,
                 pending_permissions: HashMap::new(),
                 last_event_at: None,
-                active_live_output: None,
+                active_live_output: HashMap::new(),
                 active_response: None,
                 last_error: None,
                 finalizing: false,
@@ -7599,6 +7787,108 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn parallel_tool_outputs_update_their_own_call_rows() {
+            let (server, registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            {
+                let mut session = server.session.lock().await;
+                session.add_tool_call_structured(
+                    "bash",
+                    &serde_json::json!({"command":"same command"}),
+                    "call_a",
+                    None,
+                );
+                session.add_tool_call_structured(
+                    "bash",
+                    &serde_json::json!({"command":"same command"}),
+                    "call_b",
+                    None,
+                );
+            }
+            let mut events = server.events.subscribe();
+            let artifact = server
+                .create_artifact(1, "live-tool-output", "bash", "")
+                .await
+                .unwrap();
+            assert!(
+                update_tool_call_row(&server, 1, "call_b", Some(artifact), "live output").await
+            );
+            let event = events.recv().await.unwrap();
+            assert!(event.contains(":type tool-row"));
+            assert!(event.contains(":message-index 1"));
+            assert!(event.contains("bash(live output) same command"));
+            assert!(!update_tool_call_row(&server, 1, "missing", None, "live output").await);
+            {
+                let mut session = server.session.lock().await;
+                session.add_tool_result_structured("bash", "second", "call_b", None);
+                session.add_tool_result_structured("bash", "first", "call_a", None);
+            }
+            let lines = render_session_lines(&server, 100).await;
+            let rows: Vec<_> = lines
+                .iter()
+                .filter(|line| line.role == Some(MessageRole::ToolCall))
+                .collect();
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|row| row.text.contains("bash(output ")));
+            assert!(
+                std::fs::read_to_string(&rows[0].artifact.as_ref().unwrap().path)
+                    .unwrap()
+                    .contains("first")
+            );
+            assert!(
+                std::fs::read_to_string(&rows[1].artifact.as_ref().unwrap().path)
+                    .unwrap()
+                    .contains("second")
+            );
+            assert!(!lines.iter().any(|line| line.text.starts_with("  output:")));
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn interrupted_parallel_bash_outputs_keep_call_identity() {
+            let (server, registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            for id in ["first", "second", "unknown"] {
+                let path = registration.dir.join(format!("{id}.txt"));
+                tokio::fs::write(&path, id).await.unwrap();
+                if id != "unknown" {
+                    server.session.lock().await.add_tool_call_structured(
+                        "bash",
+                        &serde_json::json!({"command":"same"}),
+                        id,
+                        None,
+                    );
+                }
+                let artifact = persistent_artifact("live-tool-output", &path, id).unwrap();
+                server.mutable.lock().await.active_live_output.insert(
+                    id.into(),
+                    ActiveLiveOutput {
+                        artifact,
+                        path,
+                        started_at: Instant::now(),
+                    },
+                );
+            }
+            assert!(persist_interrupted_live_output(&server).await.unwrap());
+            let session = server.session.lock().await;
+            let results: Vec<_> = session
+                .messages
+                .iter()
+                .filter(|msg| msg.tool_result.is_some())
+                .collect();
+            assert_eq!(results.len(), 2);
+            for msg in results {
+                let id = &msg.tool_result.as_ref().unwrap().id;
+                assert!(msg.content.ends_with(id.as_str()));
+                assert_ne!(id, "unknown");
+            }
+            assert!(server.mutable.lock().await.active_live_output.is_empty());
+            drop(session);
+            assert!(!persist_interrupted_live_output(&server).await.unwrap());
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
         async fn interrupted_live_output_persists_tool_result() {
             let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
             let (server, registration, listener) = test_server(prompts);
@@ -7614,10 +7904,15 @@ mod imp {
                     Some("provider_1"),
                 );
             }
-            server.mutable.lock().await.active_live_output = Some(ActiveLiveOutput {
-                path,
-                started_at: Instant::now(),
-            });
+            let artifact = persistent_artifact("live-tool-output", &path, "hello").unwrap();
+            server.mutable.lock().await.active_live_output.insert(
+                "call_1".into(),
+                ActiveLiveOutput {
+                    artifact,
+                    path,
+                    started_at: Instant::now(),
+                },
+            );
 
             assert!(persist_interrupted_live_output(&server).await.unwrap());
 
@@ -7627,7 +7922,7 @@ mod imp {
             assert!(result.content.contains("partial bash output"));
             assert!(result.content.contains("hello\nhello"));
             assert_eq!(result.tool_result.as_ref().unwrap().id, "call_1");
-            assert!(server.mutable.lock().await.active_live_output.is_none());
+            assert!(server.mutable.lock().await.active_live_output.is_empty());
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
 
@@ -7954,6 +8249,7 @@ mod imp {
             let (registration, listener) = Registration::create(&session).unwrap();
             let socket_path = registration.socket_path.clone();
             let server = Arc::new(Server {
+                tool_render_lock: Mutex::new(()),
                 client: Mutex::new(client),
                 cli: Cli {
                     no_session: true,
@@ -7988,7 +8284,7 @@ mod imp {
                     next_permission_id: 1,
                     pending_permissions: HashMap::new(),
                     last_event_at: None,
-                    active_live_output: None,
+                    active_live_output: HashMap::new(),
                     active_response: None,
                     last_error: None,
                     finalizing: false,

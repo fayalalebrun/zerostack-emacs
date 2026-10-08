@@ -283,6 +283,8 @@ pub(crate) struct EditOp {
 
 #[derive(Deserialize)]
 pub struct BashArgs {
+    #[serde(default, rename = "__zerostack_call_id")]
+    pub(crate) call_id: Option<String>,
     pub command: String,
     pub timeout: Option<u64>,
     #[cfg(feature = "rtk")]

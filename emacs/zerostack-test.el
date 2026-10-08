@@ -1993,6 +1993,34 @@
             :lines ((:text "tool rendered by server" :face zs-tool))))
    (should (string-match-p "tool rendered by server" (buffer-string)))))
 
+(ert-deftest zerostack-test-parallel-tool-row-update-preserves-neighbors-and-input ()
+  (zerostack-test--with-buffer
+   (zerostack--replace-lines
+    0 '((:text "bash first" :face zs-tool :message-index 1 :role tool-call)
+        (:text "bash second" :face zs-tool :message-index 2 :role tool-call)
+        (:text "thinking" :face zs-reasoning)))
+   (goto-char (point-max))
+   (insert "draft")
+   (let ((offset (- (point) (marker-position zerostack--input-marker))))
+     (zerostack--handle-form
+      `(event :seq 1 :session "s" :type tool-row :message-index 1
+              :lines ((:text "bash(live output) first" :face zs-tool
+                       :message-index 1 :role tool-call
+                       :artifact ,zerostack-test--tool-artifact))))
+     (should (= (length zerostack--line-markers) 3))
+     (should (= (- (point) (marker-position zerostack--input-marker)) offset))
+     (should (string-match-p "bash(live output) first\nbash second\nthinking" (buffer-string)))
+     (should (equal (buffer-substring-no-properties zerostack--input-marker (point-max)) "draft"))
+     (save-excursion
+       (goto-char (car zerostack--line-markers))
+       (should (equal (get-text-property (point) 'zerostack-artifact)
+                      zerostack-test--tool-artifact)))
+     (zerostack--handle-form
+      '(event :seq 2 :session "s" :type tool-row :message-index 2
+              :lines ((:text "bash(output) second" :face zs-tool :message-index 2 :role tool-call))))
+     (should (string-match-p "bash(live output) first\nbash(output) second\nthinking" (buffer-string)))
+     (should (= (length zerostack--line-markers) 3)))))
+
 (ert-deftest zerostack-test-render-updates-preserve-current-input ()
   (zerostack-test--with-buffer
    (zerostack--replace-lines
