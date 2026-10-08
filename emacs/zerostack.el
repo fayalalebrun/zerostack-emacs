@@ -2822,12 +2822,48 @@ _o_ artifact                                              _R_ restart
   "Restart this buffer's zerostack daemon without closing the buffer."
   (interactive)
   (let ((args (or zerostack--server-args
-                  (and zerostack--session (list "--session" zerostack--session)))))
+                  (and zerostack--session (list "--session" zerostack--session))))
+        (pid (if (process-live-p zerostack--server-process)
+                 (process-id zerostack--server-process)
+               (and (process-live-p zerostack--process) zerostack--pid))))
+    (when (and (process-live-p zerostack--process) (not pid))
+      (user-error "Attached daemon has not reported its process id yet"))
+    (when (and pid (not (process-live-p zerostack--server-process)))
+      (unless (and (integerp pid) (> pid 1)
+                   zerostack--socket
+                   (equal (string-trim
+                           (let ((pid-file (expand-file-name
+                                            "pid" (file-name-directory zerostack--socket))))
+                             (with-temp-buffer
+                               (insert-file-contents pid-file)
+                               (buffer-string))))
+                          (number-to-string pid)))
+        (user-error "Cannot verify attached zerostack daemon identity"))
+      (unless (zerop (signal-process pid 'term))
+        (user-error "Could not stop attached zerostack daemon %s" pid)))
     (zerostack--delete-current-processes)
-    (setq zerostack--socket nil
-          zerostack--line-buffer "")
+    (setq zerostack--line-buffer "")
     (zerostack--append-local-line "restarting zerostack --emacs" 'zs-muted)
-    (zerostack--start-server args)))
+    (zerostack--restart-after-exit args pid (+ (float-time) 5))))
+
+(defun zerostack--restart-after-exit (args pid deadline)
+  "Start with ARGS after PID exits, waiting no longer than DEADLINE."
+  (setq zerostack--startup-timer nil)
+  (cond
+   ((and pid (process-attributes pid))
+    (if (>= (float-time) deadline)
+        (zerostack--append-local-line
+         "restart failed: daemon did not exit; no replacement started" 'zs-error)
+      (let ((buffer (current-buffer)))
+        (setq zerostack--startup-timer
+              (run-at-time 0.05 nil
+                           (lambda ()
+                             (when (buffer-live-p buffer)
+                               (with-current-buffer buffer
+                                 (zerostack--restart-after-exit args pid deadline)))))))))
+   (t
+    (setq zerostack--socket nil zerostack--pid nil)
+    (zerostack--start-server args))))
 
 ;;;###autoload
 (defun zerostack-restart-idle-sessions ()

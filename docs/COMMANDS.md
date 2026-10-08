@@ -638,7 +638,7 @@ Command menu actions:
 
 | Action | Description |
 | ------ | ----------- |
-| `restart` | Restart the current buffer's `zerostack --emacs` daemon and reconnect without closing the buffer. |
+| `restart` | Restart the current buffer's `zerostack --emacs` daemon and reconnect without closing the buffer, including externally attached sessions. Attached daemon PIDs are verified against their socket's registration; restart waits up to five seconds for exit before launching a replacement. |
 | `hydrate` | Rerun the current worktree's local `hydrate` hook asynchronously in a visible shell-command buffer. |
 | `view` | Change server-side markdown render width. |
 | `attach` | Add a file by path, attach image data from the clipboard, list queued attachments, or drop all queued attachments. |
