@@ -655,11 +655,7 @@ impl Session {
         if content.is_empty() && provider_reasoning.is_empty() {
             return false;
         }
-        let content = if content.is_empty() {
-            "[turn failed; partial provider reasoning captured]"
-        } else {
-            content
-        };
+
         self.add_message_with_reasoning(MessageRole::Assistant, content, provider_reasoning);
         true
     }

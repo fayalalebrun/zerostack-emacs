@@ -361,6 +361,28 @@ fn partial_assistant_output_is_preserved_with_reasoning() {
 }
 
 #[test]
+fn tool_only_assistant_output_preserves_replay_without_failure_text() {
+    let mut s = Session::new("openai-codex", "gpt", 128000);
+    let call = rig::message::ToolCall::new(
+        rig::message::CallId::from_wire("call-1"),
+        rig::message::ToolFunction {
+            name: rig::message::ToolName::new("read").unwrap(),
+            arguments: serde_json::from_value(serde_json::json!({"path":"test.txt"})).unwrap(),
+            invalid_arguments: None,
+        },
+    );
+    let message =
+        rig::message::AssistantMessage::new(vec![rig::message::AssistantContent::ToolCall(call)]);
+    let reasoning = vec![crate::session::ProviderReasoning::from_message(&message)];
+    assert!(s.add_partial_assistant_output("", reasoning.clone()));
+    assert!(s.messages[0].content.is_empty());
+    assert_eq!(s.messages[0].provider_reasoning, reasoning);
+    let loaded: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    assert!(loaded.messages[0].content.is_empty());
+    assert_eq!(loaded.messages[0].provider_reasoning, reasoning);
+}
+
+#[test]
 fn empty_partial_assistant_output_is_ignored() {
     let mut s = Session::new("openai", "gpt-4", 128000);
 
