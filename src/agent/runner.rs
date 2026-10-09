@@ -460,6 +460,23 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
                 let mut message =
                     assistant_message_with_reasoning(&msg.content, &msg.provider_reasoning);
                 if let Message::Assistant(turn) = &mut message
+                    && let Some(native) = msg
+                        .provider_reasoning
+                        .iter()
+                        .find_map(ProviderReasoning::native_message)
+                {
+                    for item in native.content {
+                        if let AssistantContent::ToolCall(call) = item
+                            && !replayed_tool_result_ids.contains(call.id.to_string().as_str())
+                        {
+                            turn.content.push(AssistantContent::Text(Text::new(format!(
+                                "[Interrupted tool call {} ({}): no recorded outcome. The command may have executed; verify its effects before retrying.]",
+                                call.id, call.function.name
+                            ))));
+                        }
+                    }
+                }
+                if let Message::Assistant(turn) = &mut message
                     && turn.origin.is_none()
                     && session.provider == "opencode-go"
                     && session.model.starts_with("deepseek-")
@@ -520,6 +537,8 @@ fn convert_history_inner(session: &Session) -> Vec<Message> {
         }
     }
 
+    messages
+        .retain(|message| !matches!(message, Message::Assistant(turn) if turn.content.is_empty()));
     messages
 }
 
@@ -2025,6 +2044,74 @@ mod tests {
         let history = convert_history(&session);
         assert_eq!(history.len(), 1);
         assert!(matches!(history[0], Message::User { .. }));
+    }
+
+    #[test]
+    fn convert_history_omits_empty_assistant_turns() {
+        let mut session = Session::new("openai-codex", "gpt-6.1-sol", 272000);
+        session.add_message(MessageRole::User, "continue");
+        let native = rig::message::AssistantMessage::new(Vec::new());
+        session.add_partial_assistant_output("", vec![ProviderReasoning::from_message(&native)]);
+        assert_eq!(convert_history(&session).len(), 1);
+    }
+
+    #[test]
+    fn convert_history_recovers_interrupted_native_tool_turn() {
+        for completed in [false, true] {
+            let mut session = Session::new("openai-codex", "gpt-6.1-sol", 272000);
+            session.add_message(MessageRole::User, "follow CI");
+            let calls = ["call_done", "call_pending"].map(|id| {
+                ToolCall::new(
+                    rig::message::CallId::from_wire(id),
+                    ToolFunction::new(
+                        rig::message::ToolName::new("bash").unwrap(),
+                        serde_json::json!({"command": "gh pr checks --watch"}),
+                    ),
+                )
+            });
+            let native = rig::message::AssistantMessage::new(
+                calls
+                    .into_iter()
+                    .map(AssistantContent::ToolCall)
+                    .collect::<Vec<_>>(),
+            );
+            session
+                .add_partial_assistant_output("", vec![ProviderReasoning::from_message(&native)]);
+            for id in ["call_done", "call_pending"] {
+                session.add_tool_call_structured(
+                    "bash",
+                    &serde_json::json!({"command": "gh pr checks --watch"}),
+                    id,
+                    None,
+                );
+            }
+            if completed {
+                session.add_tool_result_structured("bash", "passed", "call_done", None);
+            }
+            let session: Session =
+                serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+            let history = convert_history(&session);
+            let Message::Assistant(turn) = &history[1] else {
+                panic!("assistant");
+            };
+            assert!(turn.content.iter().any(|item| matches!(item, AssistantContent::Text(text) if text.text.contains("no recorded outcome"))));
+            assert_eq!(
+                turn.content
+                    .iter()
+                    .filter(|item| matches!(item, AssistantContent::ToolCall(_)))
+                    .count(),
+                usize::from(completed)
+            );
+            assert_eq!(history.len(), if completed { 3 } else { 2 });
+            assert_eq!(
+                session.messages.last().unwrap().role,
+                if completed {
+                    MessageRole::ToolResult
+                } else {
+                    MessageRole::ToolCall
+                }
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,12 @@ All slash commands are available from the TUI input prompt.
 | `/history` | Show global chat history (last 10 entries across sessions). |
 | `/fork [message-index]` | Fork the current conversation into a new session before a selected user message, or before `message-index`. |
 
+Resuming an interrupted session preserves completed tool calls and results.
+Native tool calls without a recorded result are replayed as an interruption
+notice, not executed automatically: a command may already have had side effects.
+Empty assistant turns are omitted from provider history; the saved transcript
+is left unchanged.
+
 ## Provider & Model
 
 | Command | Description |
