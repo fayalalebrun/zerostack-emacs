@@ -226,6 +226,7 @@ pub async fn handle_agent_event(
             images: _result_images,
             loaded_context,
             duration_ms,
+            is_error,
             ..
         } => {
             session.add_tool_result_structured_with_context(
@@ -236,6 +237,17 @@ pub async fn handle_agent_event(
                 loaded_context,
                 duration_ms,
             );
+            if let Some(result) = session
+                .messages
+                .last_mut()
+                .and_then(|message| message.tool_result.as_mut())
+            {
+                result.status = Some(if is_error {
+                    crate::session::ToolResultStatus::Failed
+                } else {
+                    crate::session::ToolResultStatus::Complete
+                });
+            }
             #[cfg(feature = "multimodal")]
             {
                 let session_id = session.id.clone();

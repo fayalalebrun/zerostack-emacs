@@ -80,6 +80,7 @@ mod imp {
 
     struct Server {
         tool_render_lock: Mutex<()>,
+        activity: Mutex<ActivityState>,
         client: Mutex<AnyClient>,
         cli: Cli,
         cfg: Config,
@@ -238,6 +239,179 @@ mod imp {
         bytes: usize,
         preview: String,
         ephemeral: bool,
+    }
+
+    #[derive(Default)]
+    struct ActivityState {
+        session_id: String,
+        message_count: usize,
+        compactions: usize,
+        current: Option<String>,
+        groups: HashMap<String, ActivityLog>,
+        calls: HashMap<String, String>,
+        pending_groups: std::collections::HashSet<String>,
+        dirty: std::collections::HashSet<String>,
+        next_flush: Option<Instant>,
+    }
+
+    impl ActivityState {
+        fn mark_dirty(&mut self, key: String) {
+            self.dirty.insert(key);
+            self.next_flush
+                .get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
+        }
+
+        fn sync_session(&mut self, session: &Session) {
+            if self.session_id != session.id.as_str()
+                || session.messages.len() < self.message_count
+                || session.compactions.len() != self.compactions
+            {
+                *self = Self {
+                    session_id: session.id.to_string(),
+                    ..Default::default()
+                };
+            }
+            self.message_count = session.messages.len();
+            self.compactions = session.compactions.len();
+        }
+    }
+
+    struct ActivityLog {
+        artifact: ArtifactInfo,
+        message_index: usize,
+        calls: usize,
+        pending: HashMap<String, String>,
+        results: std::collections::HashSet<String>,
+        failed: usize,
+        unknown: usize,
+        interrupted: std::collections::HashSet<String>,
+        exceptions: HashMap<String, Vec<WireLine>>,
+    }
+
+    impl ActivityLog {
+        fn row(&self) -> WireLine {
+            let text = if self.pending.len() == 1 {
+                format!(
+                    "⟳ {} · {} completed",
+                    self.pending.values().next().unwrap(),
+                    self.calls - 1
+                )
+            } else if !self.pending.is_empty() {
+                format!("◈ {} calls · {} running", self.calls, self.pending.len())
+            } else {
+                let status = if !self.interrupted.is_empty() {
+                    "stopped"
+                } else if self.unknown > 0 {
+                    "returned · outcomes unknown"
+                } else {
+                    "complete"
+                };
+                format!("◈ {} calls · {status}", self.calls)
+            };
+            let failures = if self.failed > 0 {
+                format!(" · {} failed", self.failed)
+            } else {
+                String::new()
+            };
+            let interrupted = if !self.interrupted.is_empty() {
+                format!(" · {} interrupted", self.interrupted.len())
+            } else {
+                String::new()
+            };
+            WireLine::with_artifact(
+                format!("{text}{failures}{interrupted}  [activity]"),
+                if self.failed > 0 || !self.interrupted.is_empty() {
+                    "zs-error"
+                } else {
+                    "zs-muted"
+                },
+                self.artifact.clone(),
+            )
+            .with_source(self.message_index, MessageRole::ToolCall)
+        }
+
+        async fn add_call(
+            &mut self,
+            id: &str,
+            summary: &str,
+            args: &serde_json::Value,
+        ) -> anyhow::Result<()> {
+            if self.pending.contains_key(id)
+                || self.results.contains(id)
+                || self.interrupted.contains(id)
+            {
+                return Ok(());
+            }
+            self.append_record(format!(
+                "(:id {} :summary {} :arguments {})",
+                sexp_quote(id),
+                sexp_quote(&sanitize_output(summary)),
+                sexp_quote(&args.to_string())
+            ))
+            .await?;
+            self.calls += 1;
+            let label = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+            let short: String = label.chars().take(40).collect();
+            self.pending.insert(
+                id.to_string(),
+                if label.chars().count() > 40 {
+                    format!("{short}…")
+                } else {
+                    short
+                },
+            );
+            Ok(())
+        }
+
+        async fn add_result(
+            &mut self,
+            result: &crate::session::SessionToolResult,
+            lines: &[WireLine],
+        ) -> anyhow::Result<()> {
+            if self.results.contains(result.id.as_str()) {
+                return Ok(());
+            }
+            let status = match result.status {
+                Some(crate::session::ToolResultStatus::Complete) => "complete",
+                Some(crate::session::ToolResultStatus::Failed) => "failed",
+                Some(crate::session::ToolResultStatus::Interrupted) => "interrupted",
+                None => "unknown",
+            };
+            self.append_record(format!(
+                "(:id {} :status {status} :duration-ms {} :lines {})",
+                sexp_quote(&result.id),
+                result.duration_ms,
+                lines_to_sexp(lines)
+            ))
+            .await?;
+            self.pending.remove(result.id.as_str());
+            self.results.insert(result.id.to_string());
+            self.failed +=
+                usize::from(result.status == Some(crate::session::ToolResultStatus::Failed));
+            self.unknown += usize::from(result.status.is_none());
+            if result.status == Some(crate::session::ToolResultStatus::Interrupted) {
+                self.interrupted.insert(result.id.to_string());
+            } else {
+                self.interrupted.remove(result.id.as_str());
+            }
+            Ok(())
+        }
+
+        async fn append_record(&mut self, record: String) -> anyhow::Result<()> {
+            let record = format!("{record}\n");
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&self.artifact.path)
+                .await?;
+            file.write_all(record.as_bytes()).await?;
+            file.flush().await?;
+            self.artifact.bytes += record.len();
+            Ok(())
+        }
+    }
+
+    fn compact_activity_tool(name: &str) -> bool {
+        !matches!(name, "task" | "goal_update" | "todo_write")
     }
 
     struct RenderedToolResult {
@@ -624,6 +798,7 @@ mod imp {
         let registry_dir = registration.dir.clone();
         let server = Arc::new(Server {
             tool_render_lock: Mutex::new(()),
+            activity: Mutex::new(ActivityState::default()),
             client: Mutex::new(client),
             cli,
             cfg,
@@ -1254,6 +1429,7 @@ mod imp {
 
     fn spawn_session_latex_render(server: Arc<Server>, cols: usize) {
         tokio::spawn(async move {
+            let _render_guard = server.tool_render_lock.lock().await;
             let session = server.session.lock().await.clone();
             let options = MdOptions::ENABLE_STRIKETHROUGH
                 | MdOptions::ENABLE_TABLES
@@ -1272,7 +1448,7 @@ mod imp {
                 &context,
                 cols,
                 Some(&server),
-                true,
+                SessionRenderView::CompactWithLatex,
             )
             .await;
             let unchanged =
@@ -2907,6 +3083,13 @@ mod imp {
                     Vec::new(),
                     duration_ms,
                 );
+                if let Some(result) = session
+                    .messages
+                    .last_mut()
+                    .and_then(|message| message.tool_result.as_mut())
+                {
+                    result.status = Some(crate::session::ToolResultStatus::Interrupted);
+                }
                 if !server.cli.no_session {
                     crate::session::storage::save_session(&session)?;
                 }
@@ -2917,7 +3100,7 @@ mod imp {
                     .clone()
             };
             let turn = server.mutable.lock().await.turn;
-            emit_tool_result_message(server, turn, &message).await;
+            emit_tool_result_message(server, turn, &message).await?;
             persisted = true;
         }
         Ok(persisted)
@@ -2968,6 +3151,8 @@ mod imp {
         if aborted {
             let _ = persist_interrupted_live_output(server).await?;
             let _ = persist_partial_assistant_output(server, &partial_response, Vec::new()).await?;
+            let turn = server.mutable.lock().await.turn;
+            interrupt_activity(server, turn).await;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -3039,7 +3224,10 @@ mod imp {
         }
         if aborted {
             server.sandbox.kill_active();
+            let _ = persist_interrupted_live_output(server).await;
             let _ = persist_partial_assistant_output(server, &partial_response, Vec::new()).await;
+            let turn = server.mutable.lock().await.turn;
+            interrupt_activity(server, turn).await;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
             }
@@ -3279,6 +3467,7 @@ mod imp {
             }
         };
         if cleared_current_turn {
+            interrupt_activity(&server, turn).await;
             server.update_meta_from_session().await;
             if let Some(ss) = server.status_signals.as_ref() {
                 ss.send_stop();
@@ -3477,6 +3666,7 @@ mod imp {
             mutable.active_response = Some((turn, String::new()));
         }
 
+        server.activity.lock().await.current = None;
         let mut response_buf = String::new();
         let mut response_start_line: Option<usize> = None;
         let mut stream_render = StreamRenderState::new(Instant::now());
@@ -3486,18 +3676,27 @@ mod imp {
         let mut continued_after_auto_compact = false;
 
         loop {
-            let event = if stream_render.dirty {
+            let activity_deadline = server.activity.lock().await.next_flush;
+            let deadline = match (stream_render.dirty, activity_deadline) {
+                (true, Some(deadline)) => Some(stream_render.next_flush.min(deadline)),
+                (true, None) => Some(stream_render.next_flush),
+                (false, deadline) => deadline,
+            };
+            let event = if let Some(deadline) = deadline {
                 tokio::select! {
                     event = runner.event_rx.recv() => event,
-                    _ = tokio::time::sleep_until(stream_render.next_flush.into()) => {
-                        flush_streamed_response(
-                            &server,
-                            turn,
-                            assistant_index,
-                            &response_buf,
-                            &mut response_start_line,
-                            &mut stream_render,
-                        ).await;
+                    _ = tokio::time::sleep_until(deadline.into()) => {
+                        if stream_render.flush_due(Instant::now()) {
+                            flush_streamed_response(
+                                &server,
+                                turn,
+                                assistant_index,
+                                &response_buf,
+                                &mut response_start_line,
+                                &mut stream_render,
+                            ).await;
+                        }
+                        flush_activity_rows(&server, turn, false).await;
                         continue;
                     }
                 }
@@ -3517,6 +3716,14 @@ mod imp {
                     &mut stream_render,
                 )
                 .await;
+            }
+            if !matches!(
+                &event,
+                AgentEvent::ToolCall { .. }
+                    | AgentEvent::ToolResult { .. }
+                    | AgentEvent::Reasoning(_)
+            ) {
+                flush_activity_rows(&server, turn, true).await;
             }
             match event {
                 AgentEvent::Reasoning(text) => {
@@ -3577,6 +3784,7 @@ mod imp {
                     if safe.is_empty() {
                         continue;
                     }
+                    server.activity.lock().await.current = None;
                     response_buf.push_str(&safe);
                     {
                         let mut mutable = server.mutable.lock().await;
@@ -3645,7 +3853,13 @@ mod imp {
                     response_buf.clear();
                     response_start_line = None;
                     stream_render.reset(Instant::now());
-                    if name != "task" {
+                    if compact_activity_tool(&name) {
+                        start_activity_call(&server, turn, message_index, &id, &summary, &args)
+                            .await?;
+                    } else {
+                        server.activity.lock().await.current = None;
+                    }
+                    if name != "task" && !compact_activity_tool(&name) {
                         server
                             .append_lines(
                                 "tool-render",
@@ -3663,6 +3877,8 @@ mod imp {
                                 }],
                             )
                             .await;
+                    }
+                    if name != "task" {
                         server
                             .broadcast_event(
                                 "tool-call",
@@ -3678,6 +3894,7 @@ mod imp {
                     }
                 }
                 AgentEvent::SubagentToolCall { name, args } => {
+                    server.activity.lock().await.current = None;
                     let summary = format_tool_call_summary(&name, &args);
                     {
                         let mut session = server.session.lock().await;
@@ -3717,6 +3934,7 @@ mod imp {
                     loaded_context,
                     duration_ms,
                     display_artifact,
+                    is_error,
                 } => {
                     if name == "bash" {
                         server
@@ -3736,6 +3954,17 @@ mod imp {
                             loaded_context,
                             duration_ms,
                         );
+                        if let Some(result) = session
+                            .messages
+                            .last_mut()
+                            .and_then(|message| message.tool_result.as_mut())
+                        {
+                            result.status = Some(if is_error {
+                                crate::session::ToolResultStatus::Failed
+                            } else {
+                                crate::session::ToolResultStatus::Complete
+                            });
+                        }
                         #[cfg(feature = "multimodal")]
                         {
                             let session_id = session.id.clone();
@@ -3783,7 +4012,7 @@ mod imp {
                             .expect("tool result was added")
                             .clone()
                     };
-                    emit_tool_result_message(&server, turn, &message).await;
+                    emit_tool_result_message(&server, turn, &message).await?;
                 }
                 AgentEvent::Retry {
                     attempt,
@@ -4357,6 +4586,7 @@ mod imp {
     }
 
     async fn render_session_lines(server: &Arc<Server>, cols: usize) -> Vec<WireLine> {
+        let _render_guard = server.tool_render_lock.lock().await;
         let session = server.session.lock().await.clone();
         let assistant_index = session.messages.len();
         let context = server.context.lock().await.clone();
@@ -4367,7 +4597,7 @@ mod imp {
             &context,
             cols,
             Some(server),
-            false,
+            SessionRenderView::Compact,
         )
         .await;
         let active_response = server.mutable.lock().await.active_response.clone();
@@ -4383,6 +4613,119 @@ mod imp {
         lines
     }
 
+    async fn render_activity_message(
+        server: &Arc<Server>,
+        session: &Session,
+        index: usize,
+        results: &HashMap<&str, usize>,
+        current: &mut Option<String>,
+        positions: &mut HashMap<String, usize>,
+        out: &mut Vec<WireLine>,
+    ) -> anyhow::Result<bool> {
+        let msg = &session.messages[index];
+        if let Some(call) = msg.tool_call.as_ref()
+            && compact_activity_tool(&call.name)
+        {
+            let running = server.mutable.lock().await.running;
+            let mut activity = server.activity.lock().await;
+            let key = if let Some(key) = activity.calls.get(call.id.as_str()).cloned() {
+                *current = Some(key.clone());
+                key
+            } else {
+                current.get_or_insert_with(|| call.id.to_string()).clone()
+            };
+            let live = running
+                && activity
+                    .groups
+                    .get(&key)
+                    .is_some_and(|log| log.pending.contains_key(call.id.as_str()));
+            if !activity.groups.contains_key(&key) {
+                activity.groups.insert(
+                    key.clone(),
+                    ActivityLog {
+                        artifact: server
+                            .create_artifact(
+                                0,
+                                "activity-log",
+                                &format!("activity-{}", uuid::Uuid::new_v4()),
+                                "",
+                            )
+                            .await?,
+                        message_index: index,
+                        calls: 0,
+                        pending: Default::default(),
+                        results: Default::default(),
+                        failed: 0,
+                        unknown: 0,
+                        interrupted: Default::default(),
+                        exceptions: Default::default(),
+                    },
+                );
+            }
+            activity.calls.insert(call.id.to_string(), key.clone());
+            let log = activity.groups.get_mut(&key).unwrap();
+            log.add_call(&call.id, &msg.content, &call.arguments)
+                .await?;
+            if !results.contains_key(call.id.as_str()) && !live {
+                log.pending.remove(call.id.as_str());
+                if log.interrupted.insert(call.id.to_string()) {
+                    log.append_record(format!(
+                        "(:id {} :status interrupted)",
+                        sexp_quote(&call.id)
+                    ))
+                    .await?;
+                }
+            }
+            let position = *positions.entry(key).or_insert_with(|| {
+                log.message_index = index;
+                out.push(log.row());
+                out.len() - 1
+            });
+            out[position] = log.row();
+            return Ok(true);
+        }
+        if let Some(result) = msg.tool_result.as_ref() {
+            let mut activity = server.activity.lock().await;
+            if let Some(key) = activity.calls.get(result.id.as_str()).cloned()
+                && let Some(&position) = positions.get(&key)
+                && let Some(log) = activity.groups.get_mut(&key)
+            {
+                if !log.results.contains(result.id.as_str()) {
+                    let rendered = render_tool_result_message(msg, Some(server), 0).await;
+                    log.add_result(result, &rendered.lines).await?;
+                    let exceptions = tool_exception_lines(msg, rendered.artifact);
+                    if !exceptions.is_empty() {
+                        log.exceptions.insert(result.id.to_string(), exceptions);
+                    }
+                }
+                out[position] = log.row();
+                if let Some(exceptions) = log.exceptions.get(result.id.as_str()) {
+                    out.extend(
+                        exceptions
+                            .iter()
+                            .cloned()
+                            .map(|line| line.with_source(index, msg.role)),
+                    );
+                }
+                if log.pending.is_empty() {
+                    activity.pending_groups.remove(&key);
+                }
+                return Ok(true);
+            }
+        }
+        if msg.role != MessageRole::ToolResult {
+            *current = None;
+        }
+        Ok(false)
+    }
+
+    #[derive(Clone, Copy)]
+    enum SessionRenderView {
+        Detailed,
+        Compact,
+        CompactWithLatex,
+    }
+
     async fn render_session_lines_for(
         session: &Session,
         cli: &Cli,
@@ -4390,8 +4733,15 @@ mod imp {
         context: &ContextFiles,
         cols: usize,
         server: Option<&Arc<Server>>,
-        include_latex: bool,
+        view: SessionRenderView,
     ) -> Vec<WireLine> {
+        let view = if server.is_none() {
+            SessionRenderView::Detailed
+        } else {
+            view
+        };
+        let include_latex = matches!(view, SessionRenderView::CompactWithLatex);
+        let compact = !matches!(view, SessionRenderView::Detailed);
         let mut out = Vec::new();
         if context.agents.is_some() {
             out.push(WireLine::new("[system] loaded AGENTS.md", "zs-muted"));
@@ -4432,11 +4782,39 @@ mod imp {
             })
             .collect();
         let mut grouped_results = std::collections::HashSet::new();
+        let mut activity_group = None;
+        let mut activity_positions = HashMap::new();
+        if compact && let Some(server) = server {
+            server.activity.lock().await.sync_session(session);
+        }
         for (message_index, msg) in session.messages.iter().enumerate() {
             if grouped_results.contains(&message_index)
                 || (msg.role == MessageRole::Assistant && msg.content.is_empty())
             {
                 continue;
+            }
+            if compact && let Some(server) = server {
+                match render_activity_message(
+                    server,
+                    session,
+                    message_index,
+                    &results,
+                    &mut activity_group,
+                    &mut activity_positions,
+                    &mut out,
+                )
+                .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!("failed to render compact activity: {error}");
+                        out.push(WireLine::new(
+                            format!("activity details unavailable: {error}"),
+                            "zs-error",
+                        ));
+                    }
+                }
             }
             if let Some(call) = msg.tool_call.as_ref()
                 && call.name != "task"
@@ -4597,6 +4975,128 @@ mod imp {
         }
     }
 
+    async fn start_activity_call(
+        server: &Arc<Server>,
+        turn: u64,
+        message_index: usize,
+        id: &str,
+        summary: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let session = server.session.lock().await;
+        let mut activity = server.activity.lock().await;
+        activity.sync_session(&session);
+        drop(session);
+        let key = activity.current.clone().unwrap_or_else(|| id.to_string());
+        let first = !activity.groups.contains_key(&key);
+        if first {
+            activity.groups.insert(
+                key.clone(),
+                ActivityLog {
+                    artifact: server
+                        .create_artifact(
+                            turn,
+                            "activity-log",
+                            &format!("activity-{}", uuid::Uuid::new_v4()),
+                            "",
+                        )
+                        .await?,
+                    message_index,
+                    calls: 0,
+                    pending: Default::default(),
+                    results: Default::default(),
+                    failed: 0,
+                    unknown: 0,
+                    interrupted: Default::default(),
+                    exceptions: Default::default(),
+                },
+            );
+        }
+        activity.current = Some(key.clone());
+        activity.calls.insert(id.to_string(), key.clone());
+        let log = activity.groups.get_mut(&key).unwrap();
+        log.add_call(id, summary, args).await?;
+        let live = server
+            .mutable
+            .lock()
+            .await
+            .active_live_output
+            .get(id)
+            .map(|live| live.artifact.clone());
+        if let Some(artifact) = live {
+            log.append_record(format!(
+                "(:id {} :lines {})",
+                sexp_quote(id),
+                lines_to_sexp(&[WireLine::with_artifact("live output", "zs-link", artifact)])
+            ))
+            .await?;
+        }
+        if first {
+            server
+                .append_lines("tool-render", turn, vec![log.row()])
+                .await;
+        } else {
+            activity.mark_dirty(key.clone());
+        }
+        activity.pending_groups.insert(key);
+        Ok(())
+    }
+
+    async fn interrupt_activity(server: &Server, turn: u64) {
+        let mut activity = server.activity.lock().await;
+        activity.current = None;
+        let pending = std::mem::take(&mut activity.pending_groups);
+        for key in pending {
+            if let Some(log) = activity.groups.get_mut(&key)
+                && !log.pending.is_empty()
+            {
+                let ids: Vec<_> = log.pending.keys().cloned().collect();
+                log.interrupted
+                    .extend(log.pending.drain().map(|(id, _)| id));
+                if let Err(error) = log
+                    .append_record(format!("(:interrupted {})", string_list_to_sexp(&ids)))
+                    .await
+                {
+                    tracing::warn!("failed to append interrupted activity: {error}");
+                }
+                activity.mark_dirty(key);
+            }
+        }
+        drop(activity);
+        flush_activity_rows(server, turn, true).await;
+    }
+
+    async fn flush_activity_rows(server: &Server, turn: u64, force: bool) {
+        let mut activity = server.activity.lock().await;
+        if !force
+            && activity
+                .next_flush
+                .is_none_or(|deadline| Instant::now() < deadline)
+        {
+            return;
+        }
+        let dirty = std::mem::take(&mut activity.dirty);
+        activity.next_flush = None;
+        for key in dirty {
+            if let Some(log) = activity.groups.get(&key) {
+                update_activity_row(server, turn, log).await;
+            }
+        }
+    }
+
+    async fn update_activity_row(server: &Server, turn: u64, log: &ActivityLog) {
+        server
+            .broadcast_event(
+                "activity-row",
+                format!(
+                    " :turn {turn} :message-index {} :lines {}",
+                    log.message_index,
+                    lines_to_sexp(&[log.row()])
+                ),
+            )
+            .await;
+    }
+
     fn tool_call_row(summary: &str, artifact: Option<ArtifactInfo>, label: &str) -> WireLine {
         let summary = sanitize_output(summary);
         match artifact {
@@ -4621,6 +5121,27 @@ mod imp {
         artifact: Option<ArtifactInfo>,
         label: &str,
     ) -> bool {
+        {
+            let mut activity = server.activity.lock().await;
+            if let Some(key) = activity.calls.get(id).cloned()
+                && let Some(log) = activity.groups.get_mut(&key)
+            {
+                if let Some(artifact) = artifact {
+                    let line = WireLine::with_artifact(format!("  {label}"), "zs-link", artifact);
+                    if let Err(error) = log
+                        .append_record(format!(
+                            "(:id {} :lines {})",
+                            sexp_quote(id),
+                            lines_to_sexp(&[line])
+                        ))
+                        .await
+                    {
+                        tracing::warn!("failed to append live activity output: {error}");
+                    }
+                }
+                return true;
+            }
+        }
         let call = server
             .session
             .lock()
@@ -4655,10 +5176,32 @@ mod imp {
         server: &Arc<Server>,
         turn: u64,
         msg: &crate::session::SessionMessage,
-    ) {
+    ) -> anyhow::Result<()> {
         let rendered = render_tool_result_message(msg, Some(server), turn).await;
         let _render_guard = server.tool_render_lock.lock().await;
-        let grouped = if let Some(result) = msg.tool_result.as_ref()
+        let mut compact = false;
+        if let Some(result) = msg.tool_result.as_ref() {
+            let session = server.session.lock().await;
+            let mut activity = server.activity.lock().await;
+            activity.sync_session(&session);
+            drop(session);
+            if let Some(key) = activity.calls.get(result.id.as_str()).cloned()
+                && let Some(log) = activity.groups.get_mut(&key)
+            {
+                log.add_result(result, &rendered.lines).await?;
+                let exceptions = tool_exception_lines(msg, rendered.artifact.clone());
+                if !exceptions.is_empty() {
+                    log.exceptions.insert(result.id.to_string(), exceptions);
+                }
+                if log.pending.is_empty() {
+                    activity.pending_groups.remove(&key);
+                }
+                activity.mark_dirty(key);
+                compact = true;
+            }
+        }
+        let grouped = if !compact
+            && let Some(result) = msg.tool_result.as_ref()
             && result.name != "task"
             && result.name != "goal_update"
             && rendered.artifact.is_some()
@@ -4678,7 +5221,9 @@ mod imp {
         } else {
             false
         };
-        let lines = if grouped {
+        let lines = if compact {
+            tool_exception_lines(msg, rendered.artifact.clone())
+        } else if grouped {
             rendered
                 .lines
                 .into_iter()
@@ -4699,8 +5244,9 @@ mod imp {
             .broadcast_event(
                 "tool-result",
                 format!(
-                    " :turn {} :name {} :chars {} :preview {}{}",
+                    " :turn {} :compact {} :name {} :chars {} :preview {}{}",
                     turn,
+                    bool_atom(compact),
                     sexp_quote(name),
                     rendered.content.chars().count(),
                     sexp_quote(&preview_text(&rendered.content)),
@@ -4708,6 +5254,26 @@ mod imp {
                 ),
             )
             .await;
+        Ok(())
+    }
+
+    fn tool_exception_lines(
+        msg: &crate::session::SessionMessage,
+        artifact: Option<ArtifactInfo>,
+    ) -> Vec<WireLine> {
+        let Some(result) = msg.tool_result.as_ref() else {
+            return Vec::new();
+        };
+        let label = match result.status {
+            Some(crate::session::ToolResultStatus::Failed) => "failed",
+            Some(crate::session::ToolResultStatus::Interrupted) => "interrupted",
+            _ => return Vec::new(),
+        };
+        let text = format!("✗ {} · {label}  [output]", sanitize_output(&result.name));
+        vec![match artifact {
+            Some(artifact) => WireLine::with_artifact(text, "zs-error", artifact),
+            None => WireLine::new(text, "zs-error"),
+        }]
     }
 
     async fn render_tool_result_message(
@@ -6940,8 +7506,16 @@ mod imp {
             let cli = Cli::default();
             let cfg = Config::default();
             let context = crate::context::load(true);
-            let lines =
-                render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await;
+            let lines = render_session_lines_for(
+                &session,
+                &cli,
+                &cfg,
+                &context,
+                100,
+                None,
+                SessionRenderView::Detailed,
+            )
+            .await;
             let encoded = lines_to_sexp(&lines);
 
             assert!(encoded.contains(":message-index 0 :role user"));
@@ -6981,7 +7555,16 @@ mod imp {
             let cfg = Config::default();
             let context = crate::context::load(true);
             let encoded = lines_to_sexp(
-                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await,
+                &render_session_lines_for(
+                    &session,
+                    &cli,
+                    &cfg,
+                    &context,
+                    100,
+                    None,
+                    SessionRenderView::Detailed,
+                )
+                .await,
             );
 
             assert!(encoded.contains("thinking:12k"));
@@ -6998,7 +7581,16 @@ mod imp {
             let cfg = Config::default();
             let context = crate::context::load(true);
             let encoded = lines_to_sexp(
-                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await,
+                &render_session_lines_for(
+                    &session,
+                    &cli,
+                    &cfg,
+                    &context,
+                    100,
+                    None,
+                    SessionRenderView::Detailed,
+                )
+                .await,
             );
 
             assert!(encoded.contains("── compacted history ──"));
@@ -7023,7 +7615,16 @@ mod imp {
             let cfg = Config::default();
             let context = crate::context::load(true);
             let encoded = lines_to_sexp(
-                &render_session_lines_for(&session, &cli, &cfg, &context, 100, None, false).await,
+                &render_session_lines_for(
+                    &session,
+                    &cli,
+                    &cfg,
+                    &context,
+                    100,
+                    None,
+                    SessionRenderView::Detailed,
+                )
+                .await,
             );
 
             assert!(encoded.contains(":role tool-call"));
@@ -7852,6 +8453,216 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn compact_activity_appends_details_and_updates_one_row() {
+            let (server, registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            let mut events = server.events.subscribe();
+            start_activity_call(
+                &server,
+                1,
+                7,
+                "a",
+                "read file.rs",
+                &serde_json::json!({"path":"file.rs"}),
+            )
+            .await
+            .unwrap();
+            assert!(events.recv().await.unwrap().contains(":type tool-render"));
+            start_activity_call(
+                &server,
+                1,
+                8,
+                "b",
+                "grep timeout",
+                &serde_json::json!({"pattern":"timeout"}),
+            )
+            .await
+            .unwrap();
+            assert!(events.try_recv().is_err());
+            flush_activity_rows(&server, 1, true).await;
+            let event = events.recv().await.unwrap();
+            assert!(event.contains(":type activity-row"));
+            assert!(event.contains(":message-index 7"));
+            assert!(event.contains("2 calls · 2 running"));
+            assert_eq!(server.mutable.lock().await.line_count, 1);
+            let mut activity = server.activity.lock().await;
+            let log = activity.groups.get_mut("a").unwrap();
+            log.append_record(lines_to_sexp(&[WireLine::new("finished b", "zs-muted")]))
+                .await
+                .unwrap();
+            log.pending.remove("b");
+            log.pending.remove("a");
+            update_activity_row(&server, 1, log).await;
+            assert!(events.recv().await.unwrap().contains("2 calls · complete"));
+            let text = tokio::fs::read_to_string(&log.artifact.path).await.unwrap();
+            assert!(text.contains("read file.rs"));
+            assert!(text.contains("grep timeout"));
+            assert!(text.contains("finished b"));
+            assert_eq!(log.artifact.bytes, text.len());
+            log.artifact.path = registration.dir.join("missing").join("log");
+            assert!(
+                log.append_record(lines_to_sexp(&[blank_line()]))
+                    .await
+                    .is_err()
+            );
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[test]
+        fn compact_activity_keeps_progress_and_subagent_tools_inline() {
+            for name in [
+                "read",
+                "grep",
+                "find_files",
+                "list_dir",
+                "code_search",
+                "bash",
+                "write",
+                "edit",
+                "mcp_tool",
+            ] {
+                assert!(compact_activity_tool(name));
+            }
+            for name in ["task", "goal_update", "todo_write"] {
+                assert!(!compact_activity_tool(name));
+            }
+        }
+
+        #[tokio::test]
+        async fn compact_activity_history_keeps_edits_prose_and_missing_results() {
+            let (server, registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            let patch = registration.dir.join("change.diff");
+            tokio::fs::write(&patch, "@@\n-old\n+new\n").await.unwrap();
+            {
+                let mut session = server.session.lock().await;
+                session.add_tool_call_structured(
+                    "edit",
+                    &serde_json::json!({"path":"file.rs", "block":"full edit arguments"}),
+                    "edit-a",
+                    None,
+                );
+                session.add_tool_result_structured("edit", "edited", "edit-a", None);
+                let result = session
+                    .messages
+                    .last_mut()
+                    .unwrap()
+                    .tool_result
+                    .as_mut()
+                    .unwrap();
+                result.status = Some(crate::session::ToolResultStatus::Complete);
+                result.display_path = Some(patch.to_string_lossy().as_ref().into());
+                session.add_message(MessageRole::Assistant, "Between phases");
+                session.add_tool_call_structured(
+                    "bash",
+                    &serde_json::json!({"command":"cargo test"}),
+                    "bash-b",
+                    None,
+                );
+            }
+            let lines = render_session_lines(&server, 100).await;
+            let rows: Vec<_> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| {
+                    line.artifact
+                        .as_ref()
+                        .is_some_and(|artifact| artifact.kind == "activity-log")
+                })
+                .collect();
+            assert_eq!(rows.len(), 2);
+            assert!(rows[0].1.text.contains("complete"));
+            assert!(rows[1].1.text.contains("stopped"));
+            assert!(rows[1].1.text.contains("1 interrupted"));
+            let prose = lines
+                .iter()
+                .position(|line| line.text.contains("Between phases"))
+                .unwrap();
+            assert!(rows[0].0 < prose && prose < rows[1].0);
+            let path = &rows[0].1.artifact.as_ref().unwrap().path;
+            let original = tokio::fs::read_to_string(path).await.unwrap();
+            assert!(original.contains("full edit arguments"));
+            assert!(original.contains(patch.to_str().unwrap()));
+            assert!(original.contains(":status complete"));
+            assert_eq!(render_session_lines(&server, 100).await, lines);
+            assert_eq!(tokio::fs::read_to_string(path).await.unwrap(), original);
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn compact_activity_socket_roundtrip_keeps_failures_visible_and_reuses_log() {
+            let (server, registration, listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            let connection_server = server.clone();
+            let task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                handle_client(connection_server, stream).await;
+            });
+            let stream = tokio::net::UnixStream::connect(&registration.socket_path)
+                .await
+                .unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader).lines();
+            read_until(&mut reader, "ready", Duration::from_secs(5)).await;
+            writer
+                .write_all(b"(prompt :request 1 :text \"activity\")\n")
+                .await
+                .unwrap();
+            let mut events = Vec::new();
+            loop {
+                let event = timeout(Duration::from_secs(5), reader.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let done = event.contains(":type done");
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.contains(":type activity-row"))
+                    .count(),
+                1
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.contains("2 calls · complete · 1 failed"))
+            );
+            assert!(events.iter().any(|event| event.contains("✗ bash · failed")));
+            assert!(!events.iter().any(|event| event.contains("(:text \"◈ read")));
+            let path = server.activity.lock().await.groups["read-a"]
+                .artifact
+                .path
+                .clone();
+            let original = tokio::fs::read(&path).await.unwrap();
+            writer.write_all(b"(attach :request 2)\n").await.unwrap();
+            let restored =
+                read_until(&mut reader, ":type session-render", Duration::from_secs(5)).await;
+            assert!(restored.contains("2 calls · complete · 1 failed"));
+            assert!(restored.contains("✗ bash · failed"));
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), original);
+            let session = server.session.lock().await;
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .filter_map(|msg| msg.tool_result.as_ref())
+                    .find(|result| result.name == "bash")
+                    .unwrap()
+                    .status,
+                Some(crate::session::ToolResultStatus::Failed)
+            );
+            drop(session);
+            task.abort();
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
         async fn parallel_tool_outputs_update_their_own_call_rows() {
             let (server, registration, _listener) =
                 test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
@@ -7888,7 +8699,18 @@ mod imp {
                 session.add_tool_result_structured("bash", "second", "call_b", None);
                 session.add_tool_result_structured("bash", "first", "call_a", None);
             }
-            let lines = render_session_lines(&server, 100).await;
+            let session = server.session.lock().await.clone();
+            let context = server.context.lock().await.clone();
+            let lines = render_session_lines_for(
+                &session,
+                &server.cli,
+                &server.cfg,
+                &context,
+                100,
+                Some(&server),
+                SessionRenderView::Detailed,
+            )
+            .await;
             let rows: Vec<_> = lines
                 .iter()
                 .filter(|line| line.role == Some(MessageRole::ToolCall))
@@ -8372,6 +9194,7 @@ mod imp {
             let socket_path = registration.socket_path.clone();
             let server = Arc::new(Server {
                 tool_render_lock: Mutex::new(()),
+                activity: Mutex::new(ActivityState::default()),
                 client: Mutex::new(client),
                 cli: Cli {
                     no_session: true,

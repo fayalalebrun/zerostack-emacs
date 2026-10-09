@@ -94,6 +94,8 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 
 9. **Shared persistent-session launcher** — `src/extras/session_cli.rs` owns systemd user-service creation, environment inheritance, private retained logs, session identity resolution, startup readiness, and timeout cleanup. Both `zerostack session start` and the Emacs client's `--emacs-launch` entry point call it. Emacs only connects to the returned socket; daemons run outside the caller's cgroup. (`src/main.rs`, `emacs/zerostack.el`)
 
+10. **Compact Emacs tool activity** — Rust owns call grouping, structured outcomes, and append-only structured detail logs. Live summaries are batched at 100 ms; Emacs updates a cached row by message index, with no transcript scan or per-call overlays. On demand, details show one cached row per call with status, duration, and output/diff links; full arguments and IDs open separately. Failures, permissions, and task/goal progress stay visible. Reconnects reconstruct compact history from canonical session messages. (`src/extras/emacs.rs`, `emacs/zerostack.el`)
+
 ## Dependencies
 
 | Crate | Use |

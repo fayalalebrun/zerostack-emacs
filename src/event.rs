@@ -129,6 +129,7 @@ pub enum AgentEvent {
         loaded_context: Vec<String>,
         duration_ms: u64,
         display_artifact: Option<DisplayArtifact>,
+        is_error: bool,
     },
     SubagentToolCall {
         name: CompactString,

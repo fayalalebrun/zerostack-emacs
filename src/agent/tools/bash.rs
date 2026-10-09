@@ -19,6 +19,15 @@ pub(crate) struct BashLiveOutputRequest {
 pub(crate) type BashLiveOutputSender = mpsc::Sender<BashLiveOutputRequest>;
 
 static BASH_LIVE_OUTPUT_TX: Mutex<Option<BashLiveOutputSender>> = Mutex::new(None);
+static BASH_EXIT_CODES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, i32>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn take_bash_exit_code(call_id: &str) -> Option<i32> {
+    BASH_EXIT_CODES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(call_id)
+}
 
 pub(crate) fn set_bash_live_output_sender(sender: Option<BashLiveOutputSender>) {
     *BASH_LIVE_OUTPUT_TX
@@ -290,6 +299,12 @@ impl Tool for BashTool {
                 )
             };
 
+        if let Some(id) = args.call_id {
+            BASH_EXIT_CODES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, exit_code);
+        }
         let mut result = String::new();
         if !stdout.is_empty() {
             result.push_str(&stdout);
@@ -329,5 +344,33 @@ impl Tool for BashTool {
             Self::NAME,
             &result,
         ))
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn exit_metadata_is_call_scoped_and_independent_of_output_text() {
+        let tool = BashTool::new(None, None, Sandbox::new(false, "bwrap"), Some(1));
+        for code in [0, 7] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let args: BashArgs = serde_json::from_value(serde_json::json!({
+                "__zerostack_call_id": id,
+                "command": format!("printf 'Exit code: 99\\nsecond line\\n'; exit {code}"),
+                "disable_rtk": true,
+                "timeout": 1000,
+            }))
+            .unwrap();
+            let output = tool
+                .call(&mut rig::tool::ToolContext::new(), args)
+                .await
+                .unwrap();
+            assert!(output.contains("Exit code: 99"));
+            assert_eq!(take_bash_exit_code(&id), Some(code));
+            assert_eq!(take_bash_exit_code(&id), None);
+        }
+        assert_eq!(take_bash_exit_code("unknown-call"), None);
     }
 }

@@ -80,9 +80,19 @@ pub struct SessionProviderCall {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    Complete,
+    Failed,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionToolResult {
     pub id: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ToolResultStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<CompactString>,
     pub name: CompactString,
@@ -802,6 +812,7 @@ impl Session {
             tool_call: None,
             tool_result: Some(SessionToolResult {
                 id: CompactString::new(id),
+                status: None,
                 call_id: call_id.map(CompactString::new),
                 name: CompactString::new(name),
                 attachments: Vec::new(),
@@ -1122,6 +1133,31 @@ mod tests {
 
     use super::Session;
     use crate::agent::tools::goal::GoalState;
+
+    #[test]
+    fn tool_result_status_round_trips_and_legacy_status_remains_unknown() {
+        for status in [
+            super::ToolResultStatus::Complete,
+            super::ToolResultStatus::Failed,
+            super::ToolResultStatus::Interrupted,
+        ] {
+            let mut session = Session::new("test", "test", 0);
+            session.add_tool_result_structured("bash", "output", "a", None);
+            session.messages[0].tool_result.as_mut().unwrap().status = Some(status);
+            let loaded: Session =
+                serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+            assert_eq!(
+                loaded.messages[0].tool_result.as_ref().unwrap().status,
+                Some(status)
+            );
+        }
+        let legacy = serde_json::json!({"id":"a", "name":"bash"});
+        let loaded: super::SessionToolResult = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(loaded.status, None);
+        let mut invalid = legacy;
+        invalid["status"] = serde_json::json!("invented_status");
+        assert!(serde_json::from_value::<super::SessionToolResult>(invalid).is_err());
+    }
 
     #[test]
     fn tool_result_loaded_context_round_trips() {

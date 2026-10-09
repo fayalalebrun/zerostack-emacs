@@ -181,7 +181,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
     (zs-user . zerostack-user-face)
     (zs-tool . zerostack-tool-face)
     (zs-reasoning . zerostack-reasoning-face)
-    (zs-error . zerostack-error-face))
+    (zs-error . zerostack-error-face)
+    (zs-success . success))
   "Mapping from protocol face atoms to Emacs faces.")
 
 (defvar zerostack-mode-map
@@ -269,6 +270,10 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--cols nil)
 (defvar-local zerostack--metadata-status-request nil)
 (defvar-local zerostack--line-markers nil)
+(defvar-local zerostack--activity-rows nil)
+(defvar-local zerostack--pending-activity-rows nil)
+(defvar-local zerostack--activity-path nil)
+(defvar-local zerostack--activity-offset 0)
 (defvar-local zerostack--backfill-queue nil)
 (defvar-local zerostack--backfill-timer nil)
 (defvar-local zerostack--notice-start-marker nil)
@@ -3110,6 +3115,8 @@ _o_ artifact                                              _R_ restart
      (zerostack--flush-backfill)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
+    ('activity-row
+     (zerostack--update-activity-row plist))
     ('tool-row
      (zerostack--flush-backfill)
      (when-let ((index (cl-position-if
@@ -3164,7 +3171,8 @@ _o_ artifact                                              _R_ restart
      (zerostack--set-thinking t))
     ('tool-result
      (zerostack--set-thinking t)
-     (zerostack--remember-artifact (plist-get plist :artifact)))
+     (unless (plist-get plist :compact)
+       (zerostack--remember-artifact (plist-get plist :artifact))))
     ('reasoning
      (zerostack--set-thinking t)
      (zerostack--remember-artifact (plist-get plist :artifact)))
@@ -3385,15 +3393,25 @@ _o_ artifact                                              _R_ restart
           (cancel-timer zerostack--backfill-timer))
         (setq zerostack--backfill-timer nil)))))
 
+(defun zerostack--activity-start-marker (marker)
+  "Return the cached activity start corresponding to logical line MARKER."
+  (and marker zerostack--activity-rows
+       (get-text-property marker 'zerostack-activity-artifact)
+       (car (gethash (get-text-property marker 'zerostack-message-index)
+                     zerostack--activity-rows))))
+
 (defun zerostack--prepend-lines (lines)
   "Insert rendered logical LINES before the current transcript."
   (zerostack--ensure-prompt)
   (when lines
     (zerostack--without-undo
-      (let ((saved-point (copy-marker (point) nil))
-            (first-marker (car zerostack--line-markers)))
+      (let* ((saved-point (copy-marker (point) nil))
+             (first-marker (car zerostack--line-markers))
+             (activity-marker (zerostack--activity-start-marker first-marker)))
         (when first-marker
           (set-marker-insertion-type first-marker t))
+        (when activity-marker
+          (set-marker-insertion-type activity-marker t))
         (unwind-protect
             (let ((new-markers nil)
                   (inhibit-read-only t)
@@ -3410,6 +3428,8 @@ _o_ artifact                                              _R_ restart
                       (append (nreverse new-markers) zerostack--line-markers))))
           (when first-marker
             (set-marker-insertion-type first-marker nil))
+          (when activity-marker
+            (set-marker-insertion-type activity-marker nil))
           (goto-char saved-point)
           (set-marker saved-point nil))))))
 
@@ -3429,11 +3449,13 @@ _o_ artifact                                              _R_ restart
                            (min (+ keep replace-count) (length zerostack--line-markers))
                          (length zerostack--line-markers)))
                  (suffix (nthcdr stop zerostack--line-markers))
+                 (activity-marker (zerostack--activity-start-marker (car suffix)))
                  (end (if suffix (marker-position (car suffix))
                         (marker-position zerostack--notice-start-marker)))
                  (old-tail (cl-subseq zerostack--line-markers keep stop))
                  (inhibit-read-only t))
             (when suffix (set-marker-insertion-type (car suffix) t))
+            (when activity-marker (set-marker-insertion-type activity-marker t))
             (mapc (lambda (marker) (set-marker marker nil)) old-tail)
             (setq zerostack--line-markers prefix)
             (remove-overlays start end 'zerostack-latex t)
@@ -3446,12 +3468,52 @@ _o_ artifact                                              _R_ restart
             (if suffix
                 (set-marker-insertion-type (car suffix) nil)
               (set-marker zerostack--notice-start-marker (point)))
+            (when activity-marker (set-marker-insertion-type activity-marker nil))
             (setq zerostack--line-markers (append prefix (nreverse new-markers) suffix))
             (goto-char saved-point))
         (set-marker saved-point nil)))))
 
-(defun zerostack--insert-wire-line (line)
-  "Insert one pre-rendered LINE plist at point."
+(defun zerostack--update-activity-row (plist)
+  "Replace only the addressed activity row, or defer it until backfill arrives."
+  (when-let* ((index (plist-get plist :message-index))
+              (line (car (plist-get plist :lines))))
+    (let* ((markers (and zerostack--activity-rows (gethash index zerostack--activity-rows)))
+           (start (and markers (marker-position (car markers))))
+           (end (and markers (marker-position (cadr markers)))))
+      (if (and start end (< start end)
+               (equal (get-text-property start 'zerostack-message-index) index)
+               (eq (plist-get (get-text-property start 'zerostack-activity-artifact) :kind) 'activity-log))
+          (zerostack--without-undo
+            (let ((saved-point (copy-marker (point) nil))
+                  (row-offset (and (>= (point) start) (< (point) end) (- (point) start)))
+                  (old-end (copy-marker end t))
+                  (inhibit-read-only t))
+              (unwind-protect
+                  (progn
+                    (goto-char start)
+                    (zerostack--insert-wire-line line t)
+                    (let ((new-end (point)))
+                      (delete-region new-end old-end)
+                      (if row-offset
+                          (goto-char (+ start (min row-offset (1- (- new-end start)))))
+                        (goto-char saved-point))))
+                (set-marker old-end nil)
+                (set-marker saved-point nil))))
+        (when markers
+          (mapc (lambda (marker) (set-marker marker nil)) markers)
+          (remhash index zerostack--activity-rows))
+        (unless zerostack--pending-activity-rows
+          (setq zerostack--pending-activity-rows (make-hash-table :test 'eql)))
+        (puthash index line zerostack--pending-activity-rows)))))
+
+(defun zerostack--insert-wire-line (line &optional skip-artifact-cache)
+  "Insert LINE at point; SKIP-ARTIFACT-CACHE avoids repeated cache lookup."
+  (when (and zerostack--pending-activity-rows
+             (eq (plist-get (plist-get line :artifact) :kind) 'activity-log))
+    (when-let* ((index (plist-get line :message-index))
+                (pending (gethash index zerostack--pending-activity-rows)))
+      (setq line pending)
+      (remhash index zerostack--pending-activity-rows)))
   (let* ((text (or (plist-get line :text) ""))
          (face (zerostack--face (or (plist-get line :face) 'zs-normal)))
          (spans (plist-get line :spans))
@@ -3469,12 +3531,25 @@ _o_ artifact                                              _R_ restart
        start (point)
        `(zerostack-message-index ,message-index zerostack-message-role ,role)))
     (when artifact
-      (zerostack--remember-artifact artifact)
-      (zerostack--make-artifact-region start (point) artifact))
+      (unless skip-artifact-cache (zerostack--remember-artifact artifact))
+      (zerostack--make-artifact-region
+       (if (and (eq (plist-get artifact :kind) 'activity-log)
+                (string-match "\\[activity\\]" text))
+           (+ start (match-beginning 0))
+         start)
+       (point) artifact))
     (when latex
       (dolist (item latex)
         (zerostack--remember-latex item)))
-    (insert (propertize "\n" 'read-only t 'rear-nonsticky t))))
+    (insert (propertize "\n" 'read-only t 'rear-nonsticky t))
+    (when (eq (plist-get artifact :kind) 'activity-log)
+      (add-text-properties start (point) `(zerostack-activity-artifact ,artifact))
+      (unless zerostack--activity-rows
+        (setq zerostack--activity-rows (make-hash-table :test 'eql)))
+      (when-let ((old (gethash message-index zerostack--activity-rows)))
+        (mapc (lambda (marker) (set-marker marker nil)) old))
+      (puthash message-index (list (copy-marker start nil) (copy-marker (point) nil))
+               zerostack--activity-rows))))
 
 (defun zerostack--insert-wire-spans (spans fallback-face)
   "Insert line-local SPANS with protocol faces."
@@ -3571,6 +3646,13 @@ _o_ artifact                                              _R_ restart
 
 (defun zerostack--clear-render-caches ()
   "Clear metadata tied to the current rendered transcript."
+  (when zerostack--activity-rows
+    (maphash (lambda (_ markers)
+               (mapc (lambda (marker) (set-marker marker nil)) markers))
+             zerostack--activity-rows)
+    (clrhash zerostack--activity-rows))
+  (when zerostack--pending-activity-rows
+    (clrhash zerostack--pending-activity-rows))
   (setq zerostack--artifacts nil)
   (when (hash-table-p zerostack--latex-items)
     (clrhash zerostack--latex-items))
@@ -3718,14 +3800,183 @@ _o_ artifact                                              _R_ restart
       (zerostack--append-local-line "no LaTeX artifacts yet" 'zs-error))))
 
 (defun zerostack--open-artifact (artifact)
-  "Open ARTIFACT, enabling live reload for live tool-output artifacts."
-  (find-file (plist-get artifact :path))
-  (when (eq (plist-get artifact :kind) 'live-tool-output)
+  "Open ARTIFACT, enabling live reload only for live tool output."
+  (if (eq (plist-get artifact :kind) 'activity-log)
+      (zerostack--open-activity (plist-get artifact :path))
+    (find-file (plist-get artifact :path))
+    (when (eq (plist-get artifact :kind) 'live-tool-output)
+      (cond
+       ((fboundp 'auto-revert-tail-mode)
+        (auto-revert-tail-mode 1))
+       ((fboundp 'auto-revert-mode)
+        (auto-revert-mode 1))))))
+
+(defvar-local zerostack--activity-calls nil)
+
+(defun zerostack--activity-details (button)
+  (let* ((entry (button-get button 'zerostack-activity-entry))
+         (buffer (get-buffer-create "*zerostack call details*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (plist-get entry :summary) 'face 'zerostack-tool-face)
+                "\n\n" (format "Call ID: %s\n\n" (plist-get entry :id))
+                (or (plist-get entry :arguments) "No arguments available") "\n")
+        (special-mode)
+        (goto-char (point-min))))
+    (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-pop-up-window)
+                           (inhibit-same-window . t)))))
+
+(defun zerostack--activity-render-call (entry)
+  (let* ((markers (plist-get entry :markers))
+         (end (and markers (cadr markers)))
+         (status (plist-get entry :status))
+         (style (pcase status
+                  ('complete '("✓" . success))
+                  ('failed '("✗ failed" . zerostack-error-face))
+                  ('interrupted '("✗ interrupted" . zerostack-error-face))
+                  ('unknown '("? unknown" . zerostack-muted-face))
+                  (_ '("⟳" . zerostack-muted-face))))
+         (duration (plist-get entry :duration-ms))
+         (inhibit-read-only t))
+    (save-excursion
+      (goto-char (if markers (car markers) (point-max)))
+      (let ((start (point)))
+        (insert (propertize (concat (car style) " ") 'face (cdr style))
+                (propertize (plist-get entry :summary) 'face 'zerostack-tool-face))
+        (when (and duration (> duration 0))
+          (insert (propertize (if (< duration 1000) (format " [%dms]" duration)
+                               (format " [%.1fs]" (/ duration 1000.0)))
+                              'face 'zerostack-muted-face)))
+        (dolist (line (plist-get entry :lines))
+          (when-let ((artifact (plist-get line :artifact)))
+            (insert " ")
+            (let ((link-start (point)))
+              (insert (pcase (plist-get artifact :kind)
+                        ('live-tool-output "[live]")
+                        ('tool-output "[output]")
+                        ('display-artifact "[diff]")
+                        (_ "[file]")))
+              (zerostack--make-artifact-region link-start (point) artifact))))
+        (insert " ")
+        (insert-text-button "[details]" 'action #'zerostack--activity-details
+                            'zerostack-activity-entry entry 'follow-link t)
+        (insert "\n")
+        (when end (delete-region (point) end))
+        (when markers (mapc (lambda (marker) (set-marker marker nil)) markers))
+        (plist-put entry :markers (list (copy-marker start nil) (copy-marker (point) nil)))))))
+
+(define-derived-mode zerostack-activity-mode special-mode "ZS Activity"
+  "On-demand tool activity.  Press g to append newly available records."
+  (setq-local truncate-lines t)
+  (define-key zerostack-activity-mode-map (kbd "g") #'zerostack-activity-refresh))
+
+(defun zerostack--open-activity (path)
+  "Display the activity log at PATH without changing the chat window."
+  (when (file-remote-p path)
+    (user-error "Activity logs must be local"))
+  (let ((buffer (get-buffer-create (format "*zerostack activity: %s*" (abbreviate-file-name path)))))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'zerostack-activity-mode)
+        (zerostack-activity-mode)
+        (setq zerostack--activity-path path))
+      (zerostack-activity-refresh))
+    (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-pop-up-window)
+                           (inhibit-same-window . t)))))
+
+(defun zerostack--activity-legacy-record (lines)
+  (let ((args (plist-get (cadr lines) :text))
+        (header (plist-get (car lines) :text)))
     (cond
-     ((fboundp 'auto-revert-tail-mode)
-      (auto-revert-tail-mode 1))
-     ((fboundp 'auto-revert-mode)
-      (auto-revert-mode 1)))))
+     ((and args (string-match "^  args (\\([^)]*\\)): \\(.*\\)$" args))
+      (list :id (match-string 1 args) :arguments (match-string 2 args)
+            :summary (string-remove-prefix "◈ " header)))
+     ((and header
+           (string-match "^  .* · \\(✓ complete\\|✗ failed\\|✗ interrupted\\|◈ outcome unknown\\) (\\([^)]*\\))$" header))
+      (list :id (match-string 2 header)
+            :status (cdr (assoc (match-string 1 header)
+                                '(("✓ complete" . complete) ("✗ failed" . failed)
+                                  ("✗ interrupted" . interrupted) ("◈ outcome unknown" . unknown))))
+            :lines (cdr lines)
+            :duration-ms
+            (cl-loop for line in (cdr lines)
+                     for text = (plist-get line :text)
+                     when (string-match "\\[\\([0-9.]+\\)\\(ms\\|s\\)\\]" text)
+                     return (round (* (string-to-number (match-string 1 text))
+                                      (if (equal (match-string 2 text) "s") 1000 1))))))
+     ((eq (plist-get (plist-get (car lines) :artifact) :kind) 'live-tool-output)
+      (let ((pending (cl-loop for entry being the hash-values of zerostack--activity-calls
+                              when (and (not (plist-get entry :status))
+                                        (string-prefix-p "bash " (plist-get entry :summary)))
+                              collect entry)))
+        (when (= (length pending) 1)
+          (list :id (plist-get (car pending) :id) :lines lines)))))))
+
+(defun zerostack--activity-apply-record (record)
+  (unless (proper-list-p record) (user-error "Invalid activity record"))
+  (let* ((structured (keywordp (car-safe record)))
+         (lines (if structured (plist-get record :lines) record))
+         (entry-record nil))
+    (unless (and (proper-list-p record) (proper-list-p lines)
+                 (cl-every (lambda (line)
+                             (and (proper-list-p line) (stringp (plist-get line :text)))) lines)
+                 (or (not structured)
+                     (and (or (stringp (plist-get record :id))
+                              (plist-member record :interrupted))
+                          (memq (plist-get record :status) '(nil complete failed interrupted unknown))
+                          (or (not (plist-member record :summary)) (stringp (plist-get record :summary)))
+                          (or (not (plist-member record :arguments)) (stringp (plist-get record :arguments)))
+                          (or (not (plist-member record :duration-ms))
+                              (natnump (plist-get record :duration-ms)))
+                          (proper-list-p (plist-get record :interrupted))
+                          (cl-every #'stringp (plist-get record :interrupted)))))
+      (user-error "Invalid activity record"))
+    (setq entry-record (if structured record (zerostack--activity-legacy-record lines)))
+    (cond
+     ((plist-member entry-record :interrupted)
+      (dolist (id (plist-get entry-record :interrupted))
+        (zerostack--activity-apply-record (list :id id :status 'interrupted))))
+     (entry-record
+      (let* ((id (plist-get entry-record :id))
+             (entry (or (gethash id zerostack--activity-calls) (list :id id :summary "tool"))))
+        (while entry-record
+          (setq entry (plist-put entry (pop entry-record) (pop entry-record))))
+        (puthash id (zerostack--activity-render-call entry) zerostack--activity-calls)))
+     (t (dolist (line lines) (zerostack--insert-wire-line line t))))))
+
+(defun zerostack-activity-refresh ()
+  "Read new activity records and update only their call rows."
+  (interactive)
+  (unless zerostack--activity-path
+    (user-error "No activity log for this buffer"))
+  (unless (hash-table-p zerostack--activity-calls)
+    (setq zerostack--activity-calls (make-hash-table :test 'equal)
+          zerostack--activity-offset 0)
+    (let ((inhibit-read-only t)) (erase-buffer)))
+  (let ((target (current-buffer))
+        (path zerostack--activity-path)
+        (offset zerostack--activity-offset)
+        (coding-system-for-read 'utf-8-unix)
+        (read-circle nil))
+    (with-temp-buffer
+      (insert-file-contents path nil offset)
+      (goto-char (point-min))
+      (let ((done nil))
+        (while (not done)
+          (skip-chars-forward " \t\r\n")
+          (if (eobp)
+              (setq done t)
+            (condition-case nil
+                (let* ((record (read (current-buffer)))
+                       (next (+ offset (1- (position-bytes (point))))))
+                  (with-current-buffer target
+                    (let ((inhibit-read-only t))
+                      (save-excursion
+                        (goto-char (point-max))
+                        (zerostack--activity-apply-record record)))
+                    (setq zerostack--activity-offset next)
+                    (set-buffer-modified-p nil)))
+              (end-of-file (setq done t)))))))))
 
 (defun zerostack--append-local-line (text face)
   "Record local TEXT as single-line prompt status.

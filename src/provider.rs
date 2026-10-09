@@ -2049,6 +2049,47 @@ impl TestAgent {
                     .await;
                 let _ = self.sandbox.output_command("bash -c 'sleep 500'").await;
             }
+            if prompt == "activity" {
+                for (id, name, args, output, is_error) in [
+                    (
+                        "read-a",
+                        "read",
+                        serde_json::json!({"path":"file.rs"}),
+                        "contents",
+                        false,
+                    ),
+                    (
+                        "bash-b",
+                        "bash",
+                        serde_json::json!({"command":"cargo test"}),
+                        "test failed",
+                        true,
+                    ),
+                ] {
+                    let _ = event_tx
+                        .send(AgentEvent::ToolCall {
+                            id: id.into(),
+                            call_id: None,
+                            name: name.into(),
+                            args,
+                            reasoning: Vec::new(),
+                        })
+                        .await;
+                    let _ = event_tx
+                        .send(AgentEvent::ToolResult {
+                            id: id.into(),
+                            call_id: None,
+                            name: name.into(),
+                            output: output.into(),
+                            images: Vec::new(),
+                            loaded_context: Vec::new(),
+                            duration_ms: 1,
+                            display_artifact: None,
+                            is_error,
+                        })
+                        .await;
+                }
+            }
             if prompt == "error" {
                 let _ = event_tx
                     .send(AgentEvent::Error {

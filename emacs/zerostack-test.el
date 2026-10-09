@@ -2228,6 +2228,73 @@
             :lines ((:text "tool rendered by server" :face zs-tool))))
    (should (string-match-p "tool rendered by server" (buffer-string)))))
 
+(ert-deftest zerostack-test-activity-row-update-is-local-and-preserves-input ()
+  (zerostack-test--with-buffer
+   (let ((artifact '(:kind activity-log :path "/tmp/activity")))
+     (zerostack--replace-lines
+      0 `((:text "before" :face zs-normal)
+          (:text "◈ 1 calls · 1 running  [activity]" :face zs-muted
+           :message-index 7 :role tool-call :artifact ,artifact)
+          (:text "after" :face zs-normal)))
+     (goto-char (point-max))
+     (insert "draft")
+     (let ((offset (- (point) zerostack--input-marker))
+           (after (nth 2 zerostack--line-markers)))
+       (cl-letf (((symbol-function 'zerostack--replace-lines)
+                  (lambda (&rest _) (ert-fail "must not rebuild transcript")))
+                 ((symbol-function 'zerostack--remember-artifact)
+                  (lambda (&rest _) (ert-fail "must not scan artifact cache"))))
+         (dotimes (i 100)
+           (zerostack--handle-event
+            `(:type activity-row :message-index 7
+              :lines ((:text ,(format "◈ %s calls · complete  [activity]" (+ i 2))
+                       :face zs-muted :message-index 7 :role tool-call :artifact ,artifact)))))
+         (zerostack--handle-event '(:type activity-row :message-index 999)))
+       (should (= (length zerostack--line-markers) 3))
+       (should (= (- (point) zerostack--input-marker) offset))
+       (should (equal (buffer-substring-no-properties after (+ after 5)) "after"))
+       (should (string-match-p "before\n◈ 101 calls · complete  \\[activity\\]\nafter" (buffer-string)))
+       (should (equal (buffer-substring-no-properties zerostack--input-marker (point-max)) "draft"))
+       (goto-char (nth 1 zerostack--line-markers))
+       (should (eq (get-text-property (point) 'face) 'zerostack-muted-face))
+       (search-forward "[activity]")
+       (should (equal (get-text-property (1- (point)) 'zerostack-artifact) artifact))))))
+
+(ert-deftest zerostack-test-activity-updates-survive-prefix-insertion ()
+  (dolist (operation '(prepend replace))
+    (zerostack-test--with-buffer
+     (let ((artifact '(:kind activity-log :path "/tmp/activity")))
+       (zerostack--replace-lines
+        0 `((:text "old activity  [activity]" :face zs-muted
+             :message-index 7 :role tool-call :artifact ,artifact)
+            (:text "after" :face zs-normal)))
+       (if (eq operation 'prepend)
+           (zerostack--prepend-lines '((:text "older" :face zs-normal)))
+         (zerostack--replace-lines 0 '((:text "older" :face zs-normal)) 0))
+       (zerostack--handle-event
+        `(:type activity-row :message-index 7
+          :lines ((:text "new activity  [activity]" :face zs-muted
+                   :message-index 7 :role tool-call :artifact ,artifact))))
+       (should (string-match-p "older\nnew activity  \\[activity\\]\nafter" (buffer-string)))
+       (should (= (length zerostack--line-markers) 3))))))
+
+(ert-deftest zerostack-test-activity-update-waits-for-backfill-without-flushing-it ()
+  (zerostack-test--with-buffer
+   (let ((artifact '(:kind activity-log :path "/tmp/activity")))
+     (zerostack--replace-lines 0 '((:text "tail" :face zs-normal)))
+     (cl-letf (((symbol-function 'zerostack--flush-backfill)
+                (lambda () (ert-fail "must not force history rendering"))))
+       (zerostack--handle-event
+        `(:type activity-row :message-index 7
+          :lines ((:text "latest activity  [activity]" :face zs-muted
+                   :message-index 7 :role tool-call :artifact ,artifact)))))
+     (zerostack--prepend-lines
+      `((:text "stale activity  [activity]" :face zs-muted
+         :message-index 7 :role tool-call :artifact ,artifact)))
+     (should (string-match-p "latest activity" (buffer-string)))
+     (should-not (string-match-p "stale activity" (buffer-string)))
+     (should-not (gethash 7 zerostack--pending-activity-rows)))))
+
 (ert-deftest zerostack-test-parallel-tool-row-update-preserves-neighbors-and-input ()
   (zerostack-test--with-buffer
    (zerostack--replace-lines
@@ -2714,6 +2781,118 @@
        (should (equal (plist-get (overlay-get overlay 'zerostack-artifact) :path)
                       "/tmp/math.tex")))
      (should (equal calls '((create-image "/tmp/math.svg" svg)))))))
+
+(ert-deftest zerostack-test-activity-details-append-only-and-styled ()
+  (let ((path (make-temp-file "zs-activity-")))
+    (unwind-protect
+        (with-temp-buffer
+          (zerostack-activity-mode)
+          (setq zerostack--activity-path path)
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region "((:text \"◈ read café.rs\" :face zs-tool))\n" nil path nil 'silent))
+          (zerostack-activity-refresh)
+          (should (equal (buffer-string) "◈ read café.rs\n"))
+          (should (eq (get-text-property (point-min) 'face) 'zerostack-tool-face))
+          (let ((prefix (buffer-substring (point-min) (point-max))))
+            (zerostack-activity-refresh)
+            (should (equal (buffer-substring (point-min) (point-max)) prefix))
+            (let ((coding-system-for-write 'utf-8-unix))
+              (write-region "((:text \"output\" :face zs-link :artifact (:kind tool-output :path \"/tmp/output\")))\n" nil path t 'silent))
+            (goto-char (point-min))
+            (zerostack-activity-refresh)
+            (should (= (point) (point-min)))
+            (should (equal (buffer-substring (point-min) (+ (point-min) (length prefix))) prefix))
+            (should (equal (buffer-string) "◈ read café.rs\noutput\n"))
+            (should (get-text-property (+ (point-min) (length prefix)) 'zerostack-artifact)))
+          (should-not (bound-and-true-p auto-revert-mode)))
+      (delete-file path))))
+
+(ert-deftest zerostack-test-activity-details-one-row-per-call-with-on-demand-arguments ()
+  (let ((path (make-temp-file "zs-activity-")))
+    (unwind-protect
+        (with-temp-buffer
+          (zerostack-activity-mode)
+          (setq zerostack--activity-path path)
+          (write-region
+           (concat (prin1-to-string '(:id "secret-a" :summary "bash cargo test" :arguments "{\"command\":\"cargo test\"}")) "\n"
+                   (prin1-to-string '(:id "secret-b" :summary "read café.rs" :arguments "{\"path\":\"café.rs\"}")) "\n")
+           nil path nil 'silent)
+          (zerostack-activity-refresh)
+          (should (= (count-lines (point-min) (point-max)) 2))
+          (let ((second (buffer-substring (marker-position (car (plist-get (gethash "secret-b" zerostack--activity-calls) :markers))) (point-max))))
+            (write-region
+             (concat (prin1-to-string '(:id "secret-a" :status failed :duration-ms 1200
+                                           :lines ((:text "output" :artifact (:kind tool-output :path "/tmp/test-output"))))) "\n")
+             nil path t 'silent)
+            (zerostack-activity-refresh)
+            (should (= (count-lines (point-min) (point-max)) 2))
+            (should (string-match-p "✗ failed bash cargo test \\[1.2s\\] \\[output\\] \\[details\\]" (buffer-string)))
+            (should (equal second (buffer-substring (marker-position (car (plist-get (gethash "secret-b" zerostack--activity-calls) :markers))) (point-max)))))
+          (should-not (string-match-p "secret-a\\|command\\|args (" (buffer-string)))
+          (goto-char (point-min))
+          (search-forward "[output]")
+          (should (equal (plist-get (get-text-property (1- (point)) 'zerostack-artifact) :path) "/tmp/test-output"))
+          (search-forward "[details]")
+          (let ((button (button-at (1- (point)))))
+            (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+              (zerostack--activity-details button))
+            (with-current-buffer "*zerostack call details*"
+              (should (string-match-p "secret-a" (buffer-string)))
+              (should (string-match-p "\"command\":\"cargo test\"" (buffer-string)))))
+          (write-region "(:interrupted (\"secret-b\"))\n" nil path t 'silent)
+          (zerostack-activity-refresh)
+          (should (string-match-p "✗ interrupted read café.rs" (buffer-string)))
+          (should-not (overlays-in (point-min) (point-max))))
+      (delete-file path))))
+
+(ert-deftest zerostack-test-activity-details-compact-legacy-logs-and-keep-links ()
+  (let ((path (make-temp-file "zs-activity-")))
+    (unwind-protect
+        (with-temp-buffer
+          (zerostack-activity-mode)
+          (setq zerostack--activity-path path)
+          (dolist (record '(((:text "◈ bash cargo test" :face zs-tool)
+                            (:text "  args (old-id): {\"command\":\"cargo test\"}" :face zs-muted))
+                           ((:text "  live output" :artifact (:kind live-tool-output :path "/tmp/live")))
+                           ((:text "  bash · ✓ complete (old-id)" :face zs-success)
+                            (:text "output: bash (10 B) [1.2s]" :artifact (:kind tool-output :path "/tmp/output"))
+                            (:text "patch" :artifact (:kind display-artifact :path "/tmp/diff"))
+                            (:text ""))))
+            (write-region (concat (prin1-to-string record) "\n") nil path t 'silent))
+          (zerostack-activity-refresh)
+          (should (= (count-lines (point-min) (point-max)) 1))
+          (should (equal (buffer-string) "✓ bash cargo test [1.2s] [output] [diff] [details]\n"))
+          (should (eq (get-text-property (point-min) 'face) 'success))
+          (should-not (string-match-p "old-id\\|command\\|live output" (buffer-string)))
+          (let ((text (buffer-string)))
+            (zerostack-activity-refresh)
+            (should (equal (buffer-string) text)))
+          (let ((offset zerostack--activity-offset))
+            (write-region "(:id \"bad\" :duration-ms -1)\n" nil path t 'silent)
+            (should-error (zerostack-activity-refresh) :type 'user-error)
+            (should (= zerostack--activity-offset offset))))
+      (delete-file path))))
+
+(ert-deftest zerostack-test-activity-details-handle-partial-and-invalid-records ()
+  (let ((path (make-temp-file "zs-activity-")))
+    (unwind-protect
+        (with-temp-buffer
+          (zerostack-activity-mode)
+          (setq zerostack--activity-path path)
+          (write-region "((:text \"partial" nil path nil 'silent)
+          (zerostack-activity-refresh)
+          (should (= zerostack--activity-offset 0))
+          (should (string-empty-p (buffer-string)))
+          (write-region "\" :face zs-muted))\n" nil path t 'silent)
+          (zerostack-activity-refresh)
+          (should (equal (buffer-string) "partial\n"))
+          (let ((offset zerostack--activity-offset))
+            (write-region "((:text 42))\n" nil path t 'silent)
+            (should-error (zerostack-activity-refresh) :type 'user-error)
+            (should (= zerostack--activity-offset offset)))
+          (setq zerostack--activity-path (concat path ".missing"))
+          (should-error (zerostack-activity-refresh) :type 'file-error))
+      (delete-file path))))
 
 (ert-deftest zerostack-test-artifact-at-point-opens-file ()
   (zerostack-test--with-buffer

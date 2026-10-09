@@ -2,6 +2,29 @@
 
 All slash commands are available from the TUI input prompt.
 
+## Emacs compact activity
+
+Consecutive tool calls, including reads, searches, commands, edits, and MCP
+calls, share one compact activity row. Assistant prose and inline task/goal
+progress remain in conversational order. `[activity]` opens a separate, styled
+buffer with one row per call: status, a short call summary, duration, and
+output/diff links. `[details]` opens full arguments and the call ID separately;
+raw JSON, IDs, blank separators, and duplicate result headings stay out of the
+activity list. Press `g` to read new records and update only affected call rows;
+no background refresh hooks or per-call overlays are installed. Existing logs
+use the same compact layout when refreshed with the updated client.
+
+Rust batches activity-row updates at 100 ms intervals; Emacs replaces only the
+cached row through a direct marker lookup, without scanning or rebuilding the
+transcript. Reconnecting and loading saved history also use compact rows.
+“Complete” means calls returned, not that their outputs were successful:
+failures are counted and remain visible in chat, permission controls stay inline,
+and unfinished calls are marked stopped. Older results without structured
+outcomes are labeled unknown rather than inferred from output text.
+
+Reload the updated Emacs client and restart idle daemons to enable this view;
+running sessions are not restarted automatically.
+
 ## Session
 
 | Command | Description |
@@ -330,7 +353,12 @@ renderer and links. Events include an artifact plist:
                   :expires process-exit))
 ```
 
-Tool output links stay on their matching call row, for example
+In compact activity, tool output and diff links appear in the details buffer,
+matched by call ID. `activity-row` events update the group's first message index
+without changing logical transcript line counts; compact `tool-result` events
+carry `:compact t` so the client avoids redundant artifact caching.
+
+For detailed protocol rendering, tool output links stay on their matching call row, for example
 `◈ bash(output 17.9 KB [1.2s]) cargo test`. Parallel calls are matched by call ID,
 not tool name or completion order. Reopened sessions use the same grouped layout.
 Agent runs execute up to eight tool calls concurrently, including calls to the

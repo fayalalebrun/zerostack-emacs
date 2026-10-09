@@ -246,6 +246,7 @@ fn serialize_multiple_roles() {
             tool_call: None,
             tool_result: Some(SessionToolResult {
                 id: CompactString::new("call_1"),
+                status: None,
                 call_id: None,
                 name: CompactString::new("read"),
                 attachments: Vec::new(),

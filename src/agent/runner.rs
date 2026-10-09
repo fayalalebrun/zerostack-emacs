@@ -88,6 +88,11 @@ impl rig::agent::AgentHook for ProviderTurnHook {
 
 impl ProviderTurnHook {
     fn publish_tool_result(&self, event: rig::agent::OutcomeEvent<'_>) {
+        if self.tool_results.is_none()
+            && let Some(id) = event.call_id
+        {
+            let _ = crate::agent::tools::bash::take_bash_exit_code(&id.to_string());
+        }
         if let Some(result) = event.tool_result()
             && let Some(id) = event.call_id
             && let Some(name) = event.tool_name()
@@ -601,7 +606,13 @@ fn tool_result_messages(
             content: vec![UserContent::ToolResult(ToolResult {
                 call: rig::message::CallId::from_wire(call_id.unwrap_or(id)),
                 name: rig::message::ToolName::new(result.name.to_string()).ok()?,
-                is_error: false,
+                is_error: matches!(
+                    result.status,
+                    Some(
+                        crate::session::ToolResultStatus::Failed
+                            | crate::session::ToolResultStatus::Interrupted
+                    )
+                ),
                 content: vec![ToolResultContent::Text(Text::new(output))],
             })],
         },
@@ -894,6 +905,12 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
                                 loaded_context,
                                 duration_ms,
                                 display_artifact,
+                                is_error: {
+                                    let exit_code = crate::agent::tools::bash::take_bash_exit_code(
+                                        &tool_result.call.to_string(),
+                                    );
+                                    tool_result.is_error || exit_code.is_some_and(|code| code != 0)
+                                },
                             })
                             .await;
                         #[cfg(feature = "multimodal")]

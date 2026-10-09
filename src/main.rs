@@ -1113,6 +1113,7 @@ async fn run_subagent_child(
                 output,
                 loaded_context,
                 duration_ms,
+                is_error,
                 ..
             } => {
                 session.add_tool_result_structured_with_context(
@@ -1123,6 +1124,17 @@ async fn run_subagent_child(
                     loaded_context,
                     duration_ms,
                 );
+                if let Some(result) = session
+                    .messages
+                    .last_mut()
+                    .and_then(|message| message.tool_result.as_mut())
+                {
+                    result.status = Some(if is_error {
+                        session::ToolResultStatus::Failed
+                    } else {
+                        session::ToolResultStatus::Complete
+                    });
+                }
                 session::storage::save_session(session)?;
             }
             event::AgentEvent::SubagentToolCall { name, args } => {
