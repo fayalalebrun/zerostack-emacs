@@ -547,16 +547,36 @@ hydration. Submission success does not mean the workspace is ready.
 
 ```bash
 zerostack workspace status --job FULL-JOB-UUID
+zerostack workspace wait --job FULL-JOB-UUID --timeout 600
 zerostack workspace logs --job FULL-JOB-UUID
 ```
 
-Poll status until `ready` before starting a session. Status phases are `queued`,
+Use `workspace wait` instead of repeatedly polling before starting a session.
+It prints concise phase changes and a progress heartbeat every ten seconds to
+stderr, leaving stdout for one final JSON result. It exits successfully only for
+`ready`; failure, interruption, and timeout return nonzero. `--timeout` is in
+seconds and defaults to 600. A timeout adds `timed_out: true` to the result but
+does not cancel setup; inspect the same job or wait again rather than resubmitting.
+A zero timeout performs one readiness check.
+
+New jobs include `created_at_ms`, `finished_at_ms`, `elapsed_ms`, and `phases`.
+Each phase records its name, start/end timestamps, and `duration_ms`; active
+phase and total durations update on status/wait reads, and freeze for recorded
+ready/failed results. Interrupted-job timings end at each query's detection time,
+not a recorded worker-exit time. Timestamps are Unix milliseconds; durations use
+wall time and saturate at zero
+if the clock moves backwards. Older records remain readable with null total
+timing and no phase history; no historical durations are fabricated.
+
+Status phases are `queued`,
 `preparing`, `creating`, and `hydrating`; terminal outcomes are `ready`, `failed`,
 and `interrupted`. A dead worker without a recorded result reports `interrupted`,
 not success. Status queries return JSON even for failed jobs: inspect `status`
 and `error`, not just the CLI exit code. Logs return all combined hook stdout
 and stderr collected so far; tail the returned log path for live output.
 Jobs persist under the zerostack data directory's `workspace-jobs/<job>/`.
+Worker liveness uses an OS file lock, avoiding Unix socket address-length limits
+in long data-directory paths. Older socket-based workers remain recognized.
 If submission times out, inspect those records before retrying creation.
 Failures do not roll back existing worktrees or partially completed hydration.
 
@@ -566,6 +586,31 @@ Existing paths and invalid branch names are rejected. On non-Unix platforms,
 creation remains synchronous; detached status/log commands are Unix-only.
 Existing TUI worktree creation behavior is unchanged.
 
+On Unix, optionally wait for setup and start a session in one command:
+
+```bash
+zerostack workspace create --repo /path/to/repo --branch task \
+  --path /path/to/workspace --start-session --timeout 600 \
+  --provider openai --model gpt-4o-mini --prompt "Implement the task"
+```
+
+`--start-session` waits for `ready` before using the same persistent session
+launcher as `session start`. Omit `--prompt` for an idle session. `--prompt`,
+`--provider`, `--model`, and `--timeout` require `--start-session`; a blank prompt
+is rejected before submission. The setup wait defaults to 600 seconds; session
+startup has its separate 30-second deadline. Stderr reports the job ID/log path
+at submission and concise progress while waiting. Successful stdout is one JSON
+object with `workspace` (completed job and timings) and `session` (session startup
+metadata). Prompt acceptance does not imply task completion.
+
+Setup failure/interruption/timeout prints the final job JSON and returns nonzero
+without starting a session. Timed-out setup continues independently; wait on that
+job and use `session start` afterwards, rather than creating the workspace again.
+If session startup or the initial prompt fails after successful setup, stdout
+contains `workspace`, `session: null`, and `session_error`, and the command returns
+nonzero. The workspace is retained; an initial-prompt failure can leave a live
+session, whose startup metadata is included in the error. Do not blindly retry.
+
 Inspect the board and launch persistent workers without Emacs:
 
 ```bash
@@ -574,7 +619,30 @@ zerostack session start --path /path/to/workspace --prompt "Implement the task"
 zerostack session send --session FULL-UUID --prompt "Follow-up task"
 ```
 
-`board list` returns JSON using the same snapshot as the Emacs board.
+`board list` returns JSON using the same snapshot as the Emacs board; its default
+output is unchanged. Narrow it before asking an agent to inspect a large board:
+
+```bash
+zerostack board list --summary
+zerostack board list --repo /path/to/repo --alive --summary
+zerostack board list --path /path/to/workspace
+zerostack board list --session UUID-OR-PREFIX
+```
+
+Filters combine with AND. `--repo` accepts the repository root or any of its Git
+worktrees, matching their shared Git common directory. `--path` matches an exact
+board worktree or loose workspace path, not descendants; paths are canonicalized
+so relative paths and symlinks work. `--session` matches all IDs starting with the
+supplied prefix; no matches returns empty groups, not an error. `--alive` retains
+only live sessions. Session/alive filters prune empty groups and attention rows;
+repository/path filters alone can retain worktrees with no sessions.
+
+`--summary` omits session records, including duplicate attention records. Its
+`counts` object reports projects, workspaces, sessions, live sessions, and
+attention sessions after filtering. Each worktree/loose workspace has
+`session_count` and `alive_session_count`; worktrees keep branch/description
+metadata. Use a filtered non-summary query to get session IDs, sockets, and other
+session details. Summaries reduce output, not the underlying snapshot collection work.
 On Unix, `session start` uses the shared Rust daemon launcher to start a separate
 systemd user service and returns JSON with `session`, `pid`, `path`, `socket`,
 `log`, and `unit` after a readiness handshake. It accepts optional `--provider`,

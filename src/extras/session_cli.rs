@@ -13,7 +13,7 @@ pub async fn start(
     provider: Option<&str>,
     model: Option<&str>,
     prompt: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<serde_json::Value> {
     anyhow::ensure!(
         !prompt.is_some_and(|p| p.trim().is_empty()),
         "prompt must not be empty"
@@ -37,8 +37,7 @@ pub async fn start(
             anyhow::bail!("session started: {metadata}; initial prompt failed: {error}");
         }
     }
-    println!("{metadata}");
-    Ok(())
+    Ok(metadata)
 }
 
 fn launch_identity(args: &mut Vec<OsString>) -> anyhow::Result<String> {
@@ -206,6 +205,20 @@ fn service_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blank_prompt_is_rejected_before_service_startup() {
+        let error = start(
+            Path::new("/missing-workspace"),
+            None,
+            None,
+            None,
+            Some(" \n "),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "prompt must not be empty");
+    }
 
     #[test]
     fn one_service_command_preserves_arguments_and_inherits_environment_by_name() {

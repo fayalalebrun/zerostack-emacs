@@ -179,9 +179,185 @@ struct LiveSessionMeta {
     activity: Option<String>,
 }
 
-pub fn print_json() -> anyhow::Result<()> {
-    println!("{}", serde_json::to_string(&collect_board()?)?);
+pub fn print_json(filters: &crate::cli::BoardListArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !filters
+            .session
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty()),
+        "session filter must not be empty"
+    );
+    let repo = filters
+        .repo
+        .as_deref()
+        .map(|path| {
+            git_session_info(path)
+                .map(|git| git.repo)
+                .with_context(|| format!("not a Git worktree: {}", path.display()))
+        })
+        .transpose()?;
+    let path = filters
+        .path
+        .as_deref()
+        .map(|path| -> anyhow::Result<PathBuf> {
+            let path = path
+                .canonicalize()
+                .with_context(|| format!("workspace does not exist: {}", path.display()))?;
+            anyhow::ensure!(
+                path.is_dir(),
+                "workspace must be a directory: {}",
+                path.display()
+            );
+            Ok(path)
+        })
+        .transpose()?;
+    let snapshot = filter_board(
+        collect_board()?,
+        repo.as_deref(),
+        path.as_deref(),
+        filters.session.as_deref(),
+        filters.alive,
+    );
+    if filters.summary {
+        println!("{}", board_summary(&snapshot));
+    } else {
+        println!("{}", serde_json::to_string(&snapshot)?);
+    }
     Ok(())
+}
+
+fn filter_board(
+    mut snapshot: BoardSnapshot,
+    repo: Option<&Path>,
+    path: Option<&Path>,
+    session: Option<&str>,
+    alive: bool,
+) -> BoardSnapshot {
+    if repo.is_none() && path.is_none() && session.is_none() && !alive {
+        return snapshot;
+    }
+    let matches = |entry: &BoardSession| {
+        session.is_none_or(|prefix| entry.id.starts_with(prefix)) && (!alive || entry.alive)
+    };
+    snapshot.projects.retain_mut(|project| {
+        if repo.is_some_and(|repo| project.repo != repo) {
+            return false;
+        }
+        project.worktrees.retain_mut(|worktree| {
+            if path.is_some_and(|path| worktree.path != path) {
+                return false;
+            }
+            worktree.sessions.retain(&matches);
+            worktree.alive = worktree.sessions.iter().any(|entry| entry.alive);
+            (session.is_none() && !alive) || !worktree.sessions.is_empty()
+        });
+        project.alive = project.worktrees.iter().any(|worktree| worktree.alive);
+        project.updated_at = project
+            .worktrees
+            .iter()
+            .flat_map(|worktree| &worktree.sessions)
+            .map(|entry| entry.updated_at.as_str())
+            .max()
+            .unwrap_or_default()
+            .into();
+        !project.worktrees.is_empty()
+    });
+    snapshot.loose_workspaces.retain_mut(|workspace| {
+        if repo.is_some() || path.is_some_and(|path| workspace.path != path) {
+            return false;
+        }
+        workspace.sessions.retain(&matches);
+        workspace.alive = workspace.sessions.iter().any(|entry| entry.alive);
+        workspace.updated_at = workspace
+            .sessions
+            .iter()
+            .map(|entry| entry.updated_at.as_str())
+            .max()
+            .unwrap_or_default()
+            .into();
+        !workspace.sessions.is_empty()
+    });
+    let selected: HashSet<_> = snapshot
+        .projects
+        .iter()
+        .flat_map(|project| &project.worktrees)
+        .flat_map(|worktree| &worktree.sessions)
+        .chain(
+            snapshot
+                .loose_workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.sessions),
+        )
+        .map(|entry| entry.id.as_str())
+        .collect();
+    snapshot
+        .needs_attention
+        .retain(|entry| selected.contains(entry.id.as_str()));
+    sort_projects(&mut snapshot.projects);
+    sort_loose_workspaces(&mut snapshot.loose_workspaces);
+    snapshot
+}
+
+fn workspace_summary(path: &Path, sessions: &[BoardSession]) -> serde_json::Value {
+    let alive = sessions.iter().filter(|session| session.alive).count();
+    serde_json::json!({
+        "path": path, "alive": alive > 0,
+        "session_count": sessions.len(), "alive_session_count": alive,
+    })
+}
+
+fn board_summary(snapshot: &BoardSnapshot) -> serde_json::Value {
+    let worktrees: Vec<_> = snapshot
+        .projects
+        .iter()
+        .flat_map(|project| &project.worktrees)
+        .collect();
+    let sessions: Vec<_> = worktrees
+        .iter()
+        .flat_map(|worktree| &worktree.sessions)
+        .chain(
+            snapshot
+                .loose_workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.sessions),
+        )
+        .collect();
+    let projects: Vec<_> = snapshot
+        .projects
+        .iter()
+        .map(|project| {
+            let worktrees: Vec<_> = project
+                .worktrees
+                .iter()
+                .map(|worktree| {
+                    let mut row = workspace_summary(&worktree.path, &worktree.sessions);
+                    row["branch"] = worktree.branch.clone().into();
+                    row["description"] = worktree.description.clone().into();
+                    row
+                })
+                .collect();
+            serde_json::json!({
+                "name": project.name, "path": project.path, "repo": project.repo,
+                "alive": project.alive, "updated_at": project.updated_at, "worktrees": worktrees,
+            })
+        })
+        .collect();
+    let loose: Vec<_> = snapshot
+        .loose_workspaces
+        .iter()
+        .map(|workspace| workspace_summary(&workspace.path, &workspace.sessions))
+        .collect();
+    serde_json::json!({
+        "provider": snapshot.provider, "model": snapshot.model,
+        "subagent_provider": snapshot.subagent_provider, "subagent_model": snapshot.subagent_model,
+        "subagent_models": snapshot.subagent_models, "subagents_enabled": snapshot.subagents_enabled,
+        "counts": {
+            "projects": projects.len(), "workspaces": worktrees.len() + loose.len(),
+            "sessions": sessions.len(), "alive_sessions": sessions.iter().filter(|session| session.alive).count(),
+            "needs_attention": snapshot.needs_attention.len(),
+        },
+        "projects": projects, "loose_workspaces": loose,
+    })
 }
 
 pub fn print_board() -> anyhow::Result<()> {
@@ -916,6 +1092,193 @@ fn short_id(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filter_fixture() -> BoardSnapshot {
+        let entry = |id: &str, cwd: &str, alive| {
+            let session = crate::session::Session::new("test", "model", 1000);
+            let stored = serde_json::from_str::<StoredBoardSession>(
+                &serde_json::to_string(&session).unwrap(),
+            )
+            .unwrap();
+            let mut entry = board_session(&stored, None);
+            entry.id = id.into();
+            entry.cwd = cwd.into();
+            entry.alive = alive;
+            entry
+        };
+        let active = entry("aa1", "/p", true);
+        let idle = entry("aa2", "/p", false);
+        let loose = entry("cc1", "/loose", false);
+        let worktree = |path: &str, sessions: Vec<BoardSession>| BoardWorktree {
+            path: path.into(),
+            branch: "task".into(),
+            description: String::new(),
+            alive: sessions.iter().any(|session| session.alive),
+            sessions,
+        };
+        let project =
+            |name: &str, path: &str, repo: &str, worktrees: Vec<BoardWorktree>| BoardProject {
+                name: name.into(),
+                path: path.into(),
+                repo: repo.into(),
+                alive: true,
+                updated_at: String::new(),
+                worktrees,
+            };
+        BoardSnapshot {
+            provider: "test".into(),
+            model: "model".into(),
+            subagent_provider: "test".into(),
+            subagent_model: "model".into(),
+            subagent_models: vec!["model".into()],
+            subagents_enabled: false,
+            needs_attention: vec![idle.clone(), loose.clone()],
+            projects: vec![
+                project(
+                    "p",
+                    "/p",
+                    "/p/.git",
+                    vec![
+                        worktree("/p", vec![active, idle]),
+                        worktree("/empty", vec![]),
+                    ],
+                ),
+                project(
+                    "q",
+                    "/q",
+                    "/q/.git",
+                    vec![worktree("/q", vec![entry("bb1", "/q", true)])],
+                ),
+            ],
+            loose_workspaces: vec![BoardLooseWorkspace {
+                path: "/loose".into(),
+                alive: false,
+                updated_at: String::new(),
+                sessions: vec![loose],
+            }],
+        }
+    }
+
+    #[test]
+    fn board_without_filters_preserves_the_full_snapshot() {
+        let snapshot = filter_fixture();
+        let expected = serde_json::to_value(&snapshot).unwrap();
+        let actual = filter_board(snapshot, None, None, None, false);
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+    }
+
+    #[test]
+    fn board_filters_combine_and_prune_attention_and_empty_groups() {
+        let result = filter_board(
+            filter_fixture(),
+            Some(Path::new("/p/.git")),
+            Some(Path::new("/p")),
+            Some("aa"),
+            true,
+        );
+        assert_eq!(result.projects.len(), 1);
+        assert_eq!(result.projects[0].worktrees.len(), 1);
+        assert_eq!(result.projects[0].worktrees[0].sessions.len(), 1);
+        assert_eq!(result.projects[0].worktrees[0].sessions[0].id, "aa1");
+        assert!(result.loose_workspaces.is_empty());
+        assert!(result.needs_attention.is_empty());
+        let result = filter_board(filter_fixture(), None, None, Some("aa2"), false);
+        assert!(!result.projects[0].alive);
+        assert!(!result.projects[0].worktrees[0].alive);
+        assert_eq!(result.needs_attention.len(), 1);
+        assert_eq!(result.needs_attention[0].id, "aa2");
+    }
+
+    #[test]
+    fn board_path_filter_matches_loose_and_empty_workspaces() {
+        let result = filter_board(
+            filter_fixture(),
+            None,
+            Some(Path::new("/loose")),
+            None,
+            false,
+        );
+        assert!(result.projects.is_empty());
+        assert_eq!(result.loose_workspaces.len(), 1);
+        assert_eq!(result.needs_attention.len(), 1);
+        let result = filter_board(
+            filter_fixture(),
+            None,
+            Some(Path::new("/empty")),
+            None,
+            false,
+        );
+        assert_eq!(result.projects[0].worktrees[0].path, Path::new("/empty"));
+        assert!(result.projects[0].worktrees[0].sessions.is_empty());
+    }
+
+    #[test]
+    fn board_repo_filter_keeps_empty_worktrees_but_not_other_repos() {
+        let result = filter_board(
+            filter_fixture(),
+            Some(Path::new("/p/.git")),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(result.projects.len(), 1);
+        assert_eq!(result.projects[0].worktrees.len(), 2);
+        assert!(result.loose_workspaces.is_empty());
+        assert_eq!(result.needs_attention.len(), 1);
+    }
+
+    #[test]
+    fn board_summary_counts_sessions_once_without_session_details() {
+        let mut snapshot = filter_fixture();
+        snapshot.projects[0].worktrees[0].sessions[0].title = "x".repeat(10000);
+        let summary = board_summary(&snapshot);
+        assert_eq!(
+            summary["counts"],
+            serde_json::json!({
+                "projects": 2, "workspaces": 4, "sessions": 4, "alive_sessions": 2, "needs_attention": 2,
+            })
+        );
+        assert_eq!(summary["projects"][0]["worktrees"][0]["session_count"], 2);
+        assert_eq!(
+            summary["projects"][0]["worktrees"][0]["alive_session_count"],
+            1
+        );
+        assert!(
+            summary["projects"][0]["worktrees"][0]
+                .get("sessions")
+                .is_none()
+        );
+        assert!(summary.to_string().len() < serde_json::to_string(&snapshot).unwrap().len() / 3);
+        let selected = filter_board(snapshot, None, None, None, true);
+        assert_eq!(board_summary(&selected)["counts"]["sessions"], 2);
+        assert_eq!(board_summary(&selected)["counts"]["needs_attention"], 0);
+    }
+
+    #[test]
+    fn board_filters_with_no_matches_have_empty_counts() {
+        for result in [
+            filter_board(
+                filter_fixture(),
+                Some(Path::new("/missing")),
+                None,
+                None,
+                false,
+            ),
+            filter_board(
+                filter_fixture(),
+                None,
+                Some(Path::new("/missing")),
+                None,
+                false,
+            ),
+            filter_board(filter_fixture(), None, None, Some("missing"), false),
+        ] {
+            assert!(result.projects.is_empty());
+            assert!(result.loose_workspaces.is_empty());
+            assert!(result.needs_attention.is_empty());
+            assert_eq!(board_summary(&result)["counts"]["sessions"], 0);
+        }
+    }
 
     fn assert_metadata_matches(session: &crate::session::Session) {
         let json = serde_json::to_string(session).unwrap();

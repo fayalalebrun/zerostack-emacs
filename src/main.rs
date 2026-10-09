@@ -167,9 +167,65 @@ async fn main() -> anyhow::Result<()> {
                 path,
                 base,
                 description,
+                #[cfg(unix)]
+                start_session,
+                #[cfg(unix)]
+                prompt,
+                #[cfg(unix)]
+                provider,
+                #[cfg(unix)]
+                model,
+                #[cfg(unix)]
+                timeout,
             } => {
                 #[cfg(unix)]
-                extras::workspace_jobs::start(repo, branch, path, base, description.as_deref())?;
+                {
+                    anyhow::ensure!(
+                        !prompt.as_deref().is_some_and(|p| p.trim().is_empty()),
+                        "prompt must not be empty"
+                    );
+                    let job = extras::workspace_jobs::start(
+                        repo,
+                        branch,
+                        path,
+                        base,
+                        description.as_deref(),
+                    )?;
+                    if *start_session {
+                        eprintln!(
+                            "workspace job {} submitted; log {}",
+                            job.job,
+                            job.log.display()
+                        );
+                        let ready =
+                            extras::workspace_jobs::wait_ready(&job.job, timeout.unwrap_or(600))
+                                .await?;
+                        let session = match extras::session_cli::start(
+                            &ready.path,
+                            None,
+                            provider.as_deref(),
+                            model.as_deref(),
+                            prompt.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(session) => session,
+                            Err(error) => {
+                                println!(
+                                    "{}",
+                                    serde_json::json!({"workspace": ready, "session": null, "session_error": error.to_string()})
+                                );
+                                return Err(error);
+                            }
+                        };
+                        println!(
+                            "{}",
+                            serde_json::json!({"workspace": ready, "session": session})
+                        );
+                    } else {
+                        println!("{}", serde_json::to_string(&job)?);
+                    }
+                }
                 #[cfg(not(unix))]
                 let (path, _) = extras::git_worktree::create_workspace(
                     repo,
@@ -185,6 +241,10 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(unix)]
             cli::WorkspaceCommand::Status { job } => extras::workspace_jobs::status(job)?,
             #[cfg(unix)]
+            cli::WorkspaceCommand::Wait { job, timeout } => {
+                extras::workspace_jobs::wait(job, *timeout).await?;
+            }
+            #[cfg(unix)]
             cli::WorkspaceCommand::Logs { job } => extras::workspace_jobs::logs(job)?,
             #[cfg(unix)]
             cli::WorkspaceCommand::RunJob { job } => extras::workspace_jobs::run(job)?,
@@ -192,8 +252,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Some(cli::Command::Board { .. }) = &cli.command {
-        extras::emacs_board::print_json()?;
+    if let Some(cli::Command::Board {
+        command: cli::BoardCommand::List(filters),
+    }) = &cli.command
+    {
+        extras::emacs_board::print_json(filters)?;
         return Ok(());
     }
     #[cfg(unix)]
@@ -206,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 prompt,
             } => {
-                extras::session_cli::start(
+                let metadata = extras::session_cli::start(
                     path,
                     session.as_deref(),
                     provider.as_deref(),
@@ -214,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
                     prompt.as_deref(),
                 )
                 .await?;
+                println!("{metadata}");
             }
             cli::SessionCommand::Send { session, prompt } => {
                 let acknowledgement = extras::emacs::cli_request(session, Some(prompt)).await?;

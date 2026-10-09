@@ -9,8 +9,13 @@ Use the bash tool to invoke the installed `zerostack` binary. These commands do
 not require Emacs. Do not start an interactive TUI from a tool call.
 
 1. Inspect existing projects, worktrees, saved sessions and live sockets:
-   `zerostack board list`. Output is JSON; projects contain worktrees and
-   sessions, with non-Git directories under `loose_workspaces`.
+   Start with `zerostack board list --summary` to avoid large session records.
+   Narrow with `--repo /absolute/repo`, `--path /absolute/workspace`,
+   `--session UUID-OR-PREFIX`, and/or `--alive`; filters combine with AND.
+   Summaries give counts and workspace metadata, not session IDs or sockets.
+   Drop `--summary` for targeted details. Default output is unchanged JSON;
+   projects contain worktrees/sessions, and non-Git directories are under
+   `loose_workspaces`. Paths match exact board workspace paths, not descendants.
 2. Create an isolated Git workspace:
    `zerostack workspace create --repo /absolute/repo --branch task-name --path /absolute/new-workspace --description "Task purpose"`.
    On Unix, output is JSON with `job`, `path`, `branch`, `status`, and `log`.
@@ -23,8 +28,12 @@ not require Emacs. Do not start an interactive TUI from a tool call.
    executable repository policy: only use repositories trusted by the user.
    A failed hydrate leaves the created workspace in place; inspect the error
    rather than blindly retrying or deleting it.
-   Poll `zerostack workspace status --job FULL-JOB-UUID` using short tool calls
-   with a pause between polls. Read complete combined hook stdout/stderr with
+   Use `zerostack workspace wait --job FULL-JOB-UUID --timeout 600` rather than
+   repeated polling. It reports phase changes and ten-second timing heartbeats
+   to stderr, then final JSON to stdout. Only `ready` exits successfully; failure,
+   interruption, and timeout return nonzero. Timeout does not cancel setup:
+   wait on the same job again. Status/wait include total and per-phase timings
+   for new jobs. Read complete combined hook stdout/stderr with
    `zerostack workspace logs --job FULL-JOB-UUID`, or tail the returned log path.
    Status progresses through `queued`, `preparing`, `creating`, `hydrating` to
    `ready` or `failed`. `interrupted` means the worker died without completion;
@@ -36,6 +45,14 @@ not require Emacs. Do not start an interactive TUI from a tool call.
    `zerostack session start --path /absolute/new-workspace --prompt "Concrete task and acceptance criteria"`.
    Optionally select `--provider NAME --model ID`. Output is JSON containing
    the full session UUID, PID, socket and log path, after protocol readiness.
+   Alternatively, add `--start-session --prompt "Concrete task"` to
+   `workspace create` to wait for successful setup and then start the session.
+   Optional `--provider`, `--model`, and `--timeout` require `--start-session`.
+   This prints one JSON object containing `workspace` and `session` on success.
+   Failed/timed-out setup never starts a session. After a setup timeout, wait on
+   the saved job and use `session start`, not another create command. Session
+   startup failure retains the workspace; initial-prompt failure may leave a live
+   worker, with metadata in the error. Inspect before retrying.
    Omitting `--prompt` creates an idle worker. The worker persists independently
    of this CLI command and can be attached through the Emacs board later.
 4. Send another turn to an idle worker:

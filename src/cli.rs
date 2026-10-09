@@ -338,7 +338,25 @@ pub enum Command {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum BoardCommand {
-    List,
+    #[command(about = "List board metadata as JSON, optionally filtered or summarized")]
+    List(BoardListArgs),
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BoardListArgs {
+    #[arg(long, help = "Repository root or any of its worktrees")]
+    pub repo: Option<std::path::PathBuf>,
+    #[arg(long, help = "Exact worktree or loose workspace path")]
+    pub path: Option<std::path::PathBuf>,
+    #[arg(long, help = "Session UUID or prefix; retains all matches")]
+    pub session: Option<String>,
+    #[arg(long, help = "Retain only live sessions")]
+    pub alive: bool,
+    #[arg(
+        long,
+        help = "Return counts and workspace metadata without session records"
+    )]
+    pub summary: bool,
 }
 
 #[cfg(unix)]
@@ -368,6 +386,18 @@ pub enum SessionCommand {
 #[derive(Subcommand, Debug, Clone)]
 pub enum WorkspaceCommand {
     #[cfg(unix)]
+    #[command(about = "Wait for readiness, reporting progress on stderr and final JSON on stdout")]
+    Wait {
+        #[arg(long)]
+        job: String,
+        #[arg(
+            long,
+            default_value_t = 600,
+            help = "Maximum wait seconds; timeout does not cancel setup"
+        )]
+        timeout: u64,
+    },
+    #[cfg(unix)]
     Status {
         #[arg(long)]
         job: String,
@@ -394,6 +424,28 @@ pub enum WorkspaceCommand {
         base: String,
         #[arg(long)]
         description: Option<String>,
+        #[cfg(unix)]
+        #[arg(
+            long,
+            help = "Wait for successful setup, then start a persistent session"
+        )]
+        start_session: bool,
+        #[cfg(unix)]
+        #[arg(long, requires = "start_session")]
+        prompt: Option<String>,
+        #[cfg(unix)]
+        #[arg(long, requires = "start_session")]
+        provider: Option<String>,
+        #[cfg(unix)]
+        #[arg(long, requires = "start_session")]
+        model: Option<String>,
+        #[cfg(unix)]
+        #[arg(
+            long,
+            requires = "start_session",
+            help = "Maximum setup wait seconds (default: 600); does not cancel setup"
+        )]
+        timeout: Option<u64>,
     },
 }
 
@@ -497,9 +549,115 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Board {
-                command: super::BoardCommand::List
+                command: super::BoardCommand::List(_)
             })
         ));
+    }
+
+    #[test]
+    fn parses_board_filters_and_summary() {
+        let cli = Cli::try_parse_from([
+            "zerostack",
+            "board",
+            "list",
+            "--repo",
+            "/repo",
+            "--path",
+            "/workspace",
+            "--session",
+            "abc",
+            "--alive",
+            "--summary",
+        ])
+        .unwrap();
+        let Some(Command::Board {
+            command: super::BoardCommand::List(filters),
+        }) = cli.command
+        else {
+            panic!("expected board list")
+        };
+        assert_eq!(filters.repo.as_deref(), Some(std::path::Path::new("/repo")));
+        assert_eq!(
+            filters.path.as_deref(),
+            Some(std::path::Path::new("/workspace"))
+        );
+        assert_eq!(filters.session.as_deref(), Some("abc"));
+        assert!(filters.alive && filters.summary);
+        assert!(Cli::try_parse_from(["zerostack", "board", "list", "--repo"]).is_err());
+    }
+
+    #[cfg(all(unix, feature = "git-worktree"))]
+    #[test]
+    fn parses_workspace_session_chaining_and_requires_explicit_start() {
+        let base = [
+            "zerostack",
+            "workspace",
+            "create",
+            "--repo",
+            "/repo",
+            "--branch",
+            "task",
+            "--path",
+            "/workspace",
+        ];
+        let cli = Cli::try_parse_from(base.into_iter().chain([
+            "--start-session",
+            "--prompt",
+            "Task",
+            "--provider",
+            "openai",
+            "--model",
+            "model",
+            "--timeout",
+            "60",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Workspace {
+                command: super::WorkspaceCommand::Create {
+                    start_session: true,
+                    prompt: Some(_),
+                    timeout: Some(60),
+                    ..
+                }
+            })
+        ));
+        for flag in ["--prompt", "--provider", "--model", "--timeout"] {
+            assert!(Cli::try_parse_from(base.into_iter().chain([flag, "1"])).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(
+                base.into_iter()
+                    .chain(["--start-session", "--timeout", "-1"])
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(all(unix, feature = "git-worktree"))]
+    #[test]
+    fn parses_workspace_wait_and_validates_timeout() {
+        let parse = |timeout| {
+            Cli::try_parse_from([
+                "zerostack",
+                "workspace",
+                "wait",
+                "--job",
+                "id",
+                "--timeout",
+                timeout,
+            ])
+        };
+        assert!(matches!(
+            parse("30").unwrap().command,
+            Some(Command::Workspace {
+                command: super::WorkspaceCommand::Wait { timeout: 30, .. }
+            })
+        ));
+        assert!(parse("-1").is_err());
+        assert!(parse("not-a-number").is_err());
+        assert!(Cli::try_parse_from(["zerostack", "workspace", "wait"]).is_err());
     }
 
     #[cfg(unix)]
