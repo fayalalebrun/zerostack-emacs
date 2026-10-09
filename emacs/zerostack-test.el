@@ -8,6 +8,30 @@
 (require 'cl-lib)
 (require 'zerostack)
 
+(ert-deftest zerostack-test-launcher-does-not-put-environment-secrets-in-arguments ()
+  (with-temp-buffer
+    (let ((process-environment '("TEST_SECRET=private-value" "PATH=/bin"))
+          command stderr log-file)
+      (unwind-protect
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (name) (concat "/bin/" name)))
+                    ((symbol-function 'make-process)
+                     (lambda (&rest options)
+                       (setq command (plist-get options :command)
+                             stderr (plist-get options :stderr))
+                       'launcher))
+                    ((symbol-function 'process-put)
+                     (lambda (_ key value)
+                       (when (eq key 'zerostack-log-file) (setq log-file value))))
+                    ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+            (zerostack--start-server '("--model" "$literal model"))
+            (should (string-match-p "systemd-run" (caddr command)))
+            (should (string-match-p (regexp-quote (shell-quote-argument "--setenv=TEST_SECRET")) (caddr command)))
+            (should (string-match-p (regexp-quote (shell-quote-argument "--expand-environment=no")) (caddr command)))
+            (should-not (string-match-p "private-value" (caddr command))))
+        (when (buffer-live-p stderr) (kill-buffer stderr))
+        (when log-file (delete-file log-file))))))
+
 (ert-deftest zerostack-test-restart-idle-includes-detached-legacy-and-deduplicates ()
   (let (restarted)
     (cl-letf (((symbol-function 'zerostack-board--fetch)
@@ -111,7 +135,8 @@
           (should (equal started '("--session" "attached"))))))))
 
 (ert-deftest zerostack-test-daemon-survives-emacs-exit ()
-  (let* ((script (make-temp-file "zerostack-persistent-" nil ".sh"))
+  (let* ((default-directory temporary-file-directory)
+         (script (make-temp-file "zerostack-persistent-" nil ".sh"))
          (pid-file (make-temp-file "zerostack-pid-"))
          (library (locate-library "zerostack"))
          (socket (make-temp-name (expand-file-name "zerostack-persist-" temporary-file-directory)))
@@ -140,8 +165,12 @@
             (should
              (zerop
               (call-process
-               (expand-file-name invocation-name invocation-directory)
-               nil t nil "--batch" "-Q" "-l" library "--eval"
+               "systemd-run"
+               nil t nil "--user" "--wait" "--collect" "--quiet" "--pipe"
+               "--service-type=exec"
+               (concat "--working-directory=" default-directory)
+               "--" (expand-file-name invocation-name invocation-directory)
+               "--batch" "-Q" "-l" library "--eval"
                (prin1-to-string
                 `(progn
                    (setq zerostack-command ,script)
@@ -158,6 +187,10 @@
                       (string-to-number (buffer-string))))
           (should (> pid 1))
           (should (process-attributes pid))
+          (with-temp-buffer
+            (insert-file-contents (format "/proc/%s/cgroup" pid))
+            (should (string-match-p "run-.*\\.service" (buffer-string)))
+            (should-not (string-match-p "/emacs.service" (buffer-string))))
           (zerostack-test--wait-until (lambda () (file-exists-p socket)))
           (dotimes (_ 2)
             (setq reply nil)

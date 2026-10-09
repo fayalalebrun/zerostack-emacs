@@ -604,15 +604,21 @@ Load it from a checkout:
 (require 'zerostack)
 ```
 
-Emacs launches persistent daemons using `setsid` (required on the host), with
-stdin detached and stdout/stderr redirected to a private temporary log file.
+Emacs launches persistent daemons in separate transient user services using
+`systemd-run --user` (requires systemd-run and an active user systemd manager).
+Each daemon has its own cgroup, so restarting `emacs.service` does not kill it.
+The working directory and Emacs environment are preserved; environment values
+are inherited without placing credentials in launcher command-line arguments.
+Stdin is detached and stdout/stderr go to a private temporary log file.
 Closing a chat buffer, disconnecting, or exiting Emacs leaves the daemon running.
+No permanent unit files or user-manager configuration are installed.
 Reopen the board and press `RET` on a live session to reattach. Use the board's
 `s` action to explicitly stop a daemon, or the chat menu's `restart` action to
 replace it. Sessions do not automatically restart after logout or reboot.
 Startup failures are reported in the chat; startup polling stops after 30 seconds
 and displays the log path without killing a potentially slow-starting daemon.
-Existing daemons launched before this change must be restarted to detach them.
+Reload the updated Lisp and restart existing daemons to move them out of the
+Emacs service's cgroup; Unix `setsid` alone does not provide this isolation.
 The board reads daemon-published activity (`idle`, `running`, or
 `waiting-permission`) independently of open chat buffers. Active loops and
 unfinished prompt drivers remain busy between turns. Older daemons that do not

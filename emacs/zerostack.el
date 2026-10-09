@@ -1968,19 +1968,29 @@ Return non-nil when DIRECTORY was newly added."
   (setq zerostack--server-args args)
   (let* ((client-buffer (current-buffer))
          (stderr-buffer (generate-new-buffer " *zerostack stderr*"))
-         (setsid (or (executable-find "setsid")
-                     (user-error "Persistent sessions require setsid")))
+         (systemd-run (or (executable-find "systemd-run")
+                          (user-error "Persistent sessions require systemd-run and a user systemd manager")))
+         (executable (or (executable-find zerostack-command)
+                         (user-error "Cannot find zerostack executable: %s" zerostack-command)))
          (log-file (make-temp-file "zerostack-daemon-" nil ".log"))
-         (daemon-command (mapconcat #'shell-quote-argument
-                                    (append (list zerostack-command "--emacs") args) " "))
+         (environment (delete-dups
+                       (delq nil (mapcar
+                                  (lambda (entry)
+                                    (when (string-match "\\`\\([A-Za-z_][A-Za-z0-9_]*\\)=" entry)
+                                      (concat "--setenv=" (match-string 1 entry))))
+                                  process-environment))))
+         (daemon-command
+          (mapconcat #'shell-quote-argument
+                     (append (list systemd-run "--user" "--wait" "--collect" "--quiet"
+                                   "--service-type=exec" "--expand-environment=no"
+                                   (concat "--working-directory=" (expand-file-name default-directory))
+                                   "--property=StandardInput=null"
+                                   (concat "--property=StandardOutput=append:" log-file)
+                                   (concat "--property=StandardError=append:" log-file))
+                             environment (list "--" executable "--emacs") args) " "))
          (command (list shell-file-name "-c"
-                        (format "%s --fork --wait %s -c %s </dev/null; status=$?; cat %s >&2; exit \"$status\""
-                                (shell-quote-argument setsid)
-                                (shell-quote-argument shell-file-name)
-                                (shell-quote-argument
-                                 (format "exec %s >%s 2>&1" daemon-command
-                                         (shell-quote-argument log-file)))
-                                (shell-quote-argument log-file))))
+                        (format "%s </dev/null; status=$?; cat %s >&2; exit \"$status\""
+                                daemon-command (shell-quote-argument log-file))))
          (process (make-process
                    :name "zerostack-server"
                    :buffer nil
