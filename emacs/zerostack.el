@@ -323,6 +323,13 @@ math macros while keeping the original LaTeX source and artifact link intact."
   `(let ((buffer-undo-list t))
      ,@body))
 
+(defun zerostack--setup-transcript-display ()
+  "Set up display state shared by live transcripts and read-only archives."
+  (setq-local zerostack--latex-items (make-hash-table :test 'equal))
+  (setq-local zerostack--artifacts nil)
+  (setq-local zerostack--latex-overlays nil)
+  (setq truncate-lines nil))
+
 ;;;###autoload
 (define-derived-mode zerostack-mode fundamental-mode "zerostack"
   "Major mode for native zerostack sessions."
@@ -358,10 +365,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
    (setq-local zerostack--notice-timer nil)
    (setq-local zerostack--ready-notify-timer nil)
    (setq-local zerostack--pending-permissions (make-hash-table :test 'eql))
-  (setq-local zerostack--latex-items (make-hash-table :test 'equal))
-  (setq-local zerostack--artifacts nil)
+  (zerostack--setup-transcript-display)
   (setq-local zerostack--clipboard-temp-files nil)
-  (setq-local zerostack--latex-overlays nil)
   (setq-local zerostack--last-notice nil)
   (setq truncate-lines nil)
   (when (fboundp 'yank-media-handler)
@@ -3596,13 +3601,48 @@ _o_ artifact                                              _R_ restart
                         :ascent 'center
                         :max-width (window-body-width nil t)))))))
 
+(define-derived-mode zerostack-archive-mode special-mode "zerostack-archive"
+  "Read-only rendered conversation before compaction."
+  (zerostack--setup-transcript-display))
+
+(defun zerostack-open-archive (path)
+  "Render compaction archive PATH without starting or connecting to an agent."
+  (let ((cols (or zerostack--cols zerostack-default-cols))
+        (cwd (or zerostack--cwd default-directory))
+        (lines nil))
+    (setq lines
+          (with-temp-buffer
+            (let ((status (call-process zerostack-command nil t nil
+					"--emacs-archive" path
+					"--emacs-archive-cols" (number-to-string cols))))
+              (unless (eq status 0)
+		(user-error "Cannot open compaction archive: %s"
+                            (string-trim (buffer-string))))
+              (goto-char (point-min))
+              (read (current-buffer)))))
+    (let ((buffer (get-buffer-create
+                   (format "*zerostack archive: %s*" (file-name-nondirectory path)))))
+      (with-current-buffer buffer
+	(zerostack-archive-mode)
+	(setq-local zerostack--cols cols)
+	(setq-local zerostack--cwd cwd)
+	(setq-local default-directory cwd)
+	(let ((inhibit-read-only t))
+          (erase-buffer)
+          (dolist (line lines)
+            (zerostack--insert-wire-line line))
+          (goto-char (point-min))))
+      (pop-to-buffer buffer))))
+
 (defun zerostack-open-url-at-point (&optional event)
   "Open the Markdown URL at point or mouse EVENT."
   (interactive (list last-nonmenu-event))
   (when (eventp event)
     (posn-set-point (event-end event)))
   (if-let ((url (get-text-property (point) 'zerostack-url)))
-      (if (string-prefix-p "zerostack-session:" url)
+      (if (string-prefix-p "zerostack-archive:" url)
+          (zerostack-open-archive (substring url (length "zerostack-archive:")))
+        (if (string-prefix-p "zerostack-session:" url)
           (let* ((payload (substring url (length "zerostack-session:")))
                  (parts (split-string payload "?workspace="))
                  (id (car parts))
@@ -3619,7 +3659,7 @@ _o_ artifact                                              _R_ restart
                    :cwd workspace
                    :worktree-path workspace
                     :socket (and socket (file-exists-p socket) socket))))
-        (browse-url url))
+        (browse-url url)))
     (zerostack--append-local-line "no URL at point" 'zs-error)))
 
 (defun zerostack--make-artifact-region (start end artifact)

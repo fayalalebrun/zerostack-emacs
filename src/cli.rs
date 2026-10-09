@@ -35,6 +35,12 @@ pub struct Cli {
     )]
     pub emacs_list: bool,
 
+    #[arg(long, hide = true)]
+    pub emacs_archive: Option<std::path::PathBuf>,
+
+    #[arg(long, hide = true, default_value = "100")]
+    pub emacs_archive_cols: usize,
+
     #[arg(
         long = "emacs-board",
         help = "Print an Emacs-readable project/worktree/session board snapshot"

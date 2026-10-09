@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::session::Session;
 
-fn session_dir() -> PathBuf {
+pub(crate) fn session_dir() -> PathBuf {
     dirs_path().join("sessions")
 }
 
@@ -111,6 +111,42 @@ pub fn archive_pre_compaction(session: &Session) -> anyhow::Result<PathBuf> {
         return Err(error.into());
     }
     Ok(path)
+}
+
+/// Find the snapshot immediately before the latest compaction in this session.
+pub fn previous_compaction_archive(session: &Session) -> anyhow::Result<Option<PathBuf>> {
+    previous_compaction_archive_in(&session_dir(), session)
+}
+
+fn previous_compaction_archive_in(
+    root: &std::path::Path,
+    session: &Session,
+) -> anyhow::Result<Option<PathBuf>> {
+    if session.compactions.is_empty() {
+        return Ok(None);
+    }
+    let dir = root
+        .join("compacted")
+        .join(safe_path_component(&session.id));
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let prefix = format!("{:04}-", session.compactions.len());
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "json")
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths.pop())
 }
 
 fn serialize_session(session: &Session) -> anyhow::Result<String> {
@@ -322,4 +358,43 @@ pub fn load_theme_name() -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value.get("theme")?.as_str().map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn archive_chain_selects_only_the_immediate_predecessor() {
+        let root = std::env::temp_dir().join(format!("zs-archive-test-{}", Uuid::new_v4()));
+        let mut session = Session::new("test", "model", 1000);
+        let dir = root
+            .join("compacted")
+            .join(safe_path_component(&session.id));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("0001-a.json");
+        let second = dir.join("0002-b.json");
+        std::fs::write(&first, "{}").unwrap();
+        std::fs::write(&second, "{}").unwrap();
+        assert_eq!(
+            previous_compaction_archive_in(&root, &session).unwrap(),
+            None
+        );
+        session.compress("first".into(), 0, 0);
+        assert_eq!(
+            previous_compaction_archive_in(&root, &session).unwrap(),
+            Some(first)
+        );
+        session.compress("second".into(), 0, 0);
+        assert_eq!(
+            previous_compaction_archive_in(&root, &session).unwrap(),
+            Some(second.clone())
+        );
+        std::fs::remove_file(second).unwrap();
+        assert_eq!(
+            previous_compaction_archive_in(&root, &session).unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

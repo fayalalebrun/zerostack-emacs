@@ -920,6 +920,30 @@ mod imp {
         }
     }
 
+    pub async fn print_archive(path: &std::path::Path, cols: usize) -> anyhow::Result<()> {
+        let root = crate::session::storage::session_dir()
+            .join("compacted")
+            .canonicalize()?;
+        let path = path.canonicalize()?;
+        anyhow::ensure!(
+            path.starts_with(root) && path.extension().is_some_and(|ext| ext == "json"),
+            "not a compaction archive"
+        );
+        let session: Session = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        let lines = render_session_lines_for(
+            &session,
+            &Cli::default(),
+            &Config::default(),
+            &crate::context::load(true),
+            cols,
+            None,
+            SessionRenderView::Compact,
+        )
+        .await;
+        println!("{}", lines_to_sexp(&lines));
+        Ok(())
+    }
+
     pub fn print_sessions() -> anyhow::Result<()> {
         let sessions = list_registered_sessions()?;
         if sessions.is_empty() {
@@ -4613,8 +4637,38 @@ mod imp {
         lines
     }
 
+    async fn create_render_artifact(
+        server: Option<&Arc<Server>>,
+        turn: u64,
+        kind: &'static str,
+        label: &str,
+        contents: &str,
+    ) -> anyhow::Result<ArtifactInfo> {
+        if let Some(server) = server {
+            return server.create_artifact(turn, kind, label, contents).await;
+        }
+        let dir = crate::session::storage::data_dir().join("archive-activity");
+        ensure_private_dir(&dir)?;
+        let path = dir.join(format!(
+            "{}-{}.txt",
+            safe_filename(label),
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::write(&path, contents).await?;
+        Ok(ArtifactInfo {
+            kind,
+            path,
+            mime: "text/plain; charset=utf-8",
+            bytes: contents.len(),
+            preview: preview_text(contents),
+            ephemeral: false,
+        })
+    }
+
     async fn render_activity_message(
-        server: &Arc<Server>,
+        server: Option<&Arc<Server>>,
+        activity: &mut ActivityState,
+        running: bool,
         session: &Session,
         index: usize,
         results: &HashMap<&str, usize>,
@@ -4626,8 +4680,6 @@ mod imp {
         if let Some(call) = msg.tool_call.as_ref()
             && compact_activity_tool(&call.name)
         {
-            let running = server.mutable.lock().await.running;
-            let mut activity = server.activity.lock().await;
             let key = if let Some(key) = activity.calls.get(call.id.as_str()).cloned() {
                 *current = Some(key.clone());
                 key
@@ -4643,13 +4695,7 @@ mod imp {
                 activity.groups.insert(
                     key.clone(),
                     ActivityLog {
-                        artifact: server
-                            .create_artifact(
-                                0,
-                                "activity-log",
-                                &format!("activity-{}", uuid::Uuid::new_v4()),
-                                "",
-                            )
+                        artifact: create_render_artifact(server, 0, "activity-log", "activity", "")
                             .await?,
                         message_index: index,
                         calls: 0,
@@ -4685,13 +4731,12 @@ mod imp {
             return Ok(true);
         }
         if let Some(result) = msg.tool_result.as_ref() {
-            let mut activity = server.activity.lock().await;
             if let Some(key) = activity.calls.get(result.id.as_str()).cloned()
                 && let Some(&position) = positions.get(&key)
                 && let Some(log) = activity.groups.get_mut(&key)
             {
                 if !log.results.contains(result.id.as_str()) {
-                    let rendered = render_tool_result_message(msg, Some(server), 0).await;
+                    let rendered = render_tool_result_message(msg, server, 0).await;
                     log.add_result(result, &rendered.lines).await?;
                     let exceptions = tool_exception_lines(msg, rendered.artifact);
                     if !exceptions.is_empty() {
@@ -4721,7 +4766,6 @@ mod imp {
 
     #[derive(Clone, Copy)]
     enum SessionRenderView {
-        Detailed,
         Compact,
         CompactWithLatex,
     }
@@ -4735,14 +4779,20 @@ mod imp {
         server: Option<&Arc<Server>>,
         view: SessionRenderView,
     ) -> Vec<WireLine> {
-        let view = if server.is_none() {
-            SessionRenderView::Detailed
-        } else {
-            view
-        };
         let include_latex = matches!(view, SessionRenderView::CompactWithLatex);
-        let compact = !matches!(view, SessionRenderView::Detailed);
         let mut out = Vec::new();
+        if let Ok(Some(path)) = crate::session::storage::previous_compaction_archive(session) {
+            let url = format!("zerostack-archive:{}", path.display());
+            let mut line = WireLine::new("Previous session before compaction", "zs-link");
+            line.spans = vec![WireSpan {
+                text: line.text.clone(),
+                face: "zs-link",
+                url: Some(url),
+                image: None,
+            }];
+            out.push(line);
+            out.push(blank_line());
+        }
         if context.agents.is_some() {
             out.push(WireLine::new("[system] loaded AGENTS.md", "zs-muted"));
             out.push(blank_line());
@@ -4784,18 +4834,32 @@ mod imp {
         let mut grouped_results = std::collections::HashSet::new();
         let mut activity_group = None;
         let mut activity_positions = HashMap::new();
-        if compact && let Some(server) = server {
-            server.activity.lock().await.sync_session(session);
-        }
+        let running = if let Some(server) = server {
+            server.mutable.lock().await.running
+        } else {
+            false
+        };
+        let mut offline_activity = ActivityState::default();
+        let mut live_activity = if let Some(server) = server {
+            Some(server.activity.lock().await)
+        } else {
+            None
+        };
+        let activity = live_activity
+            .as_deref_mut()
+            .unwrap_or(&mut offline_activity);
+        activity.sync_session(session);
         for (message_index, msg) in session.messages.iter().enumerate() {
             if grouped_results.contains(&message_index)
                 || (msg.role == MessageRole::Assistant && msg.content.is_empty())
             {
                 continue;
             }
-            if compact && let Some(server) = server {
+            {
                 match render_activity_message(
                     server,
+                    activity,
+                    running,
                     session,
                     message_index,
                     &results,
@@ -5312,10 +5376,11 @@ mod imp {
             .and_then(|path| persistent_artifact(artifact_kind, path, &content));
         let artifact = match (artifact, server, name) {
             (Some(artifact), _, _) => Some(artifact),
-            (None, Some(server), Some(name)) => server
-                .create_artifact(turn, artifact_kind, name, &content)
-                .await
-                .ok(),
+            (None, server, Some(name)) => {
+                create_render_artifact(server, turn, artifact_kind, name, &content)
+                    .await
+                    .ok()
+            }
             _ => None,
         };
         let display_path = result
@@ -7499,6 +7564,80 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn compaction_archive_renders_recursive_predecessor_links() {
+            struct TestDataDir(Option<std::path::PathBuf>, std::path::PathBuf);
+            impl Drop for TestDataDir {
+                fn drop(&mut self) {
+                    crate::session::storage::set_test_data_dir(self.0.take());
+                    let _ = std::fs::remove_dir_all(&self.1);
+                }
+            }
+            let root =
+                std::env::temp_dir().join(format!("zs-render-archive-{}", uuid::Uuid::new_v4()));
+            let _guard = TestDataDir(
+                crate::session::storage::set_test_data_dir(Some(root.clone())),
+                root,
+            );
+            let mut session = Session::new("test", "model", 1000);
+            session.add_message(MessageRole::User, "original question");
+            session.add_message(MessageRole::Assistant, "original answer");
+            let first = crate::session::storage::archive_pre_compaction(&session).unwrap();
+            session.compress("first summary".into(), 2, 10);
+            session.add_message(MessageRole::User, "later question");
+            let second = crate::session::storage::archive_pre_compaction(&session).unwrap();
+            session.compress("second summary".into(), 2, 10);
+            let cli = Cli::default();
+            let cfg = Config::default();
+            let context = crate::context::load(true);
+            let current = render_session_lines_for(
+                &session,
+                &cli,
+                &cfg,
+                &context,
+                100,
+                None,
+                SessionRenderView::Compact,
+            )
+            .await;
+            assert_eq!(
+                current[0].spans[0].url.as_deref(),
+                Some(format!("zerostack-archive:{}", second.display()).as_str())
+            );
+            let previous: Session =
+                serde_json::from_str(&std::fs::read_to_string(second).unwrap()).unwrap();
+            let lines = render_session_lines_for(
+                &previous,
+                &cli,
+                &cfg,
+                &context,
+                100,
+                None,
+                SessionRenderView::Compact,
+            )
+            .await;
+            assert_eq!(
+                lines[0].spans[0].url.as_deref(),
+                Some(format!("zerostack-archive:{}", first.display()).as_str())
+            );
+            assert!(lines_to_sexp(&lines).contains("later question"));
+            let original: Session =
+                serde_json::from_str(&std::fs::read_to_string(first).unwrap()).unwrap();
+            let lines = render_session_lines_for(
+                &original,
+                &cli,
+                &cfg,
+                &context,
+                100,
+                None,
+                SessionRenderView::Compact,
+            )
+            .await;
+            let encoded = lines_to_sexp(&lines);
+            assert!(!encoded.contains("zerostack-archive:"));
+            assert!(encoded.contains("original answer"));
+        }
+
+        #[tokio::test]
         async fn session_render_lines_include_message_source_metadata() {
             let mut session = Session::new("openai", "gpt", 1000);
             session.add_message(MessageRole::User, "hello");
@@ -7513,7 +7652,7 @@ mod imp {
                 &context,
                 100,
                 None,
-                SessionRenderView::Detailed,
+                SessionRenderView::Compact,
             )
             .await;
             let encoded = lines_to_sexp(&lines);
@@ -7562,7 +7701,7 @@ mod imp {
                     &context,
                     100,
                     None,
-                    SessionRenderView::Detailed,
+                    SessionRenderView::Compact,
                 )
                 .await,
             );
@@ -7588,7 +7727,7 @@ mod imp {
                     &context,
                     100,
                     None,
-                    SessionRenderView::Detailed,
+                    SessionRenderView::Compact,
                 )
                 .await,
             );
@@ -7597,6 +7736,83 @@ mod imp {
             assert!(encoded.contains("summary line"));
             assert!(!encoded.contains("# summary line"));
             assert!(!encoded.contains("compacted 1 times"));
+        }
+
+        #[tokio::test]
+        async fn archive_and_live_transcripts_share_compact_rendering() {
+            let (server, registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            let mut session = server.session.lock().await.clone();
+            session.add_message(MessageRole::User, "question");
+            for id in ["call_a", "call_b"] {
+                session.add_tool_call_structured(
+                    "bash",
+                    &serde_json::json!({"command":"echo hi"}),
+                    id,
+                    None,
+                );
+            }
+            session.add_tool_result_structured("bash", "hi", "call_b", None);
+            session.add_tool_result_structured("bash", "error", "call_a", None);
+            session
+                .messages
+                .last_mut()
+                .unwrap()
+                .tool_result
+                .as_mut()
+                .unwrap()
+                .status = Some(crate::session::ToolResultStatus::Failed);
+            session.add_message(
+                MessageRole::Assistant,
+                "**Answer** with a [link](https://example.com)",
+            );
+            let context = crate::context::load(true);
+            let live = render_session_lines_for(
+                &session,
+                &server.cli,
+                &server.cfg,
+                &context,
+                72,
+                Some(&server),
+                SessionRenderView::Compact,
+            )
+            .await;
+            let offline = render_session_lines_for(
+                &session,
+                &server.cli,
+                &server.cfg,
+                &context,
+                72,
+                None,
+                SessionRenderView::Compact,
+            )
+            .await;
+            assert_eq!(live.len(), offline.len());
+            for (live, offline) in live.iter().zip(&offline) {
+                assert_eq!(live.text, offline.text);
+                assert_eq!(live.face, offline.face);
+                assert_eq!(live.spans, offline.spans);
+                assert_eq!(live.message_index, offline.message_index);
+                assert_eq!(live.role, offline.role);
+                assert_eq!(
+                    live.artifact.as_ref().map(|a| a.kind),
+                    offline.artifact.as_ref().map(|a| a.kind)
+                );
+            }
+            let rows: Vec<_> = offline
+                .iter()
+                .filter(|line| line.text.contains("[activity]"))
+                .collect();
+            assert_eq!(rows.len(), 1);
+            let details =
+                std::fs::read_to_string(&rows[0].artifact.as_ref().unwrap().path).unwrap();
+            assert!(details.contains("call_a") && details.contains("call_b"));
+            for line in offline {
+                if let Some(artifact) = line.artifact.filter(|a| a.kind == "activity-log") {
+                    let _ = std::fs::remove_file(artifact.path);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&registration.dir);
         }
 
         #[tokio::test]
@@ -7622,15 +7838,15 @@ mod imp {
                     &context,
                     100,
                     None,
-                    SessionRenderView::Detailed,
+                    SessionRenderView::Compact,
                 )
                 .await,
             );
 
             assert!(encoded.contains(":role tool-call"));
             assert!(encoded.contains("◈"));
-            assert!(encoded.contains(":role tool-result"));
-            assert!(encoded.contains("hi"));
+            assert!(encoded.contains("[activity]"));
+            assert!(!encoded.contains(":role tool-result"));
             assert!(encoded.contains(":role subagent-tool-call"));
             assert!(encoded.contains("zerostack-session:12345678-1234-1234-1234-123456789abc"));
             assert!(encoded.contains(":url"));
@@ -8708,25 +8924,21 @@ mod imp {
                 &context,
                 100,
                 Some(&server),
-                SessionRenderView::Detailed,
+                SessionRenderView::Compact,
             )
             .await;
             let rows: Vec<_> = lines
                 .iter()
                 .filter(|line| line.role == Some(MessageRole::ToolCall))
                 .collect();
-            assert_eq!(rows.len(), 2);
-            assert!(rows.iter().all(|row| row.text.contains("bash(output ")));
-            assert!(
-                std::fs::read_to_string(&rows[0].artifact.as_ref().unwrap().path)
-                    .unwrap()
-                    .contains("first")
-            );
-            assert!(
-                std::fs::read_to_string(&rows[1].artifact.as_ref().unwrap().path)
-                    .unwrap()
-                    .contains("second")
-            );
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].text.contains("[activity]"));
+            let details =
+                std::fs::read_to_string(&rows[0].artifact.as_ref().unwrap().path).unwrap();
+            assert!(details.contains("call_a"));
+            assert!(details.contains("call_b"));
+            assert!(details.contains("first"));
+            assert!(details.contains("second"));
             assert!(!lines.iter().any(|line| line.text.starts_with("  output:")));
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
@@ -9299,7 +9511,9 @@ mod imp {
 }
 
 #[cfg(unix)]
-pub use imp::{cli_request, print_sessions, serve, serve_subagent, session_socket_path};
+pub use imp::{
+    cli_request, print_archive, print_sessions, serve, serve_subagent, session_socket_path,
+};
 
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
@@ -9343,5 +9557,10 @@ pub fn session_socket_path(_session_id: &str) -> std::path::PathBuf {
 
 #[cfg(not(unix))]
 pub fn print_sessions() -> anyhow::Result<()> {
+    anyhow::bail!("native Emacs protocol requires Unix sockets")
+}
+
+#[cfg(not(unix))]
+pub async fn print_archive(_path: &std::path::Path, _cols: usize) -> anyhow::Result<()> {
     anyhow::bail!("native Emacs protocol requires Unix sockets")
 }

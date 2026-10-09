@@ -134,7 +134,23 @@ the chat directly.
 | `/review [msg]` | Run a one-shot code review. Submits a review message using the core system prompt, temporarily enforces readonly security mode, and restores the previous security mode afterward. Without a message, auto-generates one based on session and worktree context. |
 
 Before each successful compaction, zerostack archives the complete pre-compaction
-session under `<data-dir>/sessions/compacted/<session-id>/`. Session JSON also
+session under `<data-dir>/sessions/compacted/<session-id>/`.
+
+In Emacs, a compacted transcript starts with a **Previous session before
+compaction** link when its archive exists. Open the link to view the conversation
+immediately before the latest compaction in a separate, read-only buffer. Each
+archive has the same link to its previous snapshot, when available. Follow these
+links to view earlier history. The first snapshot has no previous-session link.
+Live transcripts and archives use the same compact renderer, including grouped
+activity rows and their detail links. Archive buffers use the current transcript
+width and display setup. There is no detailed transcript mode. Archive activity
+detail files are retained under `<data-dir>/archive-activity/` so their links
+remain available after the rendering command exits.
+Opening an archive does not start an agent or connect to a live session. If an
+archive is removed after its link appears, opening the link reports an error.
+Reload the updated Emacs client and restart idle daemons to enable these links.
+
+Session JSON also
 stores each provider call's token usage and `duration_ms`; tool results retain
 their existing `duration_ms`, allowing provider-wait and tool time analysis.
 | `/toggle` | Show available toggleable features. |
@@ -330,7 +346,7 @@ matched by call ID. `activity-row` events update the group's first message index
 without changing logical transcript line counts; compact `tool-result` events
 carry `:compact t` so the client avoids redundant artifact caching.
 
-For detailed protocol rendering, tool output links stay on their matching call row, for example
+For tool output artifacts, links use the following wire format, for example
 `◈ bash(output 17.9 KB [1.2s]) cargo test`. Parallel calls are matched by call ID,
 not tool name or completion order. Reopened sessions use the same grouped layout.
 Agent runs execute up to eight tool calls concurrently, including calls to the

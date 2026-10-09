@@ -290,6 +290,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(path) = &cli.emacs_archive {
+        extras::emacs::print_archive(path, cli.emacs_archive_cols.max(1)).await?;
+        return Ok(());
+    }
+
     if cli.emacs_list {
         extras::emacs::print_sessions()?;
         return Ok(());

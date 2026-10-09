@@ -8,6 +8,61 @@
 (require 'cl-lib)
 (require 'zerostack)
 
+(ert-deftest zerostack-test-archive-keeps-transcript-width-and-display-state ()
+  (let ((zerostack--cols 72)
+        (zerostack--cwd temporary-file-directory)
+        buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'call-process)
+                   (lambda (_program _in _destination _display &rest args)
+                     (should (equal args '("--emacs-archive" "/tmp/width-test.json"
+                                           "--emacs-archive-cols" "72")))
+                     (insert "((:text \"answer\" :face zs-normal))")
+                     0))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (value &rest _) (setq buffer value))))
+          (zerostack-open-archive "/tmp/width-test.json")
+          (with-current-buffer buffer
+            (should (= zerostack--cols 72))
+            (should (equal default-directory temporary-file-directory))
+            (should (hash-table-p zerostack--latex-items))
+            (should buffer-read-only)
+            (should-not truncate-lines)))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest zerostack-test-missing-compaction-archive-reports-error ()
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (&rest _)
+               (insert "archive does not exist")
+               1))
+            ((symbol-function 'pop-to-buffer)
+             (lambda (&rest _) (ert-fail "Must not open a buffer on failure"))))
+    (should-error (zerostack-open-archive "/missing.json") :type 'user-error)))
+
+(ert-deftest zerostack-test-compaction-archive-is-read-only-and-recursive ()
+  (let (opened buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'call-process)
+                   (lambda (_program _in _destination _display &rest args)
+                     (should (equal args (list "--emacs-archive" "/tmp/0002-test.json"
+                                               "--emacs-archive-cols" (number-to-string zerostack-default-cols))))
+                     (insert "((:text \"Previous session before compaction\" :face zs-link :spans ((:text \"Previous session before compaction\" :face zs-link :url \"zerostack-archive:/tmp/0001-test.json\"))) (:text \"old reply\" :face zs-normal))")
+                     0))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (value &rest _) (setq buffer value))))
+          (zerostack-open-archive "/tmp/0002-test.json")
+          (with-current-buffer buffer
+            (should buffer-read-only)
+            (should (derived-mode-p 'zerostack-archive-mode))
+            (should-not (get-buffer-process buffer))
+            (should (string-match-p "old reply" (buffer-string)))
+            (cl-letf (((symbol-function 'zerostack-open-archive)
+                       (lambda (path) (setq opened path))))
+              (goto-char (point-min))
+              (zerostack-open-url-at-point)
+              (should (equal opened "/tmp/0001-test.json")))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 (ert-deftest zerostack-test-client-delegates-daemon-launch-to-rust ()
   (with-temp-buffer
     (let ((process-environment '("TEST_SECRET=private-value" "PATH=/bin"))
