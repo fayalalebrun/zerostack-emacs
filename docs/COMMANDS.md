@@ -575,10 +575,14 @@ zerostack session send --session FULL-UUID --prompt "Follow-up task"
 ```
 
 `board list` returns JSON using the same snapshot as the Emacs board.
-On Unix, `session start` launches a background socket worker and returns JSON
-with `session`, `pid`, `path`, `socket`, and `log` after a readiness handshake.
-It accepts optional `--provider` and `--model`; omit `--prompt` for an idle worker.
-Startup has a 30-second deadline; failed startup reports the private log path.
+On Unix, `session start` uses the shared Rust daemon launcher to start a separate
+systemd user service and returns JSON with `session`, `pid`, `path`, `socket`,
+`log`, and `unit` after a readiness handshake. It accepts optional `--provider`,
+`--model`, and `--session ID-PREFIX` to resume a saved session; omit `--prompt`
+for an idle worker. An already-running session is rejected rather than duplicated.
+Startup has a 30-second deadline; failed startup reports the private log path,
+and a timed-out service is stopped. Logs are retained under
+`<data-dir>/session-logs/` with private file permissions.
 Workers retain normal permissions and may wait for approval through a socket
 client such as Emacs. The process continues after the CLI exits.
 
@@ -610,19 +614,24 @@ Load it from a checkout:
 (require 'zerostack)
 ```
 
-Emacs launches persistent daemons in separate transient user services using
+Both Emacs and `zerostack session start` use the same Rust-owned launcher in
+`src/extras/session_cli.rs`. Emacs invokes `zerostack --emacs-launch` with its
+existing startup arguments, then connects to the reported socket; Lisp does not
+construct systemd commands or independently configure daemon processes.
+The shared launcher creates separate transient user services using
 `systemd-run --user` (requires systemd-run and an active user systemd manager).
 Each daemon has its own cgroup, so restarting `emacs.service` does not kill it.
 The working directory and Emacs environment are preserved; environment values
 are inherited without placing credentials in launcher command-line arguments.
-Stdin is detached and stdout/stderr go to a private temporary log file.
+Stdin is detached and stdout/stderr go to a private retained session log file.
 Closing a chat buffer, disconnecting, or exiting Emacs leaves the daemon running.
 No permanent unit files or user-manager configuration are installed.
 Reopen the board and press `RET` on a live session to reattach. Use the board's
 `s` action to explicitly stop a daemon, or the chat menu's `restart` action to
 replace it. Sessions do not automatically restart after logout or reboot.
-Startup failures are reported in the chat; startup polling stops after 30 seconds
-and displays the log path without killing a potentially slow-starting daemon.
+Startup failures are reported in the chat with the retained log path. The shared
+Rust launcher enforces the 30-second startup deadline and stops timed-out units;
+the Emacs client has a 35-second fallback notification timeout.
 Reload the updated Lisp and restart existing daemons to move them out of the
 Emacs service's cgroup; Unix `setsid` alone does not provide this isolation.
 The board reads daemon-published activity (`idle`, `running`, or

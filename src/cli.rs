@@ -28,6 +28,10 @@ pub struct Cli {
     )]
     pub emacs: bool,
 
+    #[cfg(unix)]
+    #[arg(long, hide = true)]
+    pub emacs_launch: bool,
+
     #[arg(
         long = "emacs-list",
         help = "List running native Emacs protocol sessions"
@@ -344,6 +348,8 @@ pub enum SessionCommand {
         #[arg(long)]
         path: std::path::PathBuf,
         #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
@@ -519,6 +525,41 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["zerostack", "session", "send", "--session", "id"]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_shared_launcher_and_resumed_session_start() {
+        let cli = Cli::try_parse_from([
+            "zerostack",
+            "--emacs-launch",
+            "--session",
+            "saved",
+            "--no-tools",
+        ])
+        .unwrap();
+        assert!(cli.emacs_launch);
+        assert_eq!(cli.session.as_deref(), Some("saved"));
+        assert!(cli.no_tools);
+        let cli = Cli::try_parse_from([
+            "zerostack",
+            "session",
+            "start",
+            "--path",
+            "/tmp",
+            "--session",
+            "saved",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                command: super::SessionCommand::Start {
+                    session: Some(_),
+                    ..
+                }
+            })
+        ));
     }
 
     #[cfg(feature = "git-worktree")]

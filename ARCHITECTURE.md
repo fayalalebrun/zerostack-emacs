@@ -89,7 +89,10 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 5. **Feature-gated extras** — `loop`, `mcp`, `acp`, `memory`, `subagents`, `git-worktree`, `archmd`, and `veles` are compile-time features. Extras don't bloat builds that disable them.
 6. **Single-threaded tokio by default** — `#[tokio::main(flavor = "current_thread")]` unless `multithread` feature enabled. Keeps resource usage low for a CLI tool.
 7. **Process-isolated subagents** — `task` starts a one-shot zerostack child with its own persisted session and a read-only Emacs socket for real-time attachment. Write tasks snapshot the current working state into a persistent CoW Git worktree or copied directory; parent sessions store links and access rules for child transcripts/workspaces. (`src/extras/subagents/task_tool.rs`, `workspace.rs`, `src/extras/emacs.rs`)
+
 8. **Worktree-shared Veles index** — the feature-gated embedded Veles tool stores indexes under the zerostack cache directory, keyed by the canonical Git common directory. Calls from all worktrees serialize through a per-repository file lock and refresh the shared index from the active worktree. (`src/agent/tools/veles.rs`)
+
+9. **Shared persistent-session launcher** — `src/extras/session_cli.rs` owns systemd user-service creation, environment inheritance, private retained logs, session identity resolution, startup readiness, and timeout cleanup. Both `zerostack session start` and the Emacs client's `--emacs-launch` entry point call it. Emacs only connects to the returned socket; daemons run outside the caller's cgroup. (`src/main.rs`, `emacs/zerostack.el`)
 
 ## Dependencies
 

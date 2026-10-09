@@ -8,7 +8,7 @@
 (require 'cl-lib)
 (require 'zerostack)
 
-(ert-deftest zerostack-test-launcher-does-not-put-environment-secrets-in-arguments ()
+(ert-deftest zerostack-test-client-delegates-daemon-launch-to-rust ()
   (with-temp-buffer
     (let ((process-environment '("TEST_SECRET=private-value" "PATH=/bin"))
           command stderr log-file)
@@ -25,10 +25,8 @@
                        (when (eq key 'zerostack-log-file) (setq log-file value))))
                     ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
             (zerostack--start-server '("--model" "$literal model"))
-            (should (string-match-p "systemd-run" (caddr command)))
-            (should (string-match-p (regexp-quote (shell-quote-argument "--setenv=TEST_SECRET")) (caddr command)))
-            (should (string-match-p (regexp-quote (shell-quote-argument "--expand-environment=no")) (caddr command)))
-            (should-not (string-match-p "private-value" (caddr command))))
+            (should (equal command (list zerostack-command "--emacs-launch" "--model" "$literal model")))
+            (should-not (member "private-value" command)))
         (when (buffer-live-p stderr) (kill-buffer stderr))
         (when log-file (delete-file log-file))))))
 
@@ -134,82 +132,77 @@
           (funcall callback)
           (should (equal started '("--session" "attached"))))))))
 
-(ert-deftest zerostack-test-daemon-survives-emacs-exit ()
+(ert-deftest zerostack-test-both-frontends-survive-launching-service-exit ()
   (let* ((default-directory temporary-file-directory)
-         (script (make-temp-file "zerostack-persistent-" nil ".sh"))
-         (pid-file (make-temp-file "zerostack-pid-"))
+         (root (make-temp-file "zerostack-shared-launch-" t))
+         (executable (executable-find "zerostack"))
          (library (locate-library "zerostack"))
-         (socket (make-temp-name (expand-file-name "zerostack-persist-" temporary-file-directory)))
-         pid log-file connection reply)
+         (process-environment (append (list (concat "ZS_DATA_DIR=" root)
+                                            (concat "ZS_CONFIG_DIR=" root)
+                                            (concat "ZS_RUNTIME_DIR=" root "/runtime"))
+                                      process-environment))
+         pids connection reply)
     (unwind-protect
         (progn
-          (with-temp-file script
-            (insert "#!/bin/sh\n"
-                    "echo $$ > " (shell-quote-argument pid-file) "\n"
-                    "exec "
-                    (mapconcat #'shell-quote-argument
-                               (list (expand-file-name invocation-name invocation-directory)
-                                     "--batch" "-Q" "--eval"
-                                     (prin1-to-string
-                                      `(progn
-                                         (make-network-process
-                                          :name "persistent-test" :family 'local
-                                          :service ,socket :server t :noquery t
-                                          :filter (lambda (process text)
-                                                    (process-send-string process text)))
-                                         (sleep-for 60))))
-                               " ")
-                    "\n"))
-          (set-file-modes script #o700)
-          (with-temp-buffer
-            (should
-             (zerop
-              (call-process
-               "systemd-run"
-               nil t nil "--user" "--wait" "--collect" "--quiet" "--pipe"
-               "--service-type=exec"
-               (concat "--working-directory=" default-directory)
-               "--" (expand-file-name invocation-name invocation-directory)
-               "--batch" "-Q" "-l" library "--eval"
-               (prin1-to-string
-                `(progn
-                   (setq zerostack-command ,script)
-                   (zerostack--start-server nil)
-                   (princ (process-get zerostack--server-process 'zerostack-log-file))
-                   (let ((deadline (+ (float-time) 5)))
-                     (while (and (zerop (file-attribute-size (file-attributes ,pid-file)))
-                                 (< (float-time) deadline))
-                       (sleep-for 0.05)))
-                   (kill-emacs 0))))))
-            (setq log-file (string-trim (buffer-string))))
-          (setq pid (with-temp-buffer
-                      (insert-file-contents pid-file)
-                      (string-to-number (buffer-string))))
-          (should (> pid 1))
-          (should (process-attributes pid))
-          (with-temp-buffer
-            (insert-file-contents (format "/proc/%s/cgroup" pid))
-            (should (string-match-p "run-.*\\.service" (buffer-string)))
-            (should-not (string-match-p "/emacs.service" (buffer-string))))
-          (zerostack-test--wait-until (lambda () (file-exists-p socket)))
-          (dotimes (_ 2)
-            (setq reply nil)
-            (setq connection
-                  (make-network-process
-                   :name "persistent-reattach" :family 'local :service socket
-                   :coding 'utf-8-unix :noquery t
-                   :filter (lambda (_process text) (setq reply text))))
-            (process-send-string connection "reattached\n")
-            (zerostack-test--wait-until (lambda () reply))
-            (should (equal reply "reattached\n"))
-            (delete-process connection)))
+          (with-temp-file (expand-file-name "config.toml" root)
+            (insert "mcp-servers = {}\n"))
+          (dolist (frontend '(emacs cli))
+            (let* ((flags '("--provider" "openai" "--model" "gpt-4o" "--api-key" "test-only"
+                            "--no-tools" "--no-context-files"))
+                   (command
+                    (if (eq frontend 'cli)
+                        (append (list executable "session" "start" "--path" root
+                                      "--provider" "openai" "--model" "gpt-4o") nil)
+                      (list (expand-file-name invocation-name invocation-directory)
+                            "--batch" "-Q" "-l" library "--eval"
+                            (prin1-to-string
+                             `(progn
+                                (zerostack-mode)
+                                (setq zerostack-command ,executable)
+                                (zerostack--start-server ',flags)
+                                (let ((deadline (+ (float-time) 35)))
+                                  (while (and (not zerostack--pid) (< (float-time) deadline))
+                                    (sleep-for 0.05)))
+                                (unless zerostack--pid (error "daemon did not become ready"))
+                                (princ (json-encode
+                                        (list :pid zerostack--pid :socket zerostack--socket
+                                              :session zerostack--session)))
+                                (kill-emacs 0))))))
+                   metadata pid socket)
+              (let ((process-environment (cons "OPENAI_API_KEY=test-only" process-environment)))
+                (with-temp-buffer
+                  (should (zerop
+                           (apply #'call-process "systemd-run" nil (list t nil) nil
+                                  (append '("--user" "--wait" "--collect" "--quiet" "--pipe"
+                                            "--service-type=exec" "--setenv=ZS_DATA_DIR"
+                                            "--setenv=ZS_CONFIG_DIR" "--setenv=ZS_RUNTIME_DIR"
+                                            "--setenv=OPENAI_API_KEY")
+                                          (list (concat "--working-directory=" root) "--") command))))
+                  (goto-char (point-min))
+                  (setq metadata (json-parse-buffer :object-type 'plist))))
+              (setq pid (plist-get metadata :pid) socket (plist-get metadata :socket))
+              (push pid pids)
+              (should (process-attributes pid))
+              (with-temp-buffer
+                (insert-file-contents (format "/proc/%s/cgroup" pid))
+                (should (string-match-p "/zerostack-.*\\.service" (buffer-string)))
+                (should-not (string-match-p "/emacs.service" (buffer-string))))
+              (dotimes (_ 2)
+                (setq reply "")
+                (setq connection
+                      (make-network-process
+                       :name "shared-launch-reattach" :family 'local :service socket
+                       :coding 'utf-8-unix :noquery t
+                       :filter (lambda (_process text) (setq reply (concat reply text)))))
+                (process-send-string connection "(status :request 1)\n")
+                (zerostack-test--wait-until (lambda () (string-match-p "(status " reply)))
+                (should (string-match-p (regexp-quote (plist-get metadata :session)) reply))
+                (delete-process connection)))))
       (when (and connection (process-live-p connection)) (delete-process connection))
-      (when (file-exists-p socket) (delete-file socket))
-      (when (and pid (> pid 1) (process-attributes pid))
-        (signal-process pid 'term))
-      (delete-file script)
-      (delete-file pid-file)
-      (when (and log-file (file-exists-p log-file)) (delete-file log-file)))))
+      (dolist (pid pids)
+        (when (and pid (process-attributes pid)) (signal-process pid 'term)))
+      (sleep-for 0.1)
+      (delete-directory root t))))
 
 (ert-deftest zerostack-test-startup-timeout-keeps-daemon-running ()
   (let ((client (generate-new-buffer " *zerostack-timeout*"))

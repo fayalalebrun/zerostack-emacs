@@ -1968,29 +1968,7 @@ Return non-nil when DIRECTORY was newly added."
   (setq zerostack--server-args args)
   (let* ((client-buffer (current-buffer))
          (stderr-buffer (generate-new-buffer " *zerostack stderr*"))
-         (systemd-run (or (executable-find "systemd-run")
-                          (user-error "Persistent sessions require systemd-run and a user systemd manager")))
-         (executable (or (executable-find zerostack-command)
-                         (user-error "Cannot find zerostack executable: %s" zerostack-command)))
-         (log-file (make-temp-file "zerostack-daemon-" nil ".log"))
-         (environment (delete-dups
-                       (delq nil (mapcar
-                                  (lambda (entry)
-                                    (when (string-match "\\`\\([A-Za-z_][A-Za-z0-9_]*\\)=" entry)
-                                      (concat "--setenv=" (match-string 1 entry))))
-                                  process-environment))))
-         (daemon-command
-          (mapconcat #'shell-quote-argument
-                     (append (list systemd-run "--user" "--wait" "--collect" "--quiet"
-                                   "--service-type=exec" "--expand-environment=no"
-                                   (concat "--working-directory=" (expand-file-name default-directory))
-                                   "--property=StandardInput=null"
-                                   (concat "--property=StandardOutput=append:" log-file)
-                                   (concat "--property=StandardError=append:" log-file))
-                             environment (list "--" executable "--emacs") args) " "))
-         (command (list shell-file-name "-c"
-                        (format "%s </dev/null; status=$?; cat %s >&2; exit \"$status\""
-                                daemon-command (shell-quote-argument log-file))))
+         (command (append (list zerostack-command "--emacs-launch") args))
          (process (make-process
                    :name "zerostack-server"
                    :buffer nil
@@ -1998,8 +1976,7 @@ Return non-nil when DIRECTORY was newly added."
                    :stderr stderr-buffer
                    :noquery t
                    :sentinel #'zerostack--server-sentinel)))
-    (process-put process 'zerostack-log-file log-file)
-    (process-put process 'zerostack-startup-deadline (+ (float-time) 30))
+    (process-put process 'zerostack-startup-deadline (+ (float-time) 35))
     (process-put process 'zerostack-buffer client-buffer)
     (process-put process 'zerostack-stderr-buffer stderr-buffer)
     (setq zerostack--server-process process)
@@ -2018,10 +1995,12 @@ Return non-nil when DIRECTORY was newly added."
   (when (and (buffer-live-p client-buffer) (buffer-live-p stderr-buffer))
     (let* ((process (buffer-local-value 'zerostack--server-process client-buffer))
            (log-file (and process (process-get process 'zerostack-log-file))))
-      (when (and log-file (file-readable-p log-file))
-        (with-current-buffer stderr-buffer
-          (erase-buffer)
-          (insert-file-contents log-file)))
+      (with-current-buffer stderr-buffer
+        (when (and process (save-excursion
+                             (goto-char (point-min))
+                             (re-search-forward "^log \\(.*\\)$" nil t)))
+          (setq log-file (match-string 1))
+          (process-put process 'zerostack-log-file log-file)))
       (when (and process
                  (> (float-time) (process-get process 'zerostack-startup-deadline)))
         (with-current-buffer client-buffer
@@ -2048,31 +2027,35 @@ Return non-nil when DIRECTORY was newly added."
                 (progn
                   (setq zerostack--detached-restart nil)
                   (kill-buffer client-buffer))
-              (zerostack--connect-buffer socket))))))))
+              (unless (zerostack--connected-to-socket-p socket)
+                (zerostack--connect-buffer socket)))))))))
 
 (defun zerostack--server-sentinel (process event)
   "Record zerostack server PROCESS EVENT in its client buffer when possible."
   (let ((buffer (process-get process 'zerostack-buffer))
         (stderr-text (zerostack--server-stderr-text process))
         (terminal (memq (process-status process) '(exit signal closed failed))))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (and terminal (eq process zerostack--server-process))
-          (when zerostack--startup-timer
-            (cancel-timer zerostack--startup-timer)
-            (setq zerostack--startup-timer nil))
-          (setq zerostack--server-process nil))
-        (zerostack--append-local-line
-         (if (and (not (zerop (process-exit-status process)))
-                  stderr-text
-                  (not (string-empty-p stderr-text)))
-             (format "server %s: %s" (string-trim event) stderr-text)
-           (format "server %s" (string-trim event)))
-         (if (zerop (process-exit-status process)) 'zs-muted 'zs-error))
-        (when (and terminal (bound-and-true-p zerostack--detached-restart))
-          (message "Detached restart server %s: %s" (string-trim event) stderr-text)
-          (setq zerostack--detached-restart nil)
-          (kill-buffer buffer))))))
+    (if (and terminal (zerop (process-exit-status process)) (buffer-live-p buffer))
+        (zerostack--poll-server-startup
+         buffer (process-get process 'zerostack-stderr-buffer))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (and terminal (eq process zerostack--server-process))
+            (when zerostack--startup-timer
+              (cancel-timer zerostack--startup-timer)
+              (setq zerostack--startup-timer nil))
+            (setq zerostack--server-process nil))
+          (zerostack--append-local-line
+           (if (and (not (zerop (process-exit-status process)))
+                    stderr-text
+                    (not (string-empty-p stderr-text)))
+               (format "server %s: %s" (string-trim event) stderr-text)
+             (format "server %s" (string-trim event)))
+           (if (zerop (process-exit-status process)) 'zs-muted 'zs-error))
+          (when (and terminal (bound-and-true-p zerostack--detached-restart))
+            (message "Detached restart server %s: %s" (string-trim event) stderr-text)
+            (setq zerostack--detached-restart nil)
+            (kill-buffer buffer)))))))
 
 (defun zerostack--server-stderr-text (process)
   "Return user-facing stderr text recorded for server PROCESS."

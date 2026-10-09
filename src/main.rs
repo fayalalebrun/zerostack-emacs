@@ -115,6 +115,18 @@ async fn main() -> anyhow::Result<()> {
     let (mut cfg, is_first_startup) = config::load();
     crate::startup_profile::mark("config:loaded");
 
+    #[cfg(unix)]
+    if cli.emacs_launch {
+        let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+        if let Some(index) = args.iter().position(|arg| arg == "--emacs-launch") {
+            args.remove(index);
+        }
+        let metadata = extras::session_cli::launch(&std::env::current_dir()?, args).await?;
+        eprintln!("socket {}", metadata["socket"].as_str().unwrap_or_default());
+        println!("{metadata}");
+        return Ok(());
+    }
+
     if cli.print_config {
         print_config(&cli, &cfg);
         return Ok(());
@@ -189,12 +201,14 @@ async fn main() -> anyhow::Result<()> {
         match command {
             cli::SessionCommand::Start {
                 path,
+                session,
                 provider,
                 model,
                 prompt,
             } => {
                 extras::session_cli::start(
                     path,
+                    session.as_deref(),
                     provider.as_deref(),
                     model.as_deref(),
                     prompt.as_deref(),
