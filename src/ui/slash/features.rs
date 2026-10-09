@@ -1,4 +1,3 @@
-use crate::ui::apply_current_prompt_mode;
 use crate::ui::events::render_session;
 use crate::ui::slash::{SlashCtx, write_error, write_ok, write_result};
 
@@ -96,7 +95,6 @@ async fn handle_worktree(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
                 .map_err(|e| anyhow::anyhow!("failed to change directory: {}", e))?;
             ctx.session.working_dir = compact_str::CompactString::new(path.to_string_lossy());
             ctx.context.reload();
-            apply_current_prompt_mode(ctx.context, ctx.permission);
             ctx.rebuild_agent().await;
             render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
             write_ok(

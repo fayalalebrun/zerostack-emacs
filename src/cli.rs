@@ -16,9 +16,6 @@ pub struct Cli {
     )]
     pub pure_stdout: bool,
 
-    #[arg(long = "load-prompt", help = "Load a named prompt (same as /prompt)")]
-    pub load_prompt: Option<String>,
-
     #[arg(long = "print-config", help = "Print resolved configuration and exit")]
     pub print_config: bool,
 

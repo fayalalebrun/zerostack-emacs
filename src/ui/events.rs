@@ -253,18 +253,9 @@ pub fn show_welcome(renderer: &mut Renderer) -> std::io::Result<()> {
         "    !<command>  Run a shell command (output stored as assistant)",
         Color::White,
     )?;
-    renderer.write_line(
-        "    .<prompt>   Switch prompt or one-shot .<prompt> <message>",
-        Color::White,
-    )?;
     renderer.write_line("", Color::White)?;
     renderer.write_line("  Slash Commands:", C_TOOL)?;
     renderer.write_line("    /model        Switch model", Color::White)?;
-    renderer.write_line("    /prompt       List / activate prompts", Color::White)?;
-    renderer.write_line(
-        "    .autoconfig        Switches to auto-configurator",
-        Color::White,
-    )?;
     renderer.write_line("    /mode         Change security mode", Color::White)?;
     renderer.write_line("    /clear        Clear session", Color::White)?;
     renderer.write_line("    /undo         Undo last exchange", Color::White)?;

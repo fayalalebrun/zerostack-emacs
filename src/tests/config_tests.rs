@@ -17,6 +17,41 @@ fn custom_provider(provider_type: &str) -> CustomProviderConfig {
 }
 
 #[test]
+fn legacy_prompt_configuration_is_ignored_without_affecting_security() {
+    let json = r#"{
+        "default_prompt": "ask",
+        "auto-update-prompts": true,
+        "chain": { "plan-to-code": true },
+        "default_permission_mode": "readonly"
+    }"#;
+    let toml = r#"
+        default_prompt = "ask"
+        auto-update-prompts = true
+        default_permission_mode = "readonly"
+        [chain]
+        plan-to-code = true
+    "#;
+    for cfg in [
+        serde_json::from_str::<Config>(json).unwrap(),
+        toml::from_str::<Config>(toml).unwrap(),
+    ] {
+        assert_eq!(cfg.default_permission_mode.as_deref(), Some("readonly"));
+        let serialized = serde_json::to_value(&cfg).unwrap();
+        for removed in ["default_prompt", "auto-update-prompts", "chain"] {
+            assert!(serialized.get(removed).is_none());
+        }
+    }
+}
+
+#[test]
+fn cli_rejects_prompt_modes_and_preserves_security_flags() {
+    use clap::Parser;
+    assert!(crate::cli::Cli::try_parse_from(["zerostack", "--load-prompt", "code"]).is_err());
+    let cli = crate::cli::Cli::try_parse_from(["zerostack", "--read-only"]).unwrap();
+    assert!(cli.read_only);
+}
+
+#[test]
 fn is_anthropic_native_builtin_providers() {
     let cfg = Config::default();
     assert!(cfg.is_anthropic_native("anthropic"));

@@ -13,29 +13,22 @@ use crate::sandbox::Sandbox;
 
 /// Assemble the system-prompt preamble every request carries: the base
 /// `SYSTEM_PROMPT`, tool-use guidance, context files (AGENTS.md, ARCHITECTURE.md,
-/// active mode prompt), working directory, `/add`ed files, memory, and the user
+/// skills), working directory, `/add`ed files, memory, and the user
 /// `SUFFIX.md`. Extracted from [`build_agent_inner`] so its token cost can be
 /// estimated (see [`estimate_overhead`]) without building an `Agent`.
-pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String {
-    let reasoning_prefix = if reasoning_enabled {
-        "You reason carefully and think step-by-step.\n\n"
-    } else {
-        "You respond concisely without showing your reasoning.\n\n"
-    };
+pub fn build_preamble(context: &ContextFiles, _reasoning_enabled: bool) -> String {
     let suffix = crate::session::storage::load_suffix();
     let context_agents = context.agents.as_deref().unwrap_or("");
     let skills_prompt = crate::context::skills::format_for_prompt(&context.skills);
     let context_skills = skills_prompt.as_deref().unwrap_or("");
     #[cfg(feature = "archmd")]
     let context_architecture = context.architecture.as_deref().unwrap_or("");
-    let context_prompt = context.current_prompt.as_deref().unwrap_or("");
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
 
-    let total_len = reasoning_prefix.len()
-        + SYSTEM_PROMPT.len()
+    let total_len = SYSTEM_PROMPT.len()
         + 1
         + TODO_TOOLS_PROMPT.len()
         + if context.agents.is_some() {
@@ -45,11 +38,6 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         }
         + if skills_prompt.is_some() {
             2 + context_skills.len()
-        } else {
-            0
-        }
-        + if context.current_prompt.is_some() {
-            6 + context_prompt.len()
         } else {
             0
         }
@@ -87,7 +75,7 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     let total_len = total_len + extra_files_len;
 
     let mut preamble = String::with_capacity(total_len);
-    preamble.push_str(reasoning_prefix);
+
     preamble.push_str(SYSTEM_PROMPT);
     preamble.push('\n');
     preamble.push_str(TODO_TOOLS_PROMPT);
@@ -105,10 +93,6 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     if !context_architecture.is_empty() {
         preamble.push_str("\n\n");
         preamble.push_str(context_architecture);
-    }
-    if !context_prompt.is_empty() {
-        preamble.push_str("\n\n---\n\n");
-        preamble.push_str(context_prompt);
     }
     if !cwd.is_empty() {
         preamble.push_str("\n\nCurrent working directory: ");
@@ -359,12 +343,6 @@ pub fn build_btw_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>>>
         preamble.push_str("\n\n");
         preamble.push_str(arch);
     }
-    if let Some(p) = context.current_prompt.as_deref()
-        && !p.is_empty()
-    {
-        preamble.push_str("\n\n");
-        preamble.push_str(p);
-    }
     if !cwd.is_empty() {
         preamble.push_str("\n\nCurrent working directory: ");
         preamble.push_str(&cwd);
@@ -438,4 +416,62 @@ pub fn build_btw_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>>>
     }
 
     builder.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_context() -> ContextFiles {
+        ContextFiles {
+            agents: None,
+            themes: Default::default(),
+            skills: Vec::new(),
+            current_theme_name: None,
+            extra_files: Vec::new(),
+            #[cfg(feature = "memory")]
+            memory: None,
+            #[cfg(feature = "archmd")]
+            architecture: None,
+        }
+    }
+
+    #[test]
+    fn preamble_starts_with_core_prompt_regardless_of_reasoning() {
+        let context = empty_context();
+        for reasoning_enabled in [false, true] {
+            let preamble = build_preamble(&context, reasoning_enabled);
+            assert!(preamble.starts_with(SYSTEM_PROMPT));
+            assert!(preamble.contains(TODO_TOOLS_PROMPT));
+        }
+    }
+
+    #[test]
+    fn core_prompt_preserves_local_file_links_without_reasoning_directives() {
+        assert!(SYSTEM_PROMPT.contains("Do not use `sandbox:` URLs."));
+        assert!(SYSTEM_PROMPT.contains("file:///absolute/path"));
+        assert!(!SYSTEM_PROMPT.contains("think step-by-step"));
+        assert!(!SYSTEM_PROMPT.contains("Coding Mode"));
+    }
+
+    #[test]
+    fn core_prompt_applies_ste_to_prose_without_changing_technical_content() {
+        assert!(SYSTEM_PROMPT.contains("ASD-STE100 Simplified Technical English (STE) principles"));
+        assert!(SYSTEM_PROMPT.contains("approved meanings and parts of speech"));
+        assert!(
+            SYSTEM_PROMPT
+                .contains("Do not change code, identifiers, commands, paths, or quoted text")
+        );
+        assert!(SYSTEM_PROMPT.contains("keep the user's language"));
+        assert!(SYSTEM_PROMPT.contains("Do not claim full STE compliance without checking"));
+    }
+
+    #[test]
+    fn preamble_preserves_repository_instructions() {
+        let mut context = empty_context();
+        context.agents = Some("Repository policy: run the project tests.".to_string());
+        let preamble = build_preamble(&context, false);
+        assert!(preamble.contains(context.agents.as_deref().unwrap()));
+        assert!(preamble.contains("Do not claim success without supporting evidence."));
+    }
 }

@@ -73,6 +73,16 @@ fn right_arrow_steps_one_char_not_one_byte() {
 }
 
 #[test]
+fn dot_prefixed_input_is_plain_text() {
+    let mut editor = InputEditor::new();
+    type_str(&mut editor, ".plan explain this");
+    assert!(editor.picker.is_none());
+    assert_eq!(editor.buffer.as_str(), ".plan explain this");
+    let out = editor.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(out.as_str(), ".plan explain this");
+}
+
+#[test]
 fn enter_returns_buffer_and_resets() {
     let mut editor = InputEditor::new();
     type_str(&mut editor, "hei på");

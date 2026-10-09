@@ -36,7 +36,6 @@ pub struct PermissionChecker {
     last_call: Option<(String, String)>,
     consecutive_repeat_count: usize,
     mode: SecurityMode,
-    user_mode: SecurityMode,
     permission_modes: Vec<SecurityMode>,
     allow_all_mcp_calls: bool,
 }
@@ -191,7 +190,6 @@ impl PermissionChecker {
             last_call: None,
             consecutive_repeat_count: 0,
             mode,
-            user_mode: mode,
             permission_modes: resolved_modes,
             allow_all_mcp_calls: false,
         }
@@ -421,15 +419,6 @@ impl PermissionChecker {
 
     pub fn set_mode(&mut self, mode: SecurityMode) {
         self.mode = mode;
-        self.user_mode = mode;
-    }
-
-    pub fn set_prompt_mode(&mut self, mode: SecurityMode) {
-        self.mode = mode;
-    }
-
-    pub fn restore_user_mode(&mut self) {
-        self.mode = self.user_mode;
     }
 
     pub fn mode(&self) -> SecurityMode {

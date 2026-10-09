@@ -331,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "acp"))]
     let is_interactive = !cli.print && !cli.loop_mode && !emacs_mode;
 
-    // Load context first so prompts/themes are available early.
+    // Load context first so themes are available early.
     // (Version-change / ARCHITECTURE.md prompts are deferred to right before
     // the TUI to avoid blocking startup on stdin.)
     let mut context = context::load(cli.resolve_no_context_files(&cfg));
@@ -623,36 +623,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Version-change prompts: defer to here so all heavy setup completes first.
     if version_changed && is_interactive && !is_first_startup {
-        let prompts_dir = context::prompts::global_dir();
         let themes_dir = context::themes::global_dir();
         let mut regenerated = false;
-
-        // Prompts: check config override, then fall back to asking or auto-regen
-        match cfg.resolve_auto_update_prompts() {
-            Some(true) => {
-                let _ = context::prompts::regen();
-                eprintln!("Prompts regenerated.");
-                regenerated = true;
-            }
-            Some(false) => { /* skip: user explicitly denied */ }
-            None => {
-                if !prompts_dir.exists() {
-                    let _ = context::prompts::regen();
-                    eprintln!("Prompts regenerated (first launch).");
-                    regenerated = true;
-                } else {
-                    let mut input = String::new();
-                    eprint!("Regenerate prompts? [y/N] ");
-                    let _ = std::io::Write::flush(&mut std::io::stderr());
-                    std::io::stdin().read_line(&mut input)?;
-                    if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                        let _ = context::prompts::regen();
-                        eprintln!("Prompts regenerated.");
-                        regenerated = true;
-                    }
-                }
-            }
-        }
 
         // Themes: check config override, then fall back to asking or auto-regen
         match cfg.resolve_auto_update_themes() {
@@ -682,7 +654,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if regenerated {
-            // Reload context to pick up freshly-regenerated prompts/themes
+            // Reload context to pick up freshly-regenerated themes
             context = context::load(cli.resolve_no_context_files(&cfg));
         }
     }
@@ -743,73 +715,6 @@ async fn main() -> anyhow::Result<()> {
         context.architecture = crate::context::load_architecture();
     }
 
-    // Default prompt resolution (after prompts may have been regenerated)
-    {
-        let default_prompt = cfg.default_prompt.as_deref().unwrap_or("code");
-        if let Some(content) = context.prompts.get(default_prompt) {
-            let (mode_directive, clean_content) = crate::permission::parse_prompt_mode(content);
-            let mut prompt_text = if mode_directive.is_some() {
-                clean_content.to_string()
-            } else {
-                content.clone()
-            };
-
-            #[allow(unused_mut)]
-            let mut caps: Vec<&str> = Vec::new();
-            #[cfg(feature = "memory")]
-            caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
-            #[cfg(feature = "subagents")]
-            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
-
-            if !caps.is_empty() {
-                prompt_text.push_str("\n\n## Available Capabilities\n\n");
-                prompt_text.push_str(&caps.join("\n"));
-                prompt_text.push('\n');
-            }
-
-            context.current_prompt = Some(prompt_text);
-            context.current_prompt_name = Some(default_prompt.to_string());
-        }
-    }
-
-    // --load-prompt overrides the default prompt
-    if let Some(ref name) = cli.load_prompt {
-        if let Some(content) = context.prompts.get(name) {
-            let (mode_directive, clean_content) = crate::permission::parse_prompt_mode(content);
-            let mut prompt_text = if mode_directive.is_some() {
-                clean_content.to_string()
-            } else {
-                content.clone()
-            };
-
-            #[allow(unused_mut)]
-            let mut caps: Vec<&str> = Vec::new();
-            #[cfg(feature = "memory")]
-            caps.push("- **Memory**: persistent memory across sessions (memory_read, memory_write, memory_search)");
-            #[cfg(feature = "subagents")]
-            caps.push("- **Subagents**: delegate specific multi-step investigations to parallel subagents via the `task` tool");
-
-            if !caps.is_empty() {
-                prompt_text.push_str("\n\n## Available Capabilities\n\n");
-                prompt_text.push_str(&caps.join("\n"));
-                prompt_text.push('\n');
-            }
-
-            context.current_prompt = Some(prompt_text);
-            context.current_prompt_name = Some(name.clone());
-        } else {
-            let mut sorted: Vec<&String> = context.prompts.keys().collect();
-            sorted.sort();
-            eprintln!("error: unknown prompt '{}'", name);
-            eprintln!("available prompts:");
-            for p in &sorted {
-                eprintln!("  {}", p);
-            }
-            anyhow::bail!("unknown prompt '{}'", name);
-        }
-    }
-
-    // Apply mode from prompt %%mode= directive (if any)
     if let Some(perm) = &permission {
         let allowlist: Vec<(String, String)> = session
             .permission_allowlist
@@ -819,15 +724,6 @@ async fn main() -> anyhow::Result<()> {
         let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
         guard.allow_session_tool_outputs(&session.id);
         guard.load_session_allowlist(&allowlist);
-        if let Some(current_prompt) = &context.current_prompt {
-            let (mode_directive, _) = crate::permission::parse_prompt_mode(current_prompt);
-            if let Some(mode_str) = mode_directive
-                && mode_str != "last_user_mode"
-                && let Some(mode) = SecurityMode::from_str(mode_str)
-            {
-                guard.set_prompt_mode(mode);
-            }
-        }
     }
 
     if cli.subagent_live {

@@ -12,22 +12,34 @@ at any priority, a default `config.toml` is created in the lowest-priority
 directory (`~/.local/share/zerostack/`). On macOS the XDG config path above
 resolves to `~/Library/Application Support/zerostack/`.
 
-Prompts and themes are loaded from multiple sources, with later sources
-overriding earlier ones for same-named files:
+The core system prompt defines task scope, code quality, verification, safety,
+and concise communication. Reasoning settings control model reasoning rather
+than adding a generic instruction to think step by step. Repository instructions
+and the user-provided `SUFFIX.md` remain part of the request context. There are
+no selectable prompt modes. Describe the desired task directly; use skills for
+specialized workflows. Security modes remain independent of the system prompt.
 
-**Prompts** (priority low to high):
-1. Embedded at compile time
-2. `~/.local/share/zerostack/prompts/` (global, user-level)
-3. `prompts/` (project-local, relative to CWD)
-4. `.zerostack/prompts/` (project-level config, highest priority)
+English prose uses the principles of
+[ASD-STE100 Simplified Technical English (STE)](https://www.asd-ste100.org/about.html):
+short sentences, active voice, consistent terms, and one instruction per sentence.
+STE also controls word meanings and parts of speech, while permitting technical
+nouns and verbs. This guidance does not change code, identifiers, commands,
+paths, or quoted text. Other responses stay in the user's language and use the
+same clarity principles. This is style guidance, not a claim of full compliance
+with the STE writing rules and dictionary.
 
-**Themes** (priority low to high):
+Legacy prompt settings and chain configuration are ignored when reading old
+config files and are omitted when saving. Existing user prompt files are left
+on disk but are no longer loaded or regenerated.
+
+Themes are loaded from multiple sources, with later sources overriding earlier
+ones for same-named files (priority low to high):
 1. Embedded at compile time
 2. `~/.local/share/zerostack/themes/` (global, user-level)
 3. `themes/` (project-local, relative to CWD)
 
 If `ZS_CONFIG_DIR` is set, it overrides the data directory for the config file
-location only (prompts and themes still use `ZS_DATA_DIR` / the default data
+location only (themes still use `ZS_DATA_DIR` / the default data
 dir). Set `ZS_CONFIG_DIR` when you want the config in a separate path from the
 data files.
 
@@ -48,7 +60,6 @@ Example (JSON):
   "compact_enabled": true,
   "mid_turn_compact_threshold": 0.80,
   "deny_repeated_reads": false,
-  "default_prompt": "code",
   "default_permission_mode": "standard",
   "permission-modes": ["guarded", "standard", "yolo"],
   "show_tool_details": 3,
@@ -112,7 +123,6 @@ keep_recent_tokens = 10000
 compact_enabled = true
 mid_turn_compact_threshold = 0.80
 edit_system = "similarity"
-default_prompt = "code"
 default_permission_mode = "standard"
 permission-modes = ["guarded", "standard", "yolo"]
 show_tool_details = 3
@@ -167,7 +177,6 @@ Accepted top-level keys:
 | `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `true`. When `false`, nothing is ever compacted automatically.            |
 | `mid_turn_compact_threshold` | number | Opt-in mid-turn compaction. Fraction of the context window (`0.0`–`1.0`) of real provider prompt pressure at which to compact *during* a turn, not just between turns. Unset by default, meaning no mid-turn compaction. Honored only when `compact_enabled` is `true`. Recommended starting value: `0.80`. See Mid-turn compaction below.            |
 | `always_show_welcome`     | boolean | Always show the welcome banner on startup, bypassing the one-shot marker file. Default: `false`.                                                                               |
-| `auto-update-prompts`     | boolean | When `true`, always regenerate prompts on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
 | `auto-update-themes`      | boolean | When `true`, always regenerate themes on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
 | `edit_system`             | string  | Edit system mode: `"similarity"` (SEARCH/REPLACE with fuzzy matching, default) or `"hashedit"` (CRC-32 tag-based CAS edits). See Edit System Modes below.                     |
 | `custom_providers`        | object  | Map of provider aliases to `{ "provider_type", "base_url", "api_key_env", "api_style", "headers", "danger_accept_invalid_certs", "timeout_secs" }`. `provider_type` must resolve to a built-in provider type; `api_key_env` is optional. For OpenAI providers, `api_style` selects `"responses"` or `"completions"`, `headers` sets custom HTTP headers (values support `${ENV_VAR}` expansion), and `timeout_secs` overrides the HTTP timeout. `danger_accept_invalid_certs` disables TLS verification. See the OpenAI API styles section below. |
@@ -186,7 +195,6 @@ Accepted top-level keys:
 | `show_reasoning`          | boolean | Show streamed reasoning text in the TUI. Can still be toggled at runtime with `Ctrl+R` or `/reasoning`. Default: `false`. |
 | `statusline`              | table   | Configurable status bar (up to 3 lines of colored segments). When absent, a built-in default layout is used. See Status bar below. |
 | `chat_left_margin`        | integer | Left padding (columns) for the chat area only; input and status rows are unaffected. Default: `0`. |
-| `default_prompt`          | string  | Prompt name to activate on startup. Default: `code`. If the prompt file has a `%%mode=<mode>` first-line directive, the security mode is set automatically (see Prompt directives below). |
 | `editor`                  | string  | Editor command for `Ctrl+G` (default: `$EDITOR` env var, then `editor`, then `nano`).                                                                                        |
 | `api_keys`                | object  | Map of provider names to API keys (e.g. `"openai": "sk-..."`). Used as fallback when the corresponding env var is not set.                                                   |
 | `quick_models`            | object  | Map of quick-model names to `{ "provider", "model", "reserve_tokens"?, "input_token_cost"?, "output_token_cost"?, "temperature"?, "extra_body"? }`. Can be switched with `/models <name>` or `--quick-model=<name>`. See Provider-specific request body parameters below for `extra_body`. |
@@ -449,10 +457,8 @@ Available items:
 | `context_max`         | The model's context window. |
 | `context_percentage`  | Context used as a percentage of the max. |
 | `cost`                | Session cost (hidden at `$0.0000` unless `show_cost_always` is set). |
-| `prompt`              | Active prompt (`prompt:<name>`). |
 | `mode`                | Security mode when not `standard` (`mode:<name>`). |
 | `loop`                | Active loop label. |
-| `chain`               | Chain-of-prompts label. |
 | `compaction`          | Number of compactions (`cmp:<n>`). |
 | `btw`                 | `/btw` side-question token/cost usage. |
 | `reasoning`           | Shows `reasoning` when reasoning is enabled (hidden when off). |
@@ -803,88 +809,6 @@ edit_system = "hashedit"
 Switching between modes is immediate and does not require agent restart.
 The `/editsys` `similarity` and `/editsys` `hashedit` slash commands
 provide the same functionality at runtime.
-
-## Prompt directives
-
-Custom prompt `.md` files may include a `%%mode=<mode>` directive on the
-**first line** to automatically switch the security mode when the prompt
-is activated (via `/prompt <name>` or as the `default_prompt`).
-
-Valid modes: `standard`, `restrictive`, `readonly`, `guarded`, `yolo`.
-
-Use `%%mode=last_user_mode` to keep (or restore) the mode the user last
-set explicitly via `/mode` or startup config — useful when a prompt wants
-to avoid overriding the user's chosen mode.
-
-The directive line is stripped from the prompt content before it reaches
-the agent.
-
-Example `ask.md`:
-
-```markdown
-%%mode=readonly
-
-## Read-Only Mode
-
-You are in read-only mode. Only read files and explore.
-```
-
-Example `code.md` that defers to the user's mode:
-
-```markdown
-%%mode=last_user_mode
-
-## Coding Mode
-
-Write well-tested code. Follow project conventions.
-```
-
-The mode change is applied when the prompt is activated and persists
-until changed again by `/mode`, another prompt directive, or a restart.
-The status bar shows `| mode:<name>` when the mode is not `standard`.
-
-## Chain-of-Prompts
-
-When enabled, after the agent finishes responding with a `brainstorm`, `plan`,
-or `code` prompt, the status bar shows `Continue to <next>? [Yes/But/No]`.
-The user's next input is interpreted as a chain decision:
-
-- **Yes** (`y`/`yes`) — switch to the next prompt and auto-submit a transition message.
-- **But** (`but <msg>` / `b <msg>` / `yes but <msg>`) — same as yes, but prepend
-  `<msg>` as an additional instruction to the transition message.
-- **No** (`n`/`no`) — decline the chain, continue normally.
-
-Typing anything that doesn't match these patterns clears the chain and
-processes the input as a normal message.
-
-### Phases
-
-| Transition | Default | Description |
-|-----------|---------|-------------|
-| `brainstorm-to-plan` | `true` | After brainstorming, prompt to move to planning |
-| `plan-to-code` | `true` | After planning, prompt to start coding |
-| `code-to-review` | `false` | After coding, prompt to run a review |
-
-### TOML
-
-```toml
-[chain]
-brainstorm-to-plan = true
-plan-to-code = true
-code-to-review = false
-```
-
-### JSON
-
-```json
-{
-  "chain": {
-    "brainstorm-to-plan": true,
-    "plan-to-code": true,
-    "code-to-review": false
-  }
-}
-```
 
 ## Advisor
 

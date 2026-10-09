@@ -99,9 +99,6 @@ the chat directly.
 | `/init` | Create an AGENTS.md file for the current project by delegating to the agent. |
 | `/init force` | Overwrite the existing AGENTS.md if one already exists. |
 
-Requires a `code` prompt to be configured (run `/regen-prompts` to restore
-built-in prompts, or create a custom `code.md` prompt).
-
 ## Security
 
 | Command | Description |
@@ -113,38 +110,13 @@ built-in prompts, or create a custom `code.md` prompt).
 | `/mode guarded` | Allow reads; ask for writes, edits, bash, and everything else. Config rules apply. |
 | `/mode yolo` | Allow everything; ask for destructive bash commands. Config rules apply. |
 
-Prompts can set the security mode automatically via `%%mode=<mode>` on
-the first line. When a prompt with `%%mode=last_user_mode` is activated,
-the mode reverts to whatever was last set explicitly by `/mode` or
-startup config. See Prompts & Themes below.
-
-## Prompts & Themes
+## Themes
 
 | Command | Description |
 | ------- | ----------- |
-| `/prompt` | List available prompts. |
-| `/prompt <name>` | Activate a named prompt. Also applies `%%mode=` from the prompt file if present (see below). |
-| `/prompt default` | Clear the active prompt. |
-
-Prompts may include a `%%mode=<mode>` directive on the **first line** to
-automatically switch the security mode when activated. Valid modes:
-`standard`, `restrictive`, `readonly`, `guarded`, `yolo`. Use
-`%%mode=last_user_mode` to restore the mode the user last set via `/mode`
-or startup config. The directive line is stripped from the prompt content
-before it reaches the agent.
-
-Example `ask.md`:
-```markdown
-%%mode=readonly
-
-## Read-Only Mode
-
-You are in read-only mode. Only read files and explore.
-```
 | `/theme` | List available themes. |
 | `/theme <name>` | Activate a named theme. |
 | `/theme default` | Clear the active theme (use config colors). |
-| `/regen-prompts` | Restore built-in prompts to the prompts directory. |
 | `/regen-themes` | Restore built-in themes to the themes directory. |
 
 ## Conversation
@@ -159,7 +131,7 @@ You are in read-only mode. Only read files and explore.
 | `/btw <message>` | Ask a quick side question in parallel, without touching the main conversation. It forks the current context (including the main agent's in-flight turn, if any), answers using read-only tools (read/grep/find_files/list_dir, no writes or bash), and prints the answer inline. Works even while the main agent is running. Nothing is written to history; its token cost is shown separately as `btw:$…`. Ctrl-C cancels an in-flight `/btw` without disturbing the main agent. |
 | `/reasoning` | Toggle LLM reasoning on/off (requires model support). |
 | `/thinking` | Alias for `/reasoning`. |
-| `/review [msg]` | Run a one-shot code review. Activates the `review` prompt in readonly mode, submits a review message, and restores the previous prompt afterward. Without a message, auto-generates one based on session and worktree context. |
+| `/review [msg]` | Run a one-shot code review. Submits a review message using the core system prompt, temporarily enforces readonly security mode, and restores the previous security mode afterward. Without a message, auto-generates one based on session and worktree context. |
 
 Before each successful compaction, zerostack archives the complete pre-compaction
 session under `<data-dir>/sessions/compacted/<session-id>/`. Session JSON also
@@ -920,21 +892,6 @@ It also checks project and ancestor directories up to the Git root:
 
 Hidden directories and `node_modules` are skipped. Duplicate skill names keep the
 first discovered skill.
-
-## Prompt Shortcut
-
-Prefix a message with `.` to quickly switch prompts or run a one-shot query with
-a different prompt.
-
-| Example | Description |
-| ------- | ----------- |
-| `.` | Open the prompt picker (same as `/prompt` picker). |
-| `.ask` | Switch to the `ask` prompt (same as `/prompt ask`). |
-| `.plan what files changed?` | Temporarily use the `plan` prompt for this query, then restore the previous prompt and security mode. |
-
-The `.[prompt] [msg]` syntax is a one-shot: it sets the prompt, submits the
-message, and after the response restores the previous prompt and
-`last_user_mode`.
 
 ## General
 

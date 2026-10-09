@@ -144,9 +144,7 @@ fn rich_default_config() -> Config {
         max_text_file_size: Some(1_048_576),
         edit_system: Some(EditSystem::Similarity),
         default_permission_mode: Some("standard".to_string()),
-        default_prompt: Some(CompactString::new("code")),
         show_tool_details: None,
-        chain: Some(crate::config::types::ChainConfig::default()),
         #[cfg(feature = "subagents")]
         subagent_max_read_lines: Some(2000),
         #[cfg(feature = "subagents")]

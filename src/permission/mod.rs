@@ -70,20 +70,6 @@ pub enum SecurityMode {
     Yolo,
 }
 
-impl SecurityMode {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "standard" => Some(SecurityMode::Standard),
-            "restrictive" => Some(SecurityMode::Restrictive),
-            "readonly" => Some(SecurityMode::ReadOnly),
-            "planwrite" => Some(SecurityMode::PlanWrite),
-            "guarded" => Some(SecurityMode::Guarded),
-            "yolo" => Some(SecurityMode::Yolo),
-            _ => None,
-        }
-    }
-}
-
 impl std::fmt::Display for SecurityMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -94,31 +80,6 @@ impl std::fmt::Display for SecurityMode {
             SecurityMode::Guarded => write!(f, "guarded"),
             SecurityMode::Yolo => write!(f, "yolo"),
         }
-    }
-}
-
-/// Parse a `%%mode=X` directive from the first line of a prompt file.
-/// Returns the mode string (e.g. "restrictive", "last_user_mode") if found.
-/// Also returns the content with the directive line stripped.
-pub fn parse_prompt_mode(content: &str) -> (Option<&str>, &str) {
-    let Some(first) = content.lines().next() else {
-        return (None, content);
-    };
-    let trimmed = first.trim();
-    if let Some(mode_str) = trimmed.strip_prefix("%%mode=") {
-        let mode_str = mode_str.trim();
-        if mode_str.is_empty() {
-            return (None, content);
-        }
-        // Strip the first line from the content
-        let rest = if let Some(pos) = content.find('\n') {
-            &content[pos + 1..]
-        } else {
-            ""
-        };
-        (Some(mode_str), rest)
-    } else {
-        (None, content)
     }
 }
 

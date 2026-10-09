@@ -16,7 +16,7 @@ Single crate, no workspace. All source under `src/`.
 | `src/session/` | Session state: `mod.rs` (messages, compactions, costs), `storage.rs` (JSON file I/O), `chat_history.rs` |
 | `src/permission/` | Security: `checker.rs` (glob+regex rules, doom-loop detection), `ask.rs` (user prompt UI), `pattern.rs` |
 | `src/ui/` | Custom TUI on crossterm (no ratatui): `mod.rs` (event loop), `terminal.rs` (raw mode guard), `renderer.rs` (line buffer + viewport), `input/` (text editor + pickers), `status.rs`, `markdown.rs`, `event_handler.rs`, `cmd_picker.rs` |
-| `src/context/` | Context gathering: embedded prompt themes (`prompts.rs`, `themes.rs`), AGENTS.md/ARCHITECTURE.md loading |
+| `src/context/` | Context gathering: embedded themes (`themes.rs`), skills, AGENTS.md/ARCHITECTURE.md loading |
 | `src/config/` | Configuration: `load.rs` (TOML/JSON from disk+env), `types.rs` (QuickModel, CustomProvider, Colors, EditSystem) |
 | `src/extras/` | Feature-gated extensions: `loop/` (headless), `mcp/` (MCP client), `acp/` (ACP server), `memory/` (persistent memory), `subagents/` (separate-process task delegation + CoW workspaces), `git_worktree/`, `archmd/` |
 | `src/sandbox.rs` | `bwrap`/`zerobox` command wrapping |
@@ -36,7 +36,7 @@ Single crate, no workspace. All source under `src/`.
 - **`TerminalGuard`** (`src/ui/terminal.rs:10`) — RAII for raw mode, alt screen, mouse capture.
 - **`Renderer`** (`src/ui/renderer.rs:21`) — line-buffered viewport, markdown rendering, scroll/selection.
 - **`InputEditor`** (`src/ui/input/mod.rs:22`) — text buffer, cursor, history, kill-ring, picker integration.
-- **`ContextFiles`** (`src/context/mod.rs:56`) — loaded agents, prompts, themes, architecture docs.
+- **`ContextFiles`** (`src/context/mod.rs:56`) — loaded repository instructions, skills, themes, and architecture docs.
 
 ## Control Flow
 
@@ -95,6 +95,8 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 9. **Shared persistent-session launcher** — `src/extras/session_cli.rs` owns systemd user-service creation, environment inheritance, private retained logs, session identity resolution, startup readiness, and timeout cleanup. Both `zerostack session start` and the Emacs client's `--emacs-launch` entry point call it. Emacs only connects to the returned socket; daemons run outside the caller's cgroup. (`src/main.rs`, `emacs/zerostack.el`)
 
 10. **Compact Emacs tool activity** — Rust owns call grouping, structured outcomes, and append-only structured detail logs. Live summaries are batched at 100 ms; Emacs updates a cached row by message index, with no transcript scan or per-call overlays. On demand, details show one cached row per call with status, duration, and output/diff links; full arguments and IDs open separately. Failures, permissions, and task/goal progress stay visible. Reconnects reconstruct compact history from canonical session messages. (`src/extras/emacs.rs`, `emacs/zerostack.el`)
+
+11. **One core system prompt** — `src/agent/prompt.rs` defines task scope, quality, verification, safety, and communication. `build_preamble()` adds tool guidance, repository context, skills, added files, memory, and `SUFFIX.md`; selectable prompt modes and prompt chaining are not supported. Security modes remain enforced by the permission checker.
 
 ## Dependencies
 

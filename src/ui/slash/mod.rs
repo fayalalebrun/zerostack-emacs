@@ -379,9 +379,7 @@ pub async fn handle_slash(
     match parts[0] {
         "/provider" | "/model" | "/models" | "/models-add" | "/model-subagent"
         | "/models-subagent" => providers::handle(&parts, &mut ctx).await,
-        "/prompt" | "/theme" | "/regen-prompts" | "/regen-themes" => {
-            content::handle(&parts, &mut ctx).await
-        }
+        "/theme" | "/regen-themes" => content::handle(&parts, &mut ctx).await,
         "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys" | "/advisor"
         | "/subagents" => settings::handle(&parts, &mut ctx).await,
         "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"

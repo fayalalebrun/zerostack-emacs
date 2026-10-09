@@ -1,6 +1,5 @@
-use crate::permission::{self, SecurityMode};
 use crate::session::MessageRole;
-use crate::ui::slash::{SlashCtx, write_error, write_ok};
+use crate::ui::slash::{SlashCtx, write_ok};
 
 fn is_session_empty(ctx: &SlashCtx<'_>) -> bool {
     !ctx.session
@@ -39,14 +38,6 @@ fn build_default_review_message(session_empty: bool, in_worktree: bool) -> Strin
 }
 
 pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
-    if !ctx.context.prompts.contains_key("review") {
-        write_error(
-            ctx.renderer,
-            "no 'review' prompt found. Run /regen-prompts first.",
-        );
-        return Ok(());
-    }
-
     let msg = if parts.len() > 1 {
         parts[1..].join(" ")
     } else {
@@ -55,35 +46,6 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
         build_default_review_message(session_empty, in_worktree)
     };
 
-    // Save current prompt for one-shot restoration
-    ctx.context.one_shot_restore = ctx.context.current_prompt_name.clone();
-
-    // Switch to review prompt
-    if let Some(content) = ctx.context.prompts.get("review").cloned() {
-        let (mode_directive_str, clean_content) = permission::parse_prompt_mode(&content);
-        let mode_directive = mode_directive_str.map(|s| s.to_string());
-        ctx.context.current_prompt = Some(if mode_directive.is_some() {
-            clean_content.to_string()
-        } else {
-            content
-        });
-        ctx.context.current_prompt_name = Some("review".to_string());
-        if let Some(ref mode_str) = mode_directive {
-            if mode_str == "last_user_mode" {
-                if let Some(perm) = ctx.permission {
-                    let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.restore_user_mode();
-                }
-            } else if let Some(mode) = SecurityMode::from_str(mode_str)
-                && let Some(perm) = ctx.permission
-            {
-                let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
-                guard.set_prompt_mode(mode);
-            }
-        }
-    }
-
-    ctx.rebuild_agent().await;
     write_ok(ctx.renderer, format!("review: {}", msg));
 
     Err(anyhow::anyhow!("DEFER_REVIEW:{}", msg))

@@ -121,20 +121,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     }
     write_result(
         ctx.renderer,
-        "  /prompt                list available prompts",
-    );
-    write_result(ctx.renderer, "  /prompt <name>         activate a prompt");
-    write_result(ctx.renderer, "  /prompt default        clear active prompt");
-    write_result(
-        ctx.renderer,
         "  /theme                 list available themes",
     );
     write_result(ctx.renderer, "  /theme <name>          activate a theme");
     write_result(ctx.renderer, "  /theme default         clear active theme");
-    write_result(
-        ctx.renderer,
-        "  /regen-prompts        restore built-in prompts to global dir",
-    );
     write_result(
         ctx.renderer,
         "  /regen-themes         restore built-in themes to config dir",

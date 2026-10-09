@@ -25,7 +25,6 @@ pub struct InputEditor {
     draft: Option<CompactString>,
     pub picker: Option<Picker>,
     monochrome: bool,
-    prompt_names: Vec<String>,
     theme_names: Vec<String>,
     quick_model_names: Vec<String>,
     live_model_names: Vec<String>,
@@ -47,7 +46,6 @@ impl InputEditor {
             draft: None,
             picker: None,
             monochrome: false,
-            prompt_names: Vec::new(),
             theme_names: Vec::new(),
             quick_model_names: Vec::new(),
             live_model_names: Vec::new(),
@@ -107,10 +105,6 @@ impl InputEditor {
         }
     }
 
-    pub fn set_prompt_names(&mut self, names: Vec<String>) {
-        self.prompt_names = names;
-    }
-
     pub fn set_theme_names(&mut self, names: Vec<String>) {
         self.theme_names = names;
     }
@@ -168,26 +162,6 @@ impl InputEditor {
         }
         picker.activate();
         self.picker = Some(Picker::Prefixed(picker, "/rewind "));
-    }
-
-    pub fn start_prompt_picker(&mut self) {
-        let mut picker = ListPicker::new();
-        picker.set_monochrome(self.monochrome);
-        if !self.prompt_names.is_empty() {
-            picker.set_items(self.prompt_names.clone());
-        }
-        picker.activate();
-        self.picker = Some(Picker::Prefixed(picker, "/prompt "));
-    }
-
-    pub fn start_dot_picker(&mut self) {
-        let mut picker = ListPicker::new();
-        picker.set_monochrome(self.monochrome);
-        if !self.prompt_names.is_empty() {
-            picker.set_items(self.prompt_names.clone());
-        }
-        picker.activate();
-        self.picker = Some(Picker::Prefixed(picker, "."));
     }
 
     pub fn start_theme_picker(&mut self) {
@@ -468,33 +442,12 @@ impl InputEditor {
                 if c == '/' && self.cursor == 0 {
                     self.start_command_picker();
                 }
-                if c == '.' && self.cursor == 0 {
-                    self.buffer.insert(self.cursor, c);
-                    self.cursor += c.len_utf8();
-                    self.start_dot_picker();
-                    self.yank_pos = None;
-                    return None;
-                }
                 self.buffer.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
                 self.history_pos = None;
                 self.draft = None;
                 self.yank_pos = None;
 
-                if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
-                    && self.buffer.starts_with("/prompt ")
-                {
-                    let after_prefix: String = self.buffer.chars().skip("/prompt ".len()).collect();
-                    if !after_prefix.is_empty() && c != ' ' {
-                        let query_len = after_prefix.len();
-                        if query_len == 1 {
-                            self.start_prompt_picker();
-                            if let Some(Picker::Prefixed(ref mut pp, _)) = self.picker {
-                                pp.char_input(c);
-                            }
-                        }
-                    }
-                }
                 if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
                     && self.buffer.starts_with("/models ")
                 {

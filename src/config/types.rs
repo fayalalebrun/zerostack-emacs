@@ -137,27 +137,6 @@ pub struct ColorsConfig {
     pub status_background: Option<CompactString>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ChainConfig {
-    #[serde(rename = "brainstorm-to-plan")]
-    pub brainstorm_to_plan: bool,
-    #[serde(rename = "plan-to-code")]
-    pub plan_to_code: bool,
-    #[serde(rename = "code-to-review")]
-    pub code_to_review: bool,
-}
-
-impl Default for ChainConfig {
-    fn default() -> Self {
-        Self {
-            brainstorm_to_plan: true,
-            plan_to_code: true,
-            code_to_review: false,
-        }
-    }
-}
-
 #[cfg(feature = "advisor")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

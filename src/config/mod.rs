@@ -83,11 +83,6 @@ pub struct Config {
     pub mid_turn_compact_threshold: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub always_show_welcome: Option<bool>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        rename = "auto-update-prompts"
-    )]
-    pub auto_update_prompts: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "auto-update-themes")]
     pub auto_update_themes: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,8 +136,7 @@ pub struct Config {
     /// Left padding (columns) for the chat area. Default: 0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_left_margin: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_prompt: Option<CompactString>,
+
     #[cfg(feature = "git-worktree")]
     #[serde(skip_serializing_if = "Option::is_none", rename = "wt-auto-merge")]
     pub wt_auto_merge: Option<bool>,
@@ -198,8 +192,7 @@ pub struct Config {
     pub subagent_provider: Option<CompactString>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colors: Option<types::ColorsConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chain: Option<types::ChainConfig>,
+
     #[cfg(feature = "advisor")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advisor: Option<types::AdvisorConfig>,
@@ -432,10 +425,6 @@ impl Config {
 
     pub fn resolve_show_reasoning(&self) -> bool {
         self.show_reasoning.unwrap_or(false)
-    }
-
-    pub fn resolve_auto_update_prompts(&self) -> Option<bool> {
-        self.auto_update_prompts
     }
 
     pub fn resolve_auto_update_themes(&self) -> Option<bool> {

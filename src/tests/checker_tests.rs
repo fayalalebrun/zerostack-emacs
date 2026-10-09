@@ -35,6 +35,34 @@ fn configs_from(config: PermissionConfig) -> PermissionConfigs {
 // --- SecurityMode behavior ---
 
 #[test]
+fn security_mode_can_be_temporarily_readonly_and_restored() {
+    for mode in [
+        SecurityMode::Standard,
+        SecurityMode::Restrictive,
+        SecurityMode::Yolo,
+    ] {
+        let mut checker = make_checker(mode);
+        let previous = checker.mode();
+        checker.set_mode(SecurityMode::ReadOnly);
+        assert_eq!(checker.mode(), SecurityMode::ReadOnly);
+        assert!(matches!(
+            checker.check("read", "src/main.rs"),
+            CheckResult::Allowed
+        ));
+        assert!(matches!(
+            checker.check("bash", "ls"),
+            CheckResult::Denied(_)
+        ));
+        assert!(matches!(
+            checker.check_path("write", "src/main.rs"),
+            CheckResult::Denied(_)
+        ));
+        checker.set_mode(previous);
+        assert_eq!(checker.mode(), mode);
+    }
+}
+
+#[test]
 fn readonly_denies_write_bash_and_edit() {
     let mut checker = make_checker(SecurityMode::ReadOnly);
     assert!(matches!(

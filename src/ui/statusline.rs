@@ -32,9 +32,7 @@ pub enum StatusSpan {
 /// Runtime values the statusline can show beyond the session itself.
 pub struct StatusContext<'a> {
     pub loop_label: Option<&'a str>,
-    pub prompt_name: Option<&'a str>,
     pub perm_mode: Option<&'a str>,
-    pub chain_label: Option<&'a str>,
     pub btw_cost: f64,
     pub btw_in: u64,
     pub btw_out: u64,
@@ -262,13 +260,11 @@ fn resolve_item(
         "context_percentage" => Some(format!("{}%", context_percentage(session).unwrap_or(0))),
         "cost" => (session.total_cost > 0.0 || session.show_cost_always || always)
             .then(|| format!("${:.4}", session.total_cost)),
-        "prompt" => ctx.prompt_name.map(|s| format!("prompt:{s}")),
         "mode" => ctx
             .perm_mode
             .filter(|m| *m != "standard")
             .map(|m| format!("mode:{m}")),
         "loop" => ctx.loop_label.map(|s| format!("[{s}]")),
-        "chain" => ctx.chain_label.map(|s| s.to_string()),
         "compaction" => {
             (!session.compactions.is_empty()).then(|| format!("cmp:{}", session.compactions.len()))
         }
@@ -440,11 +436,11 @@ pub fn item_icon(item: &str) -> Option<&'static str> {
         "host" => "\u{f233}",                                                //
         "user" => "\u{f007}",                                                //
         "reasoning" => "\u{f0eb}",                                           //
-        "prompt" => "\u{f120}",                                              //
-        "mode" => "\u{f023}",                                                //
-        "loop" => "\u{f01e}",                                                //
-        "btw" => "\u{f075}",                                                 //
-        "compaction" => "\u{f066}",                                          //
+
+        "mode" => "\u{f023}",       //
+        "loop" => "\u{f01e}",       //
+        "btw" => "\u{f075}",        //
+        "compaction" => "\u{f066}", //
         _ => return None,
     };
     Some(g)
@@ -543,8 +539,6 @@ pub fn default_spec() -> StatusLineConfig {
         seg("cost", Some("green")),
         sep(" "),
         seg("btw", Some("dark_cyan")),
-        sep(" "),
-        seg("prompt", Some("dark_grey")),
     ];
     StatusLineConfig {
         lines: vec![StatusLineLine { segments }],

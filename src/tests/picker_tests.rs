@@ -4,6 +4,18 @@ use crate::ui::pickers::models::ModelsPicker;
 use std::path::PathBuf;
 
 #[test]
+fn command_picker_omits_prompt_modes_and_preserves_security_and_themes() {
+    let mut picker = ListPicker::with_static_commands();
+    picker.activate();
+    for removed in ["/prompt", "/regen-prompts"] {
+        assert!(!picker.matches.iter().any(|name| name == removed));
+    }
+    for retained in ["/mode", "/theme", "/regen-themes", "/review", "/models"] {
+        assert!(picker.matches.iter().any(|name| name == retained));
+    }
+}
+
+#[test]
 fn test_models_picker_starts_on_quick_group() {
     let mut picker = ModelsPicker::new();
     picker.set_groups(

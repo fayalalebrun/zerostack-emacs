@@ -5,9 +5,7 @@ use crate::ui::statusline::{self, StatusContext, StatusSpan};
 fn ctx() -> StatusContext<'static> {
     StatusContext {
         loop_label: None,
-        prompt_name: None,
         perm_mode: None,
-        chain_label: None,
         btw_cost: 0.0,
         btw_in: 0,
         btw_out: 0,

@@ -58,7 +58,6 @@ impl InputEditor {
             }
             Some(Picker::Command(p)) => {
                 let ctx = handlers::CommandPickerCtx {
-                    prompt_names: &self.prompt_names,
                     theme_names: &self.theme_names,
                     quick_model_names: &self.quick_model_names,
                     live_model_names: &self.live_model_names,

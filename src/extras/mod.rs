@@ -25,8 +25,6 @@ pub mod archmd;
 #[cfg(feature = "advisor")]
 pub mod advisor;
 
-pub mod chain;
-
 pub mod emacs;
 
 pub mod emacs_attention;

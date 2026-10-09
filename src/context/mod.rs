@@ -6,7 +6,6 @@ use smallvec::SmallVec;
 
 use crate::session::storage;
 
-pub mod prompts;
 pub mod skills;
 pub mod themes;
 
@@ -57,15 +56,10 @@ pub(crate) fn copy_embedded_to(embedded: &Dir, dest: &Path) -> anyhow::Result<()
 #[derive(Clone)]
 pub struct ContextFiles {
     pub agents: Option<String>,
-    pub prompts: HashMap<String, String>,
-    pub current_prompt: Option<String>,
-    pub current_prompt_name: Option<String>,
     pub themes: HashMap<String, String>,
     pub skills: Vec<skills::Skill>,
     pub current_theme_name: Option<String>,
     pub extra_files: Vec<std::path::PathBuf>,
-    pub one_shot_restore: Option<String>,
-    pub chain_declined: Vec<String>,
     #[cfg(feature = "memory")]
     pub memory: Option<String>,
     #[cfg(feature = "archmd")]
@@ -79,10 +73,6 @@ impl ContextFiles {
         {
             self.architecture = walk_context_files().1;
         }
-        self.prompts = prompts::load();
-        if let Some(name) = &self.current_prompt_name {
-            self.current_prompt = self.prompts.get(name).cloned();
-        }
         self.themes = themes::load();
         self.skills = skills::load();
         self.current_theme_name = crate::session::storage::load_theme_name();
@@ -94,7 +84,6 @@ impl ContextFiles {
 }
 
 pub fn load(no_context_files: bool) -> ContextFiles {
-    let _ = prompts::ensure_global();
     let _ = themes::ensure_global();
     let (agents, arch_candidate) = if no_context_files {
         (None, None)
@@ -105,7 +94,6 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let architecture = arch_candidate;
     #[cfg(not(feature = "archmd"))]
     let _ = arch_candidate;
-    let prompt_map = prompts::load();
     let theme_map = themes::load();
     let skills = skills::load();
     let theme_name = crate::session::storage::load_theme_name();
@@ -113,15 +101,10 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let memory = crate::extras::memory::Mem::open().context_block();
     ContextFiles {
         agents,
-        prompts: prompt_map,
-        current_prompt: None,
-        current_prompt_name: None,
         themes: theme_map,
         skills,
         current_theme_name: theme_name,
         extra_files: Vec::new(),
-        one_shot_restore: None,
-        chain_declined: Vec::new(),
         #[cfg(feature = "memory")]
         memory,
         #[cfg(feature = "archmd")]

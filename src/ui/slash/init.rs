@@ -125,13 +125,6 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
     }
 
     if create_agents {
-        if !ctx.context.prompts.contains_key("code") {
-            write_error(
-                ctx.renderer,
-                "no 'code' prompt found. Run /regen-prompts first.",
-            );
-            return Ok(());
-        }
         write_ok(ctx.renderer, "delegating AGENTS.md creation to agent...");
         return Err(anyhow::anyhow!("DEFER_INIT:{}", AGENTS_CREATION_PROMPT));
     }

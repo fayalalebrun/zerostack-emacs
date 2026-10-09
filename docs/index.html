@@ -129,7 +129,7 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <li><strong>Standard tools</strong> — all tools exposed to coding agents (as described by opencode)</li>
 <li><strong>Permission system</strong> — 5 modes, per-tool patterns, session allowlists</li>
 <li><strong>Terminal UI</strong> — crossterm, markdown rendering, mouse support, scrollback</li>
-<li><strong>Prompts system</strong> — 10 built-in prompts, switchable at runtime</li>
+<li><strong>Core system prompt</strong> — one task-aware prompt, with skills for specialized workflows</li>
 <li><strong>Session management</strong> — save/load/resume, auto-compaction</li>
 <li><strong>MCP support</strong> — connect external tool servers</li>
 <li><strong>Ralph Wiggum loops</strong> — iterative coding for long-horizon tasks</li>
@@ -149,10 +149,6 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <!-- callouts -->
 <div class="callouts">
 <div class="callout">
-<div class="callout-title">/prompt autoconfig</div>
-<div class="callout-desc">Run this inside zerostack after install to explore the docs and configure everything interactively.</div>
-</div>
-<div class="callout">
 <div class="callout-title">--parallel</div>
 <div class="callout-desc">Run multiple agents on the same repo. Each gets a temporary git worktree, merged &amp; cleaned up on exit.</div>
 </div>
@@ -161,28 +157,6 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <div class="callout-desc">Questions? Ideas? Join the <a href="https://app.element.io/#/room/#zerostack-general:matrix.org" target="_blank" rel="noopener">zerostack-general room</a> on Matrix.</div>
 </div>
 </div>
-
-<!-- prompts -->
-<section id="prompts">
-<h2>Prompts</h2>
-<p>Built-in system prompts that change the agent's behavior and tone — switch at runtime with <code>/prompt</code>:</p>
-<table>
-<thead><tr><th>Prompt</th><th>Description</th></tr></thead>
-<tbody>
-<tr><td><code>code</code></td><td>Coding mode with full file &amp; bash access, TDD workflow</td></tr>
-<tr><td><code>plan</code></td><td>Planning-only — explores and produces a plan without code</td></tr>
-<tr><td><code>review</code></td><td>Code review for correctness, design, testing, and impact</td></tr>
-<tr><td><code>debug</code></td><td>Finds root cause before proposing fixes</td></tr>
-<tr><td><code>ask</code></td><td>Read-only mode — no writes or bash</td></tr>
-<tr><td><code>brainstorm</code></td><td>Design-only — explores ideas without code</td></tr>
-<tr><td><code>frontend-design</code></td><td>Distinctive, production-grade UI</td></tr>
-<tr><td><code>review-security</code></td><td>Finds exploitable vulnerabilities</td></tr>
-<tr><td><code>simplify</code></td><td>Refines for clarity without behavior change</td></tr>
-<tr><td><code>write-prompt</code></td><td>Creates and optimizes agent prompts</td></tr>
-</tbody>
-</table>
-<p>Custom prompts can be created by placing markdown files in <code>$XDG_CONFIG_HOME/zerostack/prompts/</code>.</p>
-</section>
 
 <!-- permission modes -->
 <section id="permissions">
@@ -217,9 +191,6 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 </div>
 <div class="cmd">
 <div class="cmd-header"><strong>/loop</strong> — Schedule recurring prompts</div>
-</div>
-<div class="cmd">
-<div class="cmd-header"><strong>/prompt</strong> — List or change system prompt</div>
 </div>
 <div class="cmd">
 <div class="cmd-header"><strong>/mode</strong> — Set permission mode</div>
@@ -258,7 +229,7 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <pre><code># Set your API key (OpenRouter is default)
 export OPENROUTER_API_KEY="[api_key]"
 
-# Interactive session (default prompt: code)
+# Interactive session
 zerostack
 
 # Monochrome TUI
@@ -290,7 +261,6 @@ cargo install zerostack --features memory
 # With experimental multi-threaded subagents
 cargo install zerostack --features multithread</code></pre>
 <p>Pre-built binaries are also available on <a href="https://github.com/gi-dellav/zerostack/releases" target="_blank" rel="noopener">GitHub Releases</a>.</p>
-<p>Once installed, run <code>/prompt autoconfig</code> inside zerostack to configure the tool interactively.</p>
 
 <h3>Optional: Sandbox</h3>
 <pre><code># Debian/Ubuntu

@@ -31,10 +31,7 @@ fn running_commands_are_rejected_not_queued() {
         classify_submission(true, "/model gpt"),
         SubmitAction::RejectWhileRunning
     );
-    assert_eq!(
-        classify_submission(true, ".prompt"),
-        SubmitAction::RejectWhileRunning
-    );
+
     assert_eq!(
         classify_submission(true, "!ls"),
         SubmitAction::RejectWhileRunning
@@ -59,6 +56,13 @@ fn whitelisted_commands_pass_through_while_running() {
     assert_eq!(classify_submission(true, "/queue"), SubmitAction::Run);
     assert_eq!(classify_submission(true, "/queue ls"), SubmitAction::Run);
     assert_eq!(classify_submission(true, "/queue clear"), SubmitAction::Run);
+}
+
+#[test]
+fn running_dot_prefixed_text_is_queued() {
+    for text in [".prompt", ".plan review this", "../src/main.rs"] {
+        assert_eq!(classify_submission(true, text), SubmitAction::Queue);
+    }
 }
 
 #[test]
