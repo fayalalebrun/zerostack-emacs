@@ -200,6 +200,28 @@ async fn completed_goal_runs_evaluator() {
     );
 }
 
+#[cfg(feature = "subagents")]
+#[tokio::test]
+async fn disabling_task_tool_does_not_disable_goal_evaluator() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    reset_goal();
+    crate::extras::subagents::set_enabled(false);
+    let tool = UpdateGoal::new(None, None);
+    let mut goal = args("Ship feature", "completed");
+    goal.evidence = Some("cargo test passed".to_string());
+
+    let result = tool.call(&mut rig::tool::ToolContext::new(), goal).await;
+    crate::extras::subagents::set_enabled(true);
+
+    assert!(result.is_err());
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("subagent evaluator is not initialized"),
+        "{error}"
+    );
+    assert!(!error.contains("subagents are disabled"), "{error}");
+}
+
 #[tokio::test]
 async fn in_progress_goal_with_evidence_is_accepted_without_evaluator() {
     let _guard = TEST_LOCK.lock().unwrap();

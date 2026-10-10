@@ -63,7 +63,7 @@ workspaces, and read access to the session transcript.
 | Config field           | Type      | Default             | Description                           |
 |------------------------|-----------|---------------------|---------------------------------------|
 | `task_max_turns`       | `usize`   | `20`                | Max agent turns per subagent          |
-| `task_enabled`         | `bool`    | `true`              | Global default for all subagent use   |
+| `task_enabled`         | `bool`    | `true`              | Global default for exposing the `task` tool |
 | `subagent_models`      | `string[]` | current main model | Permitted model IDs or quick-model aliases; first is the default |
 | `subagent_model`       | `string`  | none | Legacy single-model form, used only when `subagent_models` is absent |
 | `subagent_provider`    | `string`  | same as main | Provider for raw model IDs in the list |
@@ -83,7 +83,8 @@ main agent's client and can be switched at runtime.
 
 Set the default for new sessions with `zerostack config set-subagents true|false`.
 Each session stores its own value; `/subagents on|off` changes that session only.
-Disabling subagents removes the `task` tool and prevents automatic goal evaluators.
+Disabling subagents removes the agent-facing `task` tool. Internal uses of the
+subagent runtime, such as automatic goal completion evaluation, remain enabled.
 
 Example `opencode.json`:
 
@@ -123,7 +124,7 @@ transcript.
 
 | Command                            | Description                                |
 |------------------------------------|--------------------------------------------|
-| `/subagents [on|off]`              | Show or set subagent use for this session  |
+| `/subagents [on|off]`              | Show or set `task` tool availability for this session |
 | `/model-subagent [name]`           | Show or switch to one permitted runtime model |
 | `/models-subagent [name]`          | List quick models or switch to a one-item runtime allowlist |
 

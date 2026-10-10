@@ -38,11 +38,6 @@ const GOAL_EVALUATOR_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 #[cfg(feature = "subagents")]
 async fn evaluate_goal(goal: &GoalState, action: &str) -> Result<String, ToolError> {
-    if !crate::extras::subagents::is_enabled() {
-        return Err(ToolError::Msg(format!(
-            "Cannot mark goal {action}: subagents are disabled for this session"
-        )));
-    }
     let (client, provider_name, model_name, max_turns, config, agents) = try_with_config(|cfg| {
         (
             cfg.client.clone(),
