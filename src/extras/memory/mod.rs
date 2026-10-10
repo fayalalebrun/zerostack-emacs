@@ -621,6 +621,7 @@ impl MemoryWrite {
 impl Tool for MemoryWrite {
     const NAME: &'static str = "memory_write";
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = MemoryWriteArgs;
     type Output = String;
 
@@ -690,6 +691,7 @@ impl MemoryRead {
 impl Tool for MemoryRead {
     const NAME: &'static str = "memory_read";
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = MemoryReadArgs;
     type Output = String;
 
@@ -771,6 +773,7 @@ impl MemorySearch {
 impl Tool for MemorySearch {
     const NAME: &'static str = "memory_search";
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = MemorySearchArgs;
     type Output = String;
 

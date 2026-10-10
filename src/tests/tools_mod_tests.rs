@@ -1,8 +1,16 @@
 use crate::agent::tools::{
-    deny_repeated_reads, is_skip_dir, set_active_session_id, set_deny_repeated_reads, track_read,
-    truncate_live_tool_output, untrack_read_path,
+    ToolError, WriteTodoList, deny_repeated_reads, is_skip_dir, set_active_session_id,
+    set_deny_repeated_reads, track_read, truncate_live_tool_output, untrack_read_path,
 };
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
+use rig::tool::Tool;
+
+#[test]
+fn authored_tool_errors_are_visible_to_the_model() {
+    let tool = WriteTodoList::new(None, None);
+    let error = Tool::map_error(&tool, ToolError::Msg("specific failure detail".to_string()));
+    assert_eq!(error.model_feedback(), Some("specific failure detail"));
+}
 
 #[test]
 fn skip_node_modules() {

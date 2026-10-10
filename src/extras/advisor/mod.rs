@@ -98,6 +98,7 @@ impl AdvisorTool {
 impl Tool for AdvisorTool {
     const NAME: &'static str = "advisor";
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = AdvisorArgs;
     type Output = String;
 

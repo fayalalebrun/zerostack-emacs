@@ -131,6 +131,7 @@ impl Tool for UpdateGoal {
     const NAME: &'static str = "goal_update";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = GoalUpdateArgs;
     type Output = String;
 

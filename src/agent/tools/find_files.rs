@@ -33,6 +33,7 @@ impl Tool for FindFilesTool {
     const NAME: &'static str = "find_files";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = FindFilesArgs;
     type Output = String;
 

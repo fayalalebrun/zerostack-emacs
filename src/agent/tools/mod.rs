@@ -228,6 +228,19 @@ pub enum ToolError {
     Msg(String),
 }
 
+pub(crate) fn model_visible_tool_error(error: ToolError) -> rig::tool::ToolExecutionError {
+    rig::tool::ToolExecutionError::other(error.to_string())
+}
+
+macro_rules! expose_tool_errors {
+    () => {
+        fn map_error(&self, error: Self::Error) -> rig::tool::ToolExecutionError {
+            crate::agent::tools::model_visible_tool_error(error)
+        }
+    };
+}
+pub(crate) use expose_tool_errors;
+
 impl From<io::Error> for ToolError {
     fn from(e: io::Error) -> Self {
         ToolError::Msg(e.to_string())

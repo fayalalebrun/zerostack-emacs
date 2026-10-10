@@ -33,6 +33,7 @@ impl Tool for WriteTodoList {
     const NAME: &'static str = "todo_write";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = TodoWriteArgs;
     type Output = String;
 

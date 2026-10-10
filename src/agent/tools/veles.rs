@@ -36,6 +36,7 @@ impl Tool for VelesTool {
     const NAME: &'static str = "code_search";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = VelesArgs;
     type Output = String;
 

@@ -189,6 +189,7 @@ impl Tool for BashTool {
     const NAME: &'static str = "bash";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = BashArgs;
     type Output = String;
 

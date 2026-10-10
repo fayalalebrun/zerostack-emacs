@@ -633,6 +633,7 @@ impl Tool for EditTool {
     const NAME: &'static str = "edit";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = EditArgs;
     type Output = String;
 

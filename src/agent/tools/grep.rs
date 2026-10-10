@@ -53,6 +53,7 @@ impl Tool for GrepTool {
     const NAME: &'static str = "grep";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = GrepArgs;
     type Output = String;
 

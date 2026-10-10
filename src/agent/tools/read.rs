@@ -85,6 +85,7 @@ impl Tool for ReadTool {
     const NAME: &'static str = "read";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = ReadArgs;
     type Output = rig::tool::ToolOutput;
 

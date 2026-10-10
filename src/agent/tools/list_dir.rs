@@ -61,6 +61,7 @@ impl Tool for ListDirTool {
     const NAME: &'static str = "list_dir";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = ListDirArgs;
     type Output = String;
 

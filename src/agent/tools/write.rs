@@ -30,6 +30,7 @@ impl Tool for WriteTool {
     const NAME: &'static str = "write";
 
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = WriteArgs;
     type Output = String;
 

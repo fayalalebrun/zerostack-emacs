@@ -47,6 +47,7 @@ impl TaskTool {
 impl Tool for TaskTool {
     const NAME: &'static str = "task";
     type Error = ToolError;
+    crate::agent::tools::expose_tool_errors!();
     type Args = SpawnRequest;
     type Output = String;
 
