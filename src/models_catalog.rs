@@ -100,6 +100,16 @@ mod tests {
     fn opencode_go_matches_the_live_catalog_snapshot() {
         let ids = ids("opencode-go");
         let expected = [
+            "claude-haiku-5-5",
+            "deepseek-flash",
+            "deepseek-v4.1-flash",
+            "gpt-6-luna",
+            "grok-4.7",
+            "longcat-2.5-preview-free",
+            "mimo-v2.6-flash",
+            "mimo-v2.6-pro",
+            "space-bunny",
+            "step-5-preview-free",
             "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",

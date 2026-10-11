@@ -184,12 +184,14 @@ enum OpenCodeGoApi {
 
 fn opencode_go_api(model: &str) -> OpenCodeGoApi {
     match model {
-        "gpt-5.6-luna"
+        "gpt-6-luna"
+        | "gpt-5.6-luna"
+        | "grok-4.7"
         | "grok-4.6"
         | "muse-spark-1.3-contributor"
         | "muse-spark-1.2-contributor" => OpenCodeGoApi::Responses,
-        "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.8-max" | "qwen3.8-flash"
-        | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus" | "qwen3.5-plus" => {
+        "claude-haiku-5-5" | "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.8-max"
+        | "qwen3.8-flash" | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus" | "qwen3.5-plus" => {
             OpenCodeGoApi::Messages
         }
         _ => OpenCodeGoApi::Completions,
@@ -799,14 +801,19 @@ fn opencode_go_reasoning_efforts(model: &str) -> &'static [&'static str] {
     const MUSE: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
     match model {
-        "gpt-5.6-luna" => FULL,
-        "grok-4.5" => LOW_MEDIUM_HIGH,
-        "grok-4.6" => &["low", "medium", "high", "xhigh"],
+        "gpt-5.6-luna" | "gpt-6-luna" => FULL,
+        "grok-4.5" | "step-5-preview-free" => LOW_MEDIUM_HIGH,
+        "grok-4.6" | "grok-4.7" => &["low", "medium", "high", "xhigh"],
         "glm-5.2" | "deepseek-v4-pro" => HIGH_MAX,
-        "glm-5.3" | "glm-5.3-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => {
-            LOW_HIGH_MAX
-        }
+        "glm-5.3"
+        | "glm-5.3-flash"
+        | "deepseek-flash"
+        | "deepseek-v4-flash"
+        | "deepseek-v4.1-flash"
+        | "deepseek-v4-flash-vision-exp" => LOW_HIGH_MAX,
         "kimi-k3" => &["max"],
+        "claude-haiku-5-5" => &["low", "medium", "high", "xhigh", "max"],
+        "space-bunny" => &["low", "medium", "high", "xhigh", "max"],
         "qwen3.8-max" | "qwen3.8-flash" => LOW_MEDIUM_XHIGH,
         "hy3" => NONE_LOW_HIGH,
         "hy4-preview" => NONE_HIGH,
@@ -2342,23 +2349,32 @@ mod tests {
             "glm-5.2",
             "kimi-k3",
             "longcat-2.0",
+            "longcat-2.5-preview-free",
+            "step-5-preview-free",
+            "space-bunny",
             "omen-alpha",
             "kimi-k2.7-code",
+            "deepseek-flash",
             "deepseek-v4-pro",
+            "deepseek-v4.1-flash",
             "mimo-v2.5-pro",
+            "mimo-v2.6-pro",
             "hy3",
         ] {
             assert_eq!(opencode_go_api(model), OpenCodeGoApi::Completions);
         }
         for model in [
             "gpt-5.6-luna",
+            "gpt-6-luna",
             "grok-4.6",
+            "grok-4.7",
             "muse-spark-1.3-contributor",
             "muse-spark-1.2-contributor",
         ] {
             assert_eq!(opencode_go_api(model), OpenCodeGoApi::Responses);
         }
         for model in [
+            "claude-haiku-5-5",
             "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
@@ -2387,6 +2403,19 @@ mod tests {
             supported_reasoning_efforts("opencode-go", "qwen3.8-max"),
             &["low", "medium", "xhigh"]
         );
+        assert_eq!(
+            supported_reasoning_efforts("opencode-go", "gpt-6-luna"),
+            &["none", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            supported_reasoning_efforts("opencode-go", "claude-haiku-5-5"),
+            &["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            supported_reasoning_efforts("opencode-go", "deepseek-v4.1-flash"),
+            &["low", "high", "max"]
+        );
+        assert!(supported_reasoning_efforts("opencode-go", "mimo-v2.6-pro").is_empty());
         assert!(supported_reasoning_efforts("opencode-go", "minimax-m2.7").is_empty());
     }
 
@@ -2493,7 +2522,8 @@ mod tests {
     fn opencode_go_live_listing_retains_catalog_context_limits() {
         let body = json!({"data": [
             {"id": "glm-5.3-flash"}, {"id": "kimi-k2.7-code"},
-            {"id": "gpt-5.6-luna"}, {"id": "hy3"}, {"id": "unknown-model"}
+            {"id": "gpt-6-luna"}, {"id": "space-bunny"}, {"id": "hy3"},
+            {"id": "unknown-model"}
         ]})
         .to_string();
         let models = parse_opencode_go_models(&body).unwrap();
@@ -2503,6 +2533,7 @@ mod tests {
                 Some(1_000_000),
                 Some(262_144),
                 Some(922_000),
+                Some(524_288),
                 Some(192_000),
                 None
             ]

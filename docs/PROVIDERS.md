@@ -46,7 +46,7 @@ UUID retained across requests and client clones.
 
 OpenCode Go serves some models through OpenAI Chat Completions, OpenAI
 Responses, or Anthropic Messages. zerostack selects the documented API style
-for each bundled model automatically. The embedded 35-model snapshot combines
+for each bundled model automatically. The embedded 45-model snapshot combines
 the published endpoint table with the live catalog and is used at startup; run
 `/models refresh` in the TUI to replace it with the current
 live `/models` catalog. The snapshot is also available with:
@@ -57,18 +57,19 @@ zerostack config models opencode-go
 
 `reasoning-effort` is passed only when the selected Go model declares that
 level. For example, GLM-5.3-Flash supports `low`, `high`, and `max`; GPT 5.6
-Luna supports `none`, `low`, `medium`, `high`, `xhigh`, and `max` (not `minimal`);
-and models without an effort control do not receive an unsupported request
-parameter. Go subagents honor per-model `reasoning-effort` overrides; Messages
+Luna and GPT 6 Luna support `none`, `low`, `medium`, `high`, `xhigh`, and `max`
+(not `minimal`). Models without an effort control do not receive an unsupported
+request parameter. Go subagents honor per-model `reasoning-effort` overrides; Messages
 subagents also receive the configured `max_tokens` limit.
 
 ### Context limits
 
-All 35 bundled Go models include context metadata from
-[Models.dev](https://models.dev/api.json). The legacy `hy3-preview` entry uses
-Tencent TokenHub's 256,000-token preview limit because Go no longer publishes
-metadata for that alias. These are provider-specific limits, not limits borrowed
-from similarly named OpenAI, Codex, or OpenRouter models.
+All 45 bundled Go models include context metadata. Most limits come from
+[Models.dev](https://models.dev/api.json). The `deepseek-flash` alias uses the
+DeepSeek V4 Flash limit. The legacy `hy3-preview` entry uses Tencent TokenHub's
+256,000-token preview limit because Go does not publish metadata for these
+aliases. These are provider-specific limits, not limits borrowed from similarly
+named OpenAI, Codex, or OpenRouter models.
 
 | Model | Effective context budget (tokens) |
 | --- | ---: |
@@ -76,17 +77,20 @@ from similarly named OpenAI, Codex, or OpenRouter models.
 | GLM 5 / 5.1 | 202,752 |
 | Kimi K2.5 / K2.6 / K2.7 Code | 262,144 |
 | Kimi K3 | 1,048,576 |
-| GPT 5.6 Luna | 922,000 |
+| Claude Haiku 5.5 | 1,000,000 |
+| GPT 5.6 Luna / GPT 6 Luna | 922,000 |
 | Qwen 3.6 Plus / 3.7 / 3.8 | 1,000,000 |
 | Qwen 3.5 Plus | 262,144 |
-| DeepSeek V4 Pro / Flash / Flash Vision Exp | 1,000,000 |
+| DeepSeek Flash / V4 Pro / V4 Flash / V4.1 Flash / V4 Flash Vision Exp | 1,000,000 |
 | MiniMax M3 | 1,000,000 |
 | MiniMax M2.5 / M2.7 | 204,800 |
 | Hy3 / Hy3 Preview / Hy4 Preview | 192,000 / 256,000 / 1,024,000 |
-| Grok 4.5 / 4.6 / Omen Alpha | 500,000 |
+| Grok 4.5 / 4.6 / 4.7 / Omen Alpha | 500,000 |
 | Muse Spark 1.2 / 1.3 Contributor | 1,048,576 |
-| MiMo V2.5 / V2.5 Pro / V2 Pro / V2 Omni | 1,000,000 / 1,048,576 / 1,048,576 / 262,144 |
-| LongCat 2.0 | 1,000,000 |
+| MiMo V2.5 / V2.5 Pro / V2.6 Flash / V2.6 Pro / V2 Pro / V2 Omni | 1,000,000 / 1,048,576 / 1,048,576 / 1,048,576 / 1,048,576 / 262,144 |
+| LongCat 2.0 / 2.5 Preview Free | 1,000,000 |
+| Step 5 Preview Free | 1,000,000 |
+| Space Bunny | 524,288 |
 
 The catalog stores total `context` and, when published, a separate `input`
 ceiling. zerostack uses the smaller value for budgeting: Luna's total window is
@@ -97,9 +101,9 @@ An explicit `context_window` configuration overrides catalog lookup.
 `/models refresh` retains these limits for known models; unknown IDs still use
 the 128,000-token fallback unless configured explicitly. Restart and resume
 an existing Go session to replace its old fallback with the catalog limit.
-`scripts/gen-models-catalog.sh` refreshes limits for the curated Go IDs without
-removing legacy aliases or unrelated provider entries; test it with
-`bash scripts/test-models-catalog.sh`.
+`scripts/gen-models-catalog.sh` refreshes Go IDs from the live endpoint and
+adds limits from Models.dev. It also refreshes the other bundled provider
+catalogs. Test it with `bash scripts/test-models-catalog.sh`.
 
 ## Custom Providers
 

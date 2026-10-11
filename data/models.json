@@ -624,6 +624,59 @@
       "id": "omen-alpha",
       "name": "Omen Alpha",
       "context": 500000
+    },
+    {
+      "id": "deepseek-flash",
+      "name": "DeepSeek Flash",
+      "context": 1000000
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash",
+      "context": 1000000
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "name": "MiMo-V2.6-Pro",
+      "context": 1048576
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "name": "MiMo-V2.6-Flash",
+      "context": 1048576
+    },
+    {
+      "id": "longcat-2.5-preview-free",
+      "name": "LongCat 2.5 Preview Free",
+      "context": 1000000
+    },
+    {
+      "id": "step-5-preview-free",
+      "name": "Step 5 Preview Free",
+      "context": 1000000,
+      "input": 1000000
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "context": 1000000
+    },
+    {
+      "id": "grok-4.7",
+      "name": "Grok 4.7",
+      "context": 500000
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "context": 1050000,
+      "input": 922000
+    },
+    {
+      "id": "space-bunny",
+      "name": "Space Bunny",
+      "context": 1048576,
+      "input": 524288
     }
   ],
   "openrouter": [

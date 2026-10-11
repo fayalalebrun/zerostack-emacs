@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Regenerates data/models.json — the static model catalog embedded into the
-# binary (see src/models_catalog.rs). Source: https://models.dev/api.json,
-# which lists every provider's model ids.
+# binary (see src/models_catalog.rs). Models.dev supplies model metadata, and
+# OpenCode Go's live endpoint supplies its current model IDs.
 #
 # The committed JSON is the single build-time source of truth, so the build
 # stays offline and reproducible. Run this (or let the scheduled CI workflow
@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$SCRIPT_DIR/../data/models.json"
 SRC="https://models.dev/api.json"
+OPENCODE_GO_SRC="https://opencode.ai/zen/go/v1/models"
 
 # Vendors kept for the curated OpenRouter subset (its full list is ~340 models;
 # the rest are reachable on demand via `/models refresh`).
@@ -39,6 +40,14 @@ CUTOFFS='{"anthropic":"2025-04-01"}'
 
 echo "Fetching $SRC ... (cutoffs: $CUTOFFS)" >&2
 api="$(curl -fsSL --max-time 120 "$SRC")"
+echo "Fetching $OPENCODE_GO_SRC ..." >&2
+opencode_go="$(curl -fsSL --max-time 120 "$OPENCODE_GO_SRC")"
+echo "$opencode_go" | jq -e '
+  (.data | type) == "array"
+  and (.data | length) > 0
+  and all(.data[]; ((.id | type) == "string" and (.id | length) > 0))
+  and (([.data[].id] | unique | length) == (.data | length))
+' >/dev/null
 
 # jq program:
 #  - `entry`  : project a models.dev model into our compact {id,name,context}.
@@ -46,7 +55,7 @@ api="$(curl -fsSL --max-time 120 "$SRC")"
 #               mirroring crate::provider::is_agent_model's denylist, and keep only
 #               models that can output text.
 #  - emits keys by *zerostack* provider name (gemini <- models.dev "google").
-catalog="$(echo "$api" | jq --slurpfile old "$OUT" --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
+catalog="$(echo "$api" | jq --slurpfile old "$OUT" --argjson go "$opencode_go" --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
   def deny: [
     "embedding","embed-","text-embedding","gemini-embedding","whisper","transcribe",
     "tts","-audio","realtime","speech","dall-e","gpt-image","image-generation",
@@ -61,14 +70,32 @@ catalog="$(echo "$api" | jq --slurpfile old "$OUT" --argjson orv "$OPENROUTER_VE
     | recent($c);
   def entry: {id: .value.id, name: .value.name, context: (.value.limit.context // null)};
   def models_of($p; $c): ($p.models // {}) | to_entries | map(chat($c) | entry) | sort_by(.id);
-  . as $api | $old[0] + {
-    "opencode-go": ($old[0]["opencode-go"] | map(
-      . as $model | $api["opencode-go"].models[$model.id].limit as $limit
+  . as $api
+  | def old_go($id): first($old[0]["opencode-go"][] | select(.id == $id)) // {};
+    def go_meta($id):
+      if $id == "deepseek-flash" then
+        (($api["opencode-go"].models["deepseek-v4-flash"] // {}) + {name: "DeepSeek Flash"})
+      else $api["opencode-go"].models[$id] // {}
+      end;
+    def go_entry:
+      .id as $id | old_go($id) as $old_model | go_meta($id) as $meta
+      | ($old_model + {id: $id, name: ($old_model.name // $meta.name // $id)})
+      | ($meta.limit // {}) as $limit
       | if $limit.context != null then
           .context = $limit.context
           | if $limit.input != null then .input = $limit.input else del(.input) end
-        else . end
-    )),
+        else . end;
+    ($go.data | map(.id)) as $live_ids
+    | ($old[0]["opencode-go"] | map(.id)) as $old_ids
+    | $old[0] + {
+    "opencode-go": (
+      $go.data
+      | map(go_entry)
+      | sort_by(
+          .id as $id
+          | ($old_ids | index($id)) // (1000000 + ($live_ids | index($id)))
+        )
+    ),
     anthropic:  models_of(.anthropic; ($cut.anthropic  // "0000-00-00")),
     openai:     models_of(.openai;    ($cut.openai     // "0000-00-00")),
     gemini:     models_of(.google;    ($cut.gemini     // "0000-00-00")),
