@@ -3696,6 +3696,7 @@ mod imp {
         let mut stream_render = StreamRenderState::new(Instant::now());
         let mut reasoning_buf = String::new();
         let mut reasoning_start_line: Option<usize> = None;
+        let mut reasoning_segment = 0usize;
         let mut retried_after_mid_turn_compact = false;
         let mut continued_after_auto_compact = false;
 
@@ -3756,8 +3757,9 @@ mod imp {
                         continue;
                     }
                     reasoning_buf.push_str(&safe);
+                    let filename = reasoning_artifact_filename(reasoning_segment);
                     let artifact = match server
-                        .write_artifact_file(turn, "thinking", "thinking.txt", &reasoning_buf)
+                        .write_artifact_file(turn, "thinking", &filename, &reasoning_buf)
                         .await
                     {
                         Ok(artifact) => Some(artifact),
@@ -3859,9 +3861,13 @@ mod imp {
                         }
                     }
                     // A later model call may emit a new reasoning stream after this
-                    // tool result. Start that as a new rendered segment so replacing
-                    // `thinking: ...` does not delete the tool rows appended below.
-                    reset_reasoning_render_segment(&mut reasoning_start_line);
+                    // tool result. Keep its text and artifact separate so the new
+                    // trace neither repeats nor overwrites the previous trace.
+                    advance_reasoning_render_segment(
+                        &mut reasoning_buf,
+                        &mut reasoning_start_line,
+                        &mut reasoning_segment,
+                    );
                     let _render_guard = server.tool_render_lock.lock().await;
                     let summary = format_tool_call_summary(&name, &args);
                     let message_index;
@@ -4055,8 +4061,11 @@ mod imp {
                         response_buf.clear();
                         response_start_line = None;
                         stream_render.reset(Instant::now());
-                        reasoning_buf.clear();
-                        reasoning_start_line = None;
+                        advance_reasoning_render_segment(
+                            &mut reasoning_buf,
+                            &mut reasoning_start_line,
+                            &mut reasoning_segment,
+                        );
                         server
                             .append_lines(
                                 "retry-continuation-render",
@@ -4155,8 +4164,11 @@ mod imp {
                                 response_buf.clear();
                                 response_start_line = None;
                                 stream_render.reset(Instant::now());
-                                reasoning_buf.clear();
-                                reasoning_start_line = None;
+                                advance_reasoning_render_segment(
+                                    &mut reasoning_buf,
+                                    &mut reasoning_start_line,
+                                    &mut reasoning_segment,
+                                );
                                 let history = {
                                     let session = server.session.lock().await;
                                     assistant_index = session.messages.len();
@@ -4314,8 +4326,11 @@ mod imp {
                         response_buf.clear();
                         response_start_line = None;
                         stream_render.reset(Instant::now());
-                        reasoning_buf.clear();
-                        reasoning_start_line = None;
+                        advance_reasoning_render_segment(
+                            &mut reasoning_buf,
+                            &mut reasoning_start_line,
+                            &mut reasoning_segment,
+                        );
                         let history = {
                             let session = server.session.lock().await;
                             assistant_index = session.messages.len();
@@ -4850,10 +4865,27 @@ mod imp {
             .unwrap_or(&mut offline_activity);
         activity.sync_session(session);
         for (message_index, msg) in session.messages.iter().enumerate() {
-            if grouped_results.contains(&message_index)
-                || (msg.role == MessageRole::Assistant && msg.content.is_empty())
-            {
+            if grouped_results.contains(&message_index) {
                 continue;
+            }
+            if msg.role == MessageRole::Assistant {
+                let reasoning = msg
+                    .provider_reasoning
+                    .iter()
+                    .map(crate::session::ProviderReasoning::display_text)
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !reasoning.is_empty() {
+                    out.push(
+                        render_persisted_reasoning(server, message_index, &reasoning)
+                            .await
+                            .with_source(message_index, msg.role),
+                    );
+                }
+                if msg.content.is_empty() {
+                    continue;
+                }
             }
             {
                 match render_activity_message(
@@ -5010,6 +5042,35 @@ mod imp {
             out.push(blank_line());
         }
         out
+    }
+
+    async fn render_persisted_reasoning(
+        server: Option<&Arc<Server>>,
+        message_index: usize,
+        reasoning: &str,
+    ) -> WireLine {
+        if let Some(server) = server {
+            let filename = format!("restored-thinking-{message_index}.txt");
+            match server
+                .write_artifact_file(message_index as u64, "thinking", &filename, reasoning)
+                .await
+            {
+                Ok(artifact) => {
+                    return WireLine::with_artifact(
+                        format!("thinking: {}", format_bytes(artifact.bytes)),
+                        "zs-reasoning",
+                        artifact,
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    "failed to restore reasoning artifact for message {message_index}: {error}"
+                ),
+            }
+        }
+        WireLine::new(
+            format!("thinking: {}", format_bytes(reasoning.len())),
+            "zs-reasoning",
+        )
     }
 
     fn render_message_lines(
@@ -6782,8 +6843,18 @@ mod imp {
         WireLine::new(String::new(), "zs-normal")
     }
 
-    fn reset_reasoning_render_segment(reasoning_start_line: &mut Option<usize>) {
+    fn reasoning_artifact_filename(segment: usize) -> String {
+        format!("thinking-{segment}.txt")
+    }
+
+    fn advance_reasoning_render_segment(
+        reasoning_buf: &mut String,
+        reasoning_start_line: &mut Option<usize>,
+        reasoning_segment: &mut usize,
+    ) {
+        reasoning_buf.clear();
         *reasoning_start_line = None;
+        *reasoning_segment = reasoning_segment.saturating_add(1);
     }
 
     fn runtime_root() -> PathBuf {
@@ -7679,6 +7750,41 @@ mod imp {
         }
 
         #[tokio::test]
+        async fn resumed_session_render_restores_reasoning_trace_artifact() {
+            let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (server, registration, _listener) = test_server(prompts);
+            server
+                .session
+                .lock()
+                .await
+                .add_message_with_reasoning_and_usage(
+                    MessageRole::Assistant,
+                    "answer",
+                    vec![crate::session::ProviderReasoning {
+                        id: String::new(),
+                        content: vec![crate::session::ProviderReasoningContent::Summary(
+                            "persisted trace".to_string(),
+                        )],
+                    }],
+                    None,
+                );
+
+            let lines = render_session_lines(&server, 100).await;
+            let reasoning = lines
+                .iter()
+                .find(|line| line.face == "zs-reasoning" && line.artifact.is_some())
+                .expect("restored reasoning row");
+            let artifact = reasoning.artifact.as_ref().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&artifact.path).unwrap(),
+                "persisted trace"
+            );
+            assert_eq!(reasoning.message_index, Some(0));
+            assert_eq!(reasoning.role, Some(MessageRole::Assistant));
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
         async fn session_render_lines_include_persisted_thinking_tokens() {
             let mut session = Session::new("openai", "gpt", 1000);
             session.add_message_with_reasoning_and_usage(
@@ -8250,10 +8356,22 @@ mod imp {
         }
 
         #[test]
-        fn tool_calls_start_a_new_reasoning_render_segment() {
+        fn tool_calls_start_a_fresh_reasoning_render_segment() {
+            let mut reasoning_buf = "prior trace".to_string();
             let mut reasoning_start_line = Some(4);
-            reset_reasoning_render_segment(&mut reasoning_start_line);
+            let mut reasoning_segment = 0;
+            advance_reasoning_render_segment(
+                &mut reasoning_buf,
+                &mut reasoning_start_line,
+                &mut reasoning_segment,
+            );
+            assert!(reasoning_buf.is_empty());
             assert_eq!(reasoning_start_line, None);
+            assert_eq!(reasoning_segment, 1);
+            assert_ne!(
+                reasoning_artifact_filename(0),
+                reasoning_artifact_filename(reasoning_segment)
+            );
         }
 
         #[test]

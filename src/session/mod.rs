@@ -193,6 +193,43 @@ impl ProviderReasoning {
         })
     }
 
+    pub fn display_text(&self) -> String {
+        let mut text = Vec::new();
+        for item in &self.content {
+            match item {
+                ProviderReasoningContent::Text { text: item, .. }
+                | ProviderReasoningContent::Summary(item) => {
+                    if !item.is_empty() {
+                        text.push(item.clone());
+                    }
+                }
+                ProviderReasoningContent::Native(value) => {
+                    if let Ok(reasoning) =
+                        serde_json::from_value::<Reasoning>(value["reasoning"].clone())
+                        && !reasoning.text.is_empty()
+                    {
+                        text.push(reasoning.text);
+                    } else if let Ok(message) = serde_json::from_value::<
+                        rig::message::AssistantMessage,
+                    >(value["message"].clone())
+                    {
+                        text.extend(message.content.into_iter().filter_map(|content| {
+                            if let AssistantContent::Reasoning(reasoning) = content
+                                && !reasoning.text.is_empty()
+                            {
+                                Some(reasoning.text)
+                            } else {
+                                None
+                            }
+                        }));
+                    }
+                }
+                ProviderReasoningContent::Encrypted(_) | ProviderReasoningContent::Redacted(_) => {}
+            }
+        }
+        text.join("\n")
+    }
+
     pub fn from_rig(reasoning: &Reasoning) -> Option<Self> {
         if reasoning.text.is_empty() && reasoning.native.is_none() && !reasoning.redacted {
             return None;
