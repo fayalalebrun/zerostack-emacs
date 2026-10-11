@@ -247,17 +247,21 @@ fn convert_history_replays_image_tool_result() {
         .push(attachment);
 
     let history = crate::agent::runner::convert_history(&session);
+    assert_eq!(history.len(), 2);
     let Message::User { content } = &history[1] else {
         panic!("expected tool result user message")
     };
-    assert!(matches!(
-        content.first().unwrap(),
-        UserContent::ToolResult(_)
-    ));
-    let Message::User { content } = &history[2] else {
-        panic!("expected separate image user message")
+    let UserContent::ToolResult(result) = content.first().unwrap() else {
+        panic!("expected tool result")
     };
-    assert!(matches!(content.first().unwrap(), UserContent::Image(_)));
+    assert!(matches!(
+        result.content.first().unwrap(),
+        rig::completion::message::ToolResultContent::Text(_)
+    ));
+    assert!(matches!(
+        result.content.get(1).unwrap(),
+        rig::completion::message::ToolResultContent::Image(_)
+    ));
 
     crate::session::storage::set_test_data_dir(previous);
     std::fs::remove_dir_all(dir).unwrap();

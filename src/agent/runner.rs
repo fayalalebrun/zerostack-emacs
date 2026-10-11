@@ -591,8 +591,20 @@ fn tool_result_messages(
     let mut output = tool_result_output(msg);
     let mut messages = Vec::new();
     #[cfg(feature = "multimodal")]
+    let mut images = Vec::new();
+    #[cfg(feature = "multimodal")]
     for attachment in &result.attachments {
         match crate::extras::multimodal::load_persisted_attachment(session_id, attachment) {
+            Ok(crate::extras::multimodal::MediaAttachment::Image { data, mime, .. }) => {
+                let UserContent::Image(image) = UserContent::image_base64(
+                    base64::prelude::BASE64_STANDARD.encode(data),
+                    Some(image_media_type(&mime)),
+                    None,
+                ) else {
+                    unreachable!()
+                };
+                images.push(ToolResultContent::Image(image));
+            }
             Ok(media) => messages.extend(media_to_messages(&[media])),
             Err(error) => output.push_str(&format!(
                 "\n[failed to load image attachment {}: {error}]",
@@ -600,6 +612,9 @@ fn tool_result_messages(
             )),
         }
     }
+    let mut content = vec![ToolResultContent::Text(Text::new(output))];
+    #[cfg(feature = "multimodal")]
+    content.extend(images);
     messages.insert(
         0,
         Message::User {
@@ -613,7 +628,7 @@ fn tool_result_messages(
                             | crate::session::ToolResultStatus::Interrupted
                     )
                 ),
-                content: vec![ToolResultContent::Text(Text::new(output))],
+                content,
             })],
         },
     );
@@ -913,27 +928,6 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
                                 },
                             })
                             .await;
-                        #[cfg(feature = "multimodal")]
-                        if !images.is_empty() {
-                            tool_interactions.push(Message::User {
-                                content: vec![UserContent::ToolResult(ToolResult {
-                                    call: tool_result.call,
-                                    name: tool_result.name,
-                                    is_error: tool_result.is_error,
-                                    content: vec![ToolResultContent::Text(Text::new(output))],
-                                })],
-                            });
-                            for image in images {
-                                tool_interactions.push(Message::User {
-                                    content: vec![UserContent::image_base64(
-                                        base64::prelude::BASE64_STANDARD.encode(image.data),
-                                        Some(image_media_type(&image.mime)),
-                                        None,
-                                    )],
-                                });
-                            }
-                            break;
-                        }
                         tool_interactions.push(tool_result.clone().into());
                         provider_call_started = Instant::now();
                     }

@@ -917,9 +917,9 @@ Animated images are rejected. Encoded images are limited to 20 MB, dimensions to
 16,384 pixels per edge and 100 megapixels, and decoder allocation to 400 MB.
 Images are copied into session-owned media storage and revalidated when replaying
 saved tool history; invalid stored images become warning text instead of being
-resent. Image read results are sent as a text tool result followed by a top-level
-image message because OpenAI function-call outputs only accept text. The selected
-provider and model must support image input.
+resent. Image read results stay attached to their native tool result during live
+execution and session replay. The provider adapter selects the correct wire format.
+The selected provider and model must support image input.
 
 | Command | Description |
 | ------- | ----------- |

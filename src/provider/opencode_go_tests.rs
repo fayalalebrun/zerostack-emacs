@@ -188,6 +188,100 @@ async fn opencode_go_wire_routes_headers_effort_and_errors() {
     }
 }
 
+#[cfg(feature = "multimodal")]
+#[tokio::test]
+async fn opencode_go_wire_keeps_images_inside_tool_results() {
+    use base64::Engine as _;
+    use rig::completion::message::{
+        AssistantContent, CallId, ToolCall, ToolFunction, ToolResult, ToolResultContent,
+        UserContent,
+    };
+
+    let png = crate::extras::image_validate::test_png();
+    let encoded = base64::prelude::BASE64_STANDARD.encode(&png);
+    for name in ["glm-5.3-flash", "gpt-6-luna", "claude-haiku-5-5"] {
+        let (client, captured) = capture_request().await;
+        let call = CallId::from_wire("call-image");
+        let assistant = Message::Assistant(rig::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
+                call.clone(),
+                ToolFunction::new(
+                    rig::message::ToolName::new("read").unwrap(),
+                    json!({"path": "image.png"}),
+                ),
+            )),
+        ]));
+        let UserContent::Image(image) = UserContent::image_base64(
+            encoded.clone(),
+            Some(rig::message::ImageMediaType::PNG),
+            None,
+        ) else {
+            unreachable!()
+        };
+        let result = Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call,
+                name: rig::message::ToolName::new("read").unwrap(),
+                is_error: false,
+                content: vec![
+                    ToolResultContent::Text(rig::message::Text::new("Read image")),
+                    ToolResultContent::Image(image),
+                ],
+            })],
+        };
+        let model = client.completion_model(name.into());
+        let error = match model {
+            AnyModel::OpenAI(OpenAiModel::OpenCodeGoCompletions(m, _))
+            | AnyModel::OpenAI(OpenAiModel::OpenCodeGoResponses(m, _)) => {
+                send_request(m, None, vec![assistant, result], false).await
+            }
+            AnyModel::OpenCodeGoMessages(m, _) => {
+                send_request(m, None, vec![assistant, result], false).await
+            }
+            _ => panic!("unexpected Go model"),
+        };
+        assert!(error.to_string().contains("mock rejection"), "{error}");
+        let (_, body) = captured.await.unwrap();
+        let wire = body.to_string();
+        assert!(wire.contains(&encoded), "{name}: {body}");
+        match opencode_go_api(name) {
+            OpenCodeGoApi::Completions => {
+                let messages = body["messages"].as_array().unwrap();
+                let tool = messages
+                    .iter()
+                    .find(|message| message["role"] == "tool")
+                    .unwrap();
+                assert!(tool["content"].as_str().unwrap().contains("Read image"));
+                assert!(messages.iter().any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_array().is_some_and(|content| {
+                            content.iter().any(|part| part["type"] == "image_url")
+                        })
+                }));
+            }
+            OpenCodeGoApi::Responses => {
+                let output = body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                assert_eq!(output["output"][1]["type"], "input_image");
+            }
+            OpenCodeGoApi::Messages => {
+                let result = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                    .find(|item| item["type"] == "tool_result")
+                    .unwrap();
+                assert_eq!(result["content"][1]["type"], "image");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn opencode_go_model_refresh_sends_session_and_client_identity() {
     let (client, captured) = capture_request().await;
