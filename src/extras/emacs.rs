@@ -1446,6 +1446,21 @@ mod imp {
                 .await?;
             }
         }
+        // Permission requests are live state, not part of the transcript.
+        // Replay them only to this client when it attaches or renders again.
+        let mut pending = {
+            let mutable = server.mutable.lock().await;
+            mutable
+                .pending_permissions
+                .iter()
+                .map(|(&id, req)| (id, permission_request_fields(id, &req.tool, &req.input)))
+                .collect::<Vec<_>>()
+        };
+        pending.sort_unstable_by_key(|(id, _)| *id);
+        for (_, fields) in pending {
+            out.send(server.event_form("permission-request", fields).await)
+                .await?;
+        }
         crate::startup_profile::mark("emacs:attach_sent");
         spawn_session_latex_render(Arc::clone(server), cols);
         Ok(())
@@ -4560,11 +4575,21 @@ mod imp {
         }
     }
 
+    fn permission_request_fields(request: u64, tool: &str, input: &str) -> String {
+        format!(
+            " :request {} :tool {} :input {} :suggested-pattern {}",
+            request,
+            sexp_quote(tool),
+            sexp_quote(input),
+            sexp_quote(&suggest_pattern(tool, input)),
+        )
+    }
+
     async fn permission_pump(server: Arc<Server>, mut ask_rx: AskReceiver) {
         while let Some(req) = ask_rx.recv().await {
             let tool = req.tool.to_string();
             let input = req.input.clone();
-            let suggested = suggest_pattern(&tool, &input);
+
             let request_id = {
                 let mut mutable = server.mutable.lock().await;
                 let id = mutable.next_permission_id;
@@ -4576,13 +4601,7 @@ mod imp {
             server
                 .broadcast_event(
                     "permission-request",
-                    format!(
-                        " :request {} :tool {} :input {} :suggested-pattern {}",
-                        request_id,
-                        sexp_quote(&tool),
-                        sexp_quote(&input),
-                        sexp_quote(&suggested),
-                    ),
+                    permission_request_fields(request_id, &tool, &input),
                 )
                 .await;
         }
@@ -9285,6 +9304,73 @@ mod imp {
             handle_attach(&server, &cmd, &out_tx).await.unwrap();
 
             assert!(out_rx.recv().await.unwrap().contains("already streamed"));
+            let _ = std::fs::remove_dir_all(&registration.dir);
+        }
+
+        #[tokio::test]
+        async fn attaching_replays_pending_permissions_only_to_attaching_client() {
+            let (server, registration, listener) = test_server(Arc::default());
+            drop(listener);
+            let mut events = server.events.subscribe();
+            let mut replies = Vec::new();
+            for id in [2, 1] {
+                let (reply, receiver) = tokio::sync::oneshot::channel();
+                replies.push(receiver);
+                server.mutable.lock().await.pending_permissions.insert(
+                    id,
+                    AskRequest {
+                        tool: "bash".into(),
+                        input: "echo \"permission\"".into(),
+                        reply,
+                    },
+                );
+            }
+            let (out_tx, mut out_rx) = mpsc::channel(8);
+            let attach = parse_command("(attach :request 10 :cols 80)").unwrap();
+            handle_attach(&server, &attach, &out_tx).await.unwrap();
+            assert!(
+                out_rx
+                    .recv()
+                    .await
+                    .unwrap()
+                    .contains(":type session-render")
+            );
+            for id in [1, 2] {
+                let event = out_rx.recv().await.unwrap();
+                assert!(event.contains(":type permission-request"));
+                assert!(event.contains(&permission_request_fields(
+                    id,
+                    "bash",
+                    "echo \"permission\"",
+                )));
+            }
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+
+            let answer =
+                parse_command("(permission-answer :request 1 :decision allow-once)").unwrap();
+            handle_permission_answer(&server, &answer, &out_tx)
+                .await
+                .unwrap();
+            assert!(matches!(
+                replies.remove(1).await.unwrap(),
+                UserDecision::AllowOnce
+            ));
+            let _ = out_rx.recv().await.unwrap();
+
+            handle_attach(&server, &attach, &out_tx).await.unwrap();
+            assert!(
+                out_rx
+                    .recv()
+                    .await
+                    .unwrap()
+                    .contains(":type session-render")
+            );
+            let event = out_rx.recv().await.unwrap();
+            assert!(event.contains(":type permission-request :request 2"));
+            assert!(out_rx.try_recv().is_err());
             let _ = std::fs::remove_dir_all(&registration.dir);
         }
 

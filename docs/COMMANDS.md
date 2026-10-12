@@ -270,7 +270,7 @@ The socket protocol is one escaped S-expression per line. Core client commands:
 | Command | Description |
 | ------- | ----------- |
 | `(hello :protocol 1 :cols 100)` | Negotiate protocol and set render width. |
-| `(attach :cols 100)` | Receive a full rendered session snapshot. |
+| `(attach :cols 100)` | Receive a full rendered session snapshot and pending permission requests. |
 | `(prompt :request 1 :text "...")` | Start one agent turn. |
 | `(set-view :cols 120)` | Change markdown render width for later updates. |
 | `(provider :request 2 :provider "openai-codex")` | Switch this live Emacs session to another provider and reset the session model to that provider's configured/default model. Rejected while a prompt or loop is running. |
@@ -710,6 +710,10 @@ are inherited without placing credentials in launcher command-line arguments.
 Stdin is detached and stdout/stderr go to a private retained session log file.
 Closing a chat buffer, disconnecting, or exiting Emacs leaves the daemon running.
 No permanent unit files or user-manager configuration are installed.
+When you reattach to a live session that waits for permission, the daemon sends
+its pending requests again. Emacs restores the permission buttons below the input
+prompt. Requests that have already been answered are not replayed.
+
 Reopen the board and press `RET` on a live session to reattach. Use the board's
 `s` action to explicitly stop a daemon, or the chat menu's `restart` action to
 replace it. Sessions do not automatically restart after logout or reboot.
