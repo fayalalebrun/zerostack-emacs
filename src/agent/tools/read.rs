@@ -12,6 +12,43 @@ use crate::config::types::EditSystem;
 
 const DEFAULT_MAX_TEXT_SIZE: u64 = 1024 * 1024;
 
+// Like read context metadata, snapshots follow the returned output into the runner.
+static READ_DISPLAY_ARTIFACTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, crate::event::DisplayArtifact>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn take_read_display_artifact(output: &str) -> Option<crate::event::DisplayArtifact> {
+    READ_DISPLAY_ARTIFACTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(output)
+}
+
+fn source_snapshot(
+    path: &str,
+    content: &str,
+    start: usize,
+    end: usize,
+) -> crate::event::DisplayArtifact {
+    // Keep the original line endings and the trailing newline, if present.
+    let contents = content
+        .split_inclusive('\n')
+        .skip(start)
+        .take(end - start)
+        .collect();
+    crate::event::DisplayArtifact {
+        kind: "read-source".into(),
+        label: std::path::Path::new(path)
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("source.txt"))
+            .to_string_lossy()
+            .as_ref()
+            .into(),
+        contents,
+        extension: "".into(),
+    }
+}
+
 pub struct ReadTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
@@ -268,6 +305,10 @@ impl Tool for ReadTool {
         };
         let info = crate::agent::tools::truncate_live_tool_output(Self::NAME, &info);
         crate::agent::tools::register_read_context_metadata(&info, loaded_paths);
+        READ_DISPLAY_ARTIFACTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(info.clone(), source_snapshot(&path, &content, start, end));
 
         Ok(rig::tool::ToolOutput::text(info))
     }
@@ -295,6 +336,52 @@ mod tests {
     use super::{display_start, read_bounds};
     #[cfg(feature = "multimodal")]
     use crate::agent::tools::ReadArgs;
+
+    #[test]
+    fn source_snapshot_preserves_basename_and_exact_excerpt() {
+        for name in ["main.rs", "Makefile", ".gitignore"] {
+            let snapshot = super::source_snapshot(
+                &format!("/tmp/project/{name}"),
+                "first\r\nsecond\r\nthird",
+                1,
+                2,
+            );
+            assert_eq!(snapshot.label, name);
+            assert_eq!(snapshot.contents, "second\r\n");
+            assert_eq!(super::source_snapshot(name, "a\nb", 1, 2).contents, "b");
+            assert_eq!(super::source_snapshot(name, "a\nb", 2, 2).contents, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn text_read_registers_source_snapshot_not_formatted_output() {
+        use rig::tool::Tool;
+        let path = std::env::temp_dir().join(format!("zerostack-read-{}.rs", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "// first\nfn main() {}\n// last\n").unwrap();
+        let tool = super::ReadTool::new(None, None, None, 2000);
+        let output = tool
+            .call(
+                &mut rig::tool::ToolContext::new(),
+                crate::agent::tools::ReadArgs {
+                    path: path.to_string_lossy().into_owned(),
+                    offset: Some(2),
+                    limit: Some(1),
+                },
+            )
+            .await
+            .unwrap()
+            .into_content();
+        let rig::completion::message::ToolResultContent::Text(text) = output.first().unwrap()
+        else {
+            panic!("expected text output");
+        };
+        assert!(text.text.contains("File:"));
+        let snapshot = super::take_read_display_artifact(&text.text).unwrap();
+        assert_eq!(snapshot.contents, "fn main() {}\n");
+        assert_eq!(snapshot.label, path.file_name().unwrap().to_str().unwrap());
+        assert!(super::take_read_display_artifact(&text.text).is_none());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn read_bounds_clamps_offset_past_eof() {

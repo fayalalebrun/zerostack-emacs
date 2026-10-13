@@ -904,6 +904,8 @@ pub fn spawn_agent(agent: Agent, prompt: String, history: Vec<Message>) -> Agent
                             .unwrap_or(0);
                         let display_artifact = if name == "edit" {
                             crate::agent::tools::edit::take_last_edit_display_artifact()
+                        } else if name == "read" {
+                            crate::agent::tools::read::take_read_display_artifact(&output)
                         } else {
                             None
                         };

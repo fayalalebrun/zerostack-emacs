@@ -4032,14 +4032,22 @@ mod imp {
                             }
                         }
                         if let Some(display) = display_artifact
-                            && let Ok(path) = crate::session::storage::save_tool_output(
-                                &session.id,
-                                &format!(
-                                    "{}-{}-{}",
-                                    display.kind, display.label, display.extension
-                                ),
-                                &display.contents,
-                            )
+                            && let Ok(path) = if display.kind == "read-source" {
+                                crate::session::storage::save_read_source(
+                                    &session.id,
+                                    &display.label,
+                                    &display.contents,
+                                )
+                            } else {
+                                crate::session::storage::save_tool_output(
+                                    &session.id,
+                                    &format!(
+                                        "{}-{}-{}",
+                                        display.kind, display.label, display.extension
+                                    ),
+                                    &display.contents,
+                                )
+                            }
                             && let Some(result) = session
                                 .messages
                                 .last_mut()
@@ -5466,9 +5474,25 @@ mod imp {
         let display_path = result
             .and_then(|result| result.display_path.as_deref())
             .map(PathBuf::from);
-        let display_artifact = display_path
-            .as_deref()
-            .and_then(|path| persistent_artifact("display-artifact", path, "patch"));
+        let display_artifact = display_path.as_deref().and_then(|path| {
+            if name == Some("read") {
+                persistent_artifact("read-source", path, &content)
+            } else {
+                persistent_artifact("display-artifact", path, "patch")
+            }
+        });
+        // Use the source-only snapshot for read links in both compact activity
+        // and transcript rendering. Keep the original tool output in storage.
+        let artifact = if name == Some("read") {
+            display_artifact.clone().or(artifact)
+        } else {
+            artifact
+        };
+        let display_artifact = if name == Some("read") {
+            None
+        } else {
+            display_artifact
+        };
         let duration_ms = result.map(|result| result.duration_ms).unwrap_or(0);
         let lines = if name == Some("task") {
             render_subagent_response_lines(&content, artifact.clone(), duration_ms)
@@ -9281,6 +9305,51 @@ mod imp {
                 line.text,
                 "subagent session child-id [model=fast->vendor/fast, provider=openrouter, thinking=high, access=write, finalize-after=120s]"
             );
+        }
+
+        #[tokio::test]
+        async fn read_source_links_survive_session_serialization() {
+            let (server, registration, _listener) = test_server(Arc::default());
+            for filename in ["main.rs", "Makefile", ".gitignore"] {
+                let message = {
+                    let mut session = server.session.lock().await;
+                    session.add_tool_result("read", "File: source\n\nformatted output");
+                    let path = crate::session::storage::save_read_source(
+                        &session.id,
+                        filename,
+                        "source snapshot\n",
+                    )
+                    .unwrap();
+                    assert_eq!(path.file_name().unwrap(), filename);
+                    let result = session
+                        .messages
+                        .last_mut()
+                        .unwrap()
+                        .tool_result
+                        .as_mut()
+                        .unwrap();
+                    result.display_path = Some(path.to_string_lossy().as_ref().into());
+                    let encoded = serde_json::to_string(&*session).unwrap();
+                    let resumed: Session = serde_json::from_str(&encoded).unwrap();
+                    resumed.messages.last().unwrap().clone()
+                };
+                let rendered = render_tool_result_message(&message, Some(&server), 0).await;
+                let artifact = rendered.artifact.unwrap();
+                assert_eq!(artifact.kind, "read-source");
+                assert_eq!(artifact.path.file_name().unwrap(), filename);
+                assert_eq!(
+                    std::fs::read_to_string(&artifact.path).unwrap(),
+                    "source snapshot\n"
+                );
+                assert!(!artifact.ephemeral);
+                assert!(rendered.lines.iter().any(|line| {
+                    line.artifact
+                        .as_ref()
+                        .is_some_and(|link| link.path == artifact.path)
+                }));
+                std::fs::remove_dir_all(artifact.path.parent().unwrap()).unwrap();
+            }
+            let _ = std::fs::remove_dir_all(&registration.dir);
         }
 
         #[tokio::test]

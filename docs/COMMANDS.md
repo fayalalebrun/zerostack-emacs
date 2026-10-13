@@ -22,6 +22,14 @@ failures are counted and remain visible in chat, permission controls stay inline
 and unfinished calls are marked stopped. Older results without structured
 outcomes are labeled unknown rather than inferred from output text.
 
+For new successful text `read` calls, output links open a source-only snapshot
+with the original filename. Emacs uses that filename to select the language
+mode, including for files such as `Makefile` and `.gitignore`. The snapshot
+contains only the requested lines, without tool headers or hash tags. It does
+not reopen the current source file. The original tool output remains stored,
+and saved sessions retain the snapshot link. Older reads without a source
+snapshot and failed reads still open their plain-text tool output.
+
 Reload the updated Emacs client and restart idle daemons to enable this view;
 running sessions are not restarted automatically.
 
