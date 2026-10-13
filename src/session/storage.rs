@@ -172,14 +172,14 @@ pub fn save_tool_output(
 }
 
 /// Save a display snapshot under a unique directory without changing its basename.
-pub fn save_read_source(
+pub fn save_named_tool_output(
     session_id: &str,
     filename: &str,
     contents: &str,
 ) -> anyhow::Result<PathBuf> {
     let basename = Path::new(filename)
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("read source snapshot requires a filename"))?;
+        .ok_or_else(|| anyhow::anyhow!("tool snapshot requires a filename"))?;
     let dir = tool_output_dir(session_id).join(Uuid::new_v4().to_string());
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(basename);

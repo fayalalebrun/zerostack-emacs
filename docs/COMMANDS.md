@@ -30,6 +30,10 @@ not reopen the current source file. The original tool output remains stored,
 and saved sessions retain the snapshot link. Older reads without a source
 snapshot and failed reads still open their plain-text tool output.
 
+New edit patch artifacts use a `.patch` extension so Emacs selects `diff-mode`
+when you open them. Saved sessions retain that extension. Older patch artifacts
+with `.txt` filenames remain unchanged; use `M-x diff-mode` to view those as diffs.
+
 Reload the updated Emacs client and restart idle daemons to enable this view;
 running sessions are not restarted automatically.
 

@@ -8,6 +8,21 @@
 (require 'cl-lib)
 (require 'zerostack)
 
+(ert-deftest zerostack-test-patch-artifact-selects-diff-mode-from-extension ()
+  (let ((path (make-temp-file "zerostack-patch-" nil ".patch"))
+        buffer)
+    (unwind-protect
+        (progn
+          (with-temp-file path
+            (insert "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-old\n+new\n"))
+          (save-window-excursion
+            (zerostack--open-artifact
+             (list :kind 'display-artifact :path path :mime "text/x-diff"))
+            (setq buffer (current-buffer))
+            (should (eq major-mode 'diff-mode))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (delete-file path))))
+
 (ert-deftest zerostack-test-archive-keeps-transcript-width-and-display-state ()
   (let ((zerostack--cols 72)
         (zerostack--cwd temporary-file-directory)
