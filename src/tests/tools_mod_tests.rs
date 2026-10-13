@@ -5,6 +5,8 @@ use crate::agent::tools::{
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
 use rig::tool::Tool;
 
+static TRACKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn authored_tool_errors_are_visible_to_the_model() {
     let tool = WriteTodoList::new(None, None);
@@ -37,92 +39,99 @@ fn skip_other_dirs() {
 
 #[test]
 fn track_read_returns_none_when_deny_disabled() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(false);
     // clean up tracker from previous tests
     untrack_read_path("test_path");
 
-    let result = track_read("test_path", 0, 10);
+    let result = track_read("test_path", "revision", 0, 10);
     assert!(result.is_none());
 }
 
 #[test]
 fn track_read_first_call_returns_none() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(true);
     untrack_read_path("test_path");
 
-    let result = track_read("test_path", 1, 100);
+    let result = track_read("test_path", "revision", 1, 100);
     assert!(result.is_none());
 }
 
 #[test]
-fn track_read_duplicate_returns_blocking_message() {
+fn track_read_duplicate_returns_refresh_warning() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(true);
     untrack_read_path("dup_path");
 
     // First call
-    let first = track_read("dup_path", 5, 50);
+    let first = track_read("dup_path", "revision", 5, 50);
     assert!(first.is_none());
 
     // Second identical call
-    let second = track_read("dup_path", 5, 50);
+    let second = track_read("dup_path", "revision", 5, 50);
     assert!(second.is_some());
     let msg = second.unwrap();
-    assert!(msg.contains("already read"));
-    assert!(msg.contains("dup_path"));
+    assert!(msg.contains("refresh is permitted"));
 }
 
 #[test]
 fn track_read_different_offset_not_duplicate() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(true);
     untrack_read_path("diff_path");
 
-    let first = track_read("diff_path", 0, 100);
+    let first = track_read("diff_path", "revision", 0, 100);
     assert!(first.is_none());
 
-    let second = track_read("diff_path", 10, 100);
+    let second = track_read("diff_path", "revision", 10, 100);
     assert!(second.is_none());
 }
 
 #[test]
 fn track_read_different_limit_not_duplicate() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(true);
     untrack_read_path("diff_path2");
 
-    let first = track_read("diff_path2", 0, 100);
+    let first = track_read("diff_path2", "revision", 0, 100);
     assert!(first.is_none());
 
-    let second = track_read("diff_path2", 0, 200);
+    let second = track_read("diff_path2", "revision", 0, 200);
     assert!(second.is_none());
 }
 
 #[test]
 fn untrack_removes_matching_path() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(true);
 
-    track_read("remove_me", 0, 10);
+    track_read("remove_me", "revision", 0, 10);
     untrack_read_path("remove_me");
 
     // After untracking, first call should be fine again
-    let result = track_read("remove_me", 0, 10);
+    let result = track_read("remove_me", "revision", 0, 10);
     assert!(result.is_none());
 }
 
 #[test]
 fn untrack_does_not_affect_other_paths() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(true);
 
-    track_read("keep_me", 0, 10);
-    track_read("unrelated", 0, 10);
+    track_read("keep_me", "revision", 0, 10);
+    track_read("unrelated", "revision", 0, 10);
 
     untrack_read_path("unrelated");
 
     // keep_me should still be tracked
-    let result = track_read("keep_me", 0, 10);
+    let result = track_read("keep_me", "revision", 0, 10);
     assert!(result.is_some());
 }
 
 #[test]
 fn deny_repeated_reads_default() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Default should be true (after test setup)
     // Reset to default
     set_deny_repeated_reads(true);
@@ -131,6 +140,7 @@ fn deny_repeated_reads_default() {
 
 #[test]
 fn set_deny_repeated_reads_toggle() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_deny_repeated_reads(false);
     assert!(!deny_repeated_reads());
 
@@ -155,4 +165,12 @@ fn live_tool_output_is_truncated_before_model_replay() {
     assert!(truncated.contains("full output was not saved"));
     assert!(truncated.starts_with(&"H".repeat(TOOL_RESULT_HEAD_CHARS)));
     assert!(truncated.ends_with(&"T".repeat(TOOL_RESULT_TAIL_CHARS)));
+}
+
+#[test]
+fn changed_revision_is_not_a_duplicate() {
+    let _guard = TRACKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_deny_repeated_reads(true);
+    assert!(track_read("revision_change", "old", 0, 10).is_none());
+    assert!(track_read("revision_change", "new", 0, 10).is_none());
 }

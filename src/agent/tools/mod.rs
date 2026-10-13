@@ -5,14 +5,12 @@ pub(crate) mod find_files;
 pub(crate) mod goal;
 pub(crate) mod grep;
 pub(crate) mod list_dir;
-pub(crate) mod normalize;
 pub(crate) mod read;
+mod read_text;
 pub(crate) mod todo;
 #[cfg(feature = "veles")]
 pub(crate) mod veles;
 pub(crate) mod write;
-
-pub(crate) use normalize::{levenshtein_similarity, normalize_whitespace};
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -21,7 +19,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::config::types::EditSystem;
 
-static EDIT_SYSTEM: Mutex<EditSystem> = Mutex::new(EditSystem::Similarity);
+static EDIT_SYSTEM: Mutex<EditSystem> = Mutex::new(EditSystem::Hashedit);
 
 pub(crate) fn set_edit_system(es: EditSystem) {
     *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner()) = es;
@@ -45,7 +43,8 @@ pub(crate) fn deny_repeated_reads() -> bool {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-static READ_TRACKER: Mutex<Vec<(String, usize, usize)>> = Mutex::new(Vec::new());
+// Bound history so long sessions cannot grow this tracker without limit.
+static READ_TRACKER: Mutex<Vec<(String, String, usize, usize)>> = Mutex::new(Vec::new());
 static ACTIVE_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
 static READ_LOADED_CONTEXT: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -178,28 +177,35 @@ pub(crate) fn take_read_context_metadata(output: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<String> {
-    if !deny_repeated_reads() {
-        return None;
-    }
+pub(crate) fn track_read(
+    path: &str,
+    revision: &str,
+    offset: usize,
+    limit: usize,
+) -> Option<String> {
     let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
-    let key = (path.to_string(), offset, limit);
-    if tracker.contains(&key) {
-        let end = (offset + limit).saturating_sub(1);
-        Some(format!(
-            "read blocked: {path} (lines {}-{}) was already read and has not been modified since. Use the previous result or read a different section.",
-            offset + 1,
-            if end > 0 { end } else { offset + 1 }
-        ))
-    } else {
+    let key = (path.to_string(), revision.to_string(), offset, limit);
+    let repeated = tracker.contains(&key);
+    tracker.retain(|(p, rev, _, _)| p != path || rev == revision);
+    if !repeated {
+        if tracker.len() >= 256 {
+            tracker.remove(0);
+        }
         tracker.push(key);
+    }
+    if repeated && deny_repeated_reads() {
+        Some("[unchanged range read again; this refresh is permitted]".into())
+    } else {
         None
     }
 }
 
 pub(crate) fn untrack_read_path(path: &str) {
+    let canonical = std::fs::canonicalize(path)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
     let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
-    tracker.retain(|(p, _, _)| p != path);
+    tracker.retain(|(p, _, _, _)| p != path && canonical.as_ref() != Some(p));
 }
 
 pub use bash::BashTool;
@@ -271,27 +277,36 @@ pub struct WriteArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EditArgs {
     pub path: String,
-    #[serde(default)]
-    pub block: Option<String>,
     #[serde(default)]
     pub file_crc: Option<String>,
     #[serde(default)]
     pub edits: Option<Vec<EditOp>>,
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct EditBlock {
-    pub search: String,
-    pub replace: String,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EditOperation {
+    #[default]
+    Replace,
+    Delete,
+    InsertBefore,
+    InsertAfter,
+    Append,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EditOp {
     pub line: Option<String>,
     pub lines: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub operation: EditOperation,
 }
 
 #[derive(Deserialize)]

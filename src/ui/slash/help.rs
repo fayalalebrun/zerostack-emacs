@@ -102,7 +102,7 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     );
     write_result(
         ctx.renderer,
-        "  /editsys [mode]        edit system (similarity | hashedit)",
+        "  /editsys [mode]        edit system (hashedit only)",
     );
     #[cfg(feature = "loop")]
     {

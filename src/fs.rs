@@ -56,13 +56,21 @@ pub async fn atomic_write(
     // closed → SIGHUP, or a crash) can never leave a truncated target. fsync
     // would only add power-loss durability — at ~20-50x the per-write cost — and
     // that is out of scope for this threat model. The file is closed at the end
-    // of this block (scope exit), before the rename.
+    // of the write phase, before the rename.
+    // If create_new fails, do not remove somebody else's entry.
+    let mut f = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .await?;
     let write_result = async {
-        let mut f = tokio::fs::File::create(&tmp_path).await?;
         f.write_all(contents.as_ref()).await?;
+        // Tokio can buffer writes; wait for them before publishing the temp.
+        f.flush().await?;
         Ok::<(), std::io::Error>(())
     }
     .await;
+    drop(f);
     if let Err(e) = write_result {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e);
@@ -71,7 +79,10 @@ pub async fn atomic_write(
     // Preserve the original file's permissions when replacing an existing file.
     // (For brand-new files `metadata` errors out and we keep the default perms.)
     if let Ok(meta) = tokio::fs::metadata(path).await {
-        let _ = tokio::fs::set_permissions(&tmp_path, meta.permissions()).await;
+        if let Err(error) = tokio::fs::set_permissions(&tmp_path, meta.permissions()).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(error);
+        }
     }
 
     // Atomic replace.
@@ -153,4 +164,76 @@ pub fn expand_tilde(s: &str) -> String {
             .to_string();
     }
     s.to_string()
+}
+
+/// Publish a complete new file without replacing any existing directory entry.
+/// Hard-link publication is atomic and fails if the destination exists, including
+/// a dangling symlink. Unsupported filesystems fail safely instead of overwriting.
+pub async fn atomic_create(path: impl AsRef<Path>, contents: &[u8]) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let tmp = unique_tmp_path(path, dir);
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await?;
+    let result = async {
+        file.write_all(contents).await?;
+        file.flush().await?;
+        tokio::fs::hard_link(&tmp, path).await
+    }
+    .await;
+    drop(file);
+    let cleanup = tokio::fs::remove_file(&tmp).await;
+    // Once published, a cleanup failure must not masquerade as a failed create.
+    if result.is_ok() {
+        if let Err(error) = cleanup {
+            tracing::warn!(%error, path = %tmp.display(), "could not remove creation temp file");
+        }
+    }
+    result
+}
+
+/// Cross-process advisory lock for cooperating file tools. Lock the canonical
+/// target, not its inode: atomic replacement changes the inode. Retain lock
+/// files, since unlinking a live lock would permit independent locks for a path.
+pub async fn lock_file_path(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        let target = if path.try_exists()? {
+            std::fs::canonicalize(&path)?
+        } else {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let parent = std::fs::canonicalize(parent)?;
+            parent.join(path.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+            })?)
+        };
+        let directory = dirs::cache_dir()
+            .ok_or_else(|| std::io::Error::other("cache directory unavailable for file locks"))?
+            .join("zerostack/file-locks");
+        std::fs::create_dir_all(&directory)?;
+        // Stable across processes and toolchain versions.
+        let key = Sha256::digest(target.as_os_str().as_encoded_bytes());
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(directory.join(format!("{key:x}.lock")))?;
+        lock.lock()?;
+        Ok((target, lock))
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }

@@ -142,7 +142,7 @@ fn rich_default_config() -> Config {
         max_tokens: Some(16384),
         compact_enabled: Some(true),
         max_text_file_size: Some(1_048_576),
-        edit_system: Some(EditSystem::Similarity),
+        edit_system: Some(EditSystem::Hashedit),
         default_permission_mode: Some("standard".to_string()),
         show_tool_details: None,
         #[cfg(feature = "subagents")]

@@ -4,13 +4,9 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use rig::tool::Tool;
 
-use crate::agent::tools::crc::crc32_hex;
 use crate::agent::tools::{
-    AskSender, ContextTracker, PermCheck, ReadArgs, ToolError, check_perm_path, edit_system,
+    AskSender, ContextTracker, PermCheck, ReadArgs, ToolError, check_perm_path,
 };
-use crate::config::types::EditSystem;
-
-const DEFAULT_MAX_TEXT_SIZE: u64 = 1024 * 1024;
 
 // Like read context metadata, snapshots follow the returned output into the runner.
 static READ_DISPLAY_ARTIFACTS: std::sync::LazyLock<
@@ -24,26 +20,18 @@ pub(crate) fn take_read_display_artifact(output: &str) -> Option<crate::event::D
         .remove(output)
 }
 
-fn source_snapshot(
-    path: &str,
-    content: &str,
-    start: usize,
-    end: usize,
-) -> crate::event::DisplayArtifact {
-    // Keep the original line endings and the trailing newline, if present.
-    let contents = content
-        .split_inclusive('\n')
-        .skip(start)
-        .take(end - start)
-        .collect();
+fn source_artifact(path: &str, contents: String, truncated: bool) -> crate::event::DisplayArtifact {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("source.txt"))
+        .to_string_lossy();
     crate::event::DisplayArtifact {
         kind: "read-source".into(),
-        label: std::path::Path::new(path)
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("source.txt"))
-            .to_string_lossy()
-            .as_ref()
-            .into(),
+        label: if truncated {
+            format!("{name} (truncated preview)").into()
+        } else {
+            name.as_ref().into()
+        },
         contents,
         extension: "".into(),
     }
@@ -52,7 +40,6 @@ fn source_snapshot(
 pub struct ReadTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
-    pub max_text_file_size: u64,
     pub max_lines: u64,
     pub context_tracker: Option<ContextTracker>,
 }
@@ -61,13 +48,12 @@ impl ReadTool {
     pub fn new(
         permission: Option<PermCheck>,
         ask_tx: Option<AskSender>,
-        max_text_file_size: Option<u64>,
+        _max_text_file_size: Option<u64>,
         max_lines: u64,
     ) -> Self {
         ReadTool {
             permission,
             ask_tx,
-            max_text_file_size: max_text_file_size.unwrap_or(DEFAULT_MAX_TEXT_SIZE),
             max_lines,
             context_tracker: None,
         }
@@ -81,38 +67,21 @@ impl ReadTool {
 
 impl ReadTool {
     fn metadata(&self) -> (String, serde_json::Value) {
-        let (desc, params) = match edit_system() {
-            EditSystem::Similarity => (
-                format!(
-                    "Read a text file or view a PNG, JPEG, GIF, or WebP image. Text defaults to the first {} lines; use offset/limit for large text files.",
-                    self.max_lines
-                ),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "offset": { "type": "integer", "description": "Line number to start from (1-indexed)" },
-                        "limit": { "type": "integer", "description": "Maximum number of lines to read" }
-                    },
-                    "required": ["path"]
-                }),
+        let (desc, params) = (
+            format!(
+                "Read text with CRC-32 tagged lines for tag-based editing, or view a PNG, JPEG, GIF, or WebP image. Each text line is prefixed with 'N|TAG' where TAG is an 8-char hex CRC-32. Defaults to at most {} lines, with a continuous byte-bounded excerpt. Large text files are scanned with bounded memory. A long line can return a labeled preview; its tag covers the full line.",
+                self.max_lines
             ),
-            EditSystem::Hashedit => (
-                format!(
-                    "Read text with CRC-32 tagged lines for tag-based editing, or view a PNG, JPEG, GIF, or WebP image. Each text line is prefixed with 'N|TAG' where TAG is an 8-char hex CRC-32. Defaults to first {} lines.",
-                    self.max_lines
-                ),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "offset": { "type": "integer", "description": "Line number to start from (1-indexed)" },
-                        "limit": { "type": "integer", "description": "Maximum number of lines to read" }
-                    },
-                    "required": ["path"]
-                }),
-            ),
-        };
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "offset": { "type": "integer", "minimum": 1, "description": "Line number to start from (1-indexed)" },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of lines to read" }
+                },
+                "required": ["path"]
+            }),
+        );
 
         (desc, params)
     }
@@ -145,137 +114,117 @@ impl Tool for ReadTool {
         let offset = args.offset.unwrap_or(1).saturating_sub(1);
         let limit = args.limit.unwrap_or(self.max_lines as usize);
 
-        if let Some(msg) = crate::agent::tools::track_read(&path, offset, limit) {
-            return Err(ToolError::Msg(msg));
+        if args.offset == Some(0) || limit == 0 {
+            return Err(ToolError::Msg("offset and limit must be positive.".into()));
         }
-
-        let metadata = tokio::fs::metadata(&path).await?;
-        let file_size = metadata.len();
+        #[allow(unused_mut)]
+        let mut file = tokio::fs::File::open(&path).await?;
         #[cfg(feature = "multimodal")]
-        if file_size <= crate::extras::multimodal::MAX_MEDIA_BYTES {
-            let data = tokio::fs::read(&path).await?;
-            match crate::extras::image_validate::validate(&data) {
-                Ok(Some(image)) => {
-                    let mut text = format!(
-                        "Read image: {} ({}, {}x{}, {} bytes)",
-                        path, image.mime, image.width, image.height, file_size
-                    );
-                    if let Some(coaching) = coaching {
-                        text = format!("{coaching}\n\n{text}");
-                    }
-                    let rig::message::UserContent::Image(image) =
-                        rig::message::UserContent::image_base64(
-                            BASE64_STANDARD.encode(data),
-                            Some(crate::agent::runner::image_media_type(&image.mime)),
-                            None,
-                        )
-                    else {
-                        unreachable!()
-                    };
-                    return Ok(rig::tool::ToolOutput::content(vec![
-                        rig::message::ToolResultContent::Text(rig::message::Text::new(text)),
-                        rig::message::ToolResultContent::Image(image),
-                    ])
-                    .map_err(|error| ToolError::Msg(error.to_string()))?);
-                }
-                Ok(None) => {}
-                Err(error) => return Err(ToolError::Msg(error)),
-            }
-        } else if crate::extras::multimodal::detect_media(std::path::Path::new(&path))
-            .is_some_and(|mime| mime.starts_with("image/"))
         {
-            return Err(ToolError::Msg(format!(
-                "Image too large ({} bytes). Maximum allowed image size is {} bytes.",
-                file_size,
-                crate::extras::multimodal::MAX_MEDIA_BYTES
-            )));
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            // Probe by magic, not filename. Keep extensionless image support,
+            // while avoiding a second full read of ordinary text files.
+            let file_size = file.metadata().await?.len();
+            let mut signature = Vec::new();
+            (&mut file).take(12).read_to_end(&mut signature).await?;
+            file.seek(std::io::SeekFrom::Start(0)).await?;
+            let image_magic = signature.starts_with(b"\x89PNG\r\n\x1a\n")
+                || signature.starts_with(&[0xff, 0xd8, 0xff])
+                || signature.starts_with(b"GIF87a")
+                || signature.starts_with(b"GIF89a")
+                || (signature.len() >= 12
+                    && &signature[..4] == b"RIFF"
+                    && &signature[8..12] == b"WEBP");
+            let image_path = crate::extras::multimodal::detect_media(std::path::Path::new(&path))
+                .is_some_and(|mime| mime.starts_with("image/"));
+            if (image_magic || image_path) && file_size > crate::extras::multimodal::MAX_MEDIA_BYTES
+            {
+                return Err(ToolError::Msg(format!(
+                    "Image too large ({file_size} bytes). Maximum is {} bytes.",
+                    crate::extras::multimodal::MAX_MEDIA_BYTES
+                )));
+            }
+            if image_magic {
+                let mut data = Vec::new();
+                (&mut file)
+                    .take(crate::extras::multimodal::MAX_MEDIA_BYTES + 1)
+                    .read_to_end(&mut data)
+                    .await?;
+                if data.len() as u64 > crate::extras::multimodal::MAX_MEDIA_BYTES {
+                    return Err(ToolError::Msg("Image exceeds the size limit.".into()));
+                }
+                match crate::extras::image_validate::validate(&data) {
+                    Ok(Some(image)) => {
+                        let mut text = format!(
+                            "Read image: {} ({}, {}x{}, {} bytes)",
+                            path,
+                            image.mime,
+                            image.width,
+                            image.height,
+                            data.len()
+                        );
+                        if let Some(coaching) = coaching {
+                            text = format!("{coaching}\n\n{text}");
+                        }
+                        let rig::message::UserContent::Image(image) =
+                            rig::message::UserContent::image_base64(
+                                BASE64_STANDARD.encode(data),
+                                Some(crate::agent::runner::image_media_type(&image.mime)),
+                                None,
+                            )
+                        else {
+                            unreachable!()
+                        };
+                        return Ok(rig::tool::ToolOutput::content(vec![
+                            rig::message::ToolResultContent::Text(rig::message::Text::new(text)),
+                            rig::message::ToolResultContent::Image(image),
+                        ])
+                        .map_err(|error| ToolError::Msg(error.to_string()))?);
+                    }
+                    Ok(None) => {
+                        file.seek(std::io::SeekFrom::Start(0)).await?;
+                    }
+                    Err(error) => return Err(ToolError::Msg(error)),
+                }
+            }
         }
-        if file_size > self.max_text_file_size {
-            return Err(ToolError::Msg(format!(
-                "File too large ({} bytes). Maximum allowed file size is {} bytes.",
-                file_size, self.max_text_file_size
-            )));
+        let canonical = tokio::fs::canonicalize(&path).await?;
+        let file = file.into_std().await;
+        let window = tokio::task::spawn_blocking(move || {
+            super::read_text::read_window_file(file, offset, limit)
+        })
+        .await
+        .map_err(|error| ToolError::Msg(error.to_string()))??;
+        let start = window.start;
+        let end = window.end;
+        let mut info = format!(
+            "File: {} ({} lines total, lines {}-{}) [CRC: {}]\n\n{}",
+            path,
+            window.total_lines,
+            display_start(start, window.total_lines),
+            end,
+            window.revision,
+            window.excerpt
+        );
+        if end < window.total_lines {
+            info.push_str(&format!(
+                "\n\n[excerpt ends at line {end}; continue with offset={} and limit]",
+                end + 1
+            ));
         }
-        let content = tokio::fs::read_to_string(&path).await?;
-        let total_lines = content.lines().count();
-
-        let (start, end) = read_bounds(offset, limit, total_lines);
-
-        let es = edit_system();
-
-        let excerpt: String = match es {
-            EditSystem::Hashedit => {
-                // Annotate each line with CRC-32 tag
-                content
-                    .lines()
-                    .skip(start)
-                    .take(end - start)
-                    .enumerate()
-                    .map(|(i, line)| {
-                        let line_num = start + i + 1;
-                        let tag = crc32_hex(line.as_bytes());
-                        let line_num_width = if total_lines >= 1000 { 4 } else { 3 };
-                        format!(
-                            "{:>width$}|{} {}",
-                            line_num,
-                            tag,
-                            line,
-                            width = line_num_width
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            EditSystem::Similarity => {
-                // Plain text (original behavior)
-                content
-                    .lines()
-                    .skip(start)
-                    .take(end - start)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        };
-
-        let info = match es {
-            EditSystem::Hashedit => {
-                let file_crc = crc32_hex(content.replace("\r\n", "\n").as_bytes());
-                format!(
-                    "File: {} ({} lines total, lines {}-{}) [CRC: {}]\n\n{}",
-                    path,
-                    total_lines,
-                    display_start(start, total_lines),
-                    end,
-                    file_crc,
-                    excerpt
-                )
-            }
-            EditSystem::Similarity => {
-                format!(
-                    "File: {} ({} lines total, showing lines {}-{})\n\n{}",
-                    path,
-                    total_lines,
-                    display_start(start, total_lines),
-                    end,
-                    excerpt
-                )
-            }
-        };
-
-        let info = if end < total_lines {
-            let remaining = total_lines - end;
-            format!(
-                "{}\n\n[truncated after {} lines — {} more lines (lines {}-{}); re-call with offset/limit to see more]",
-                info,
-                end - start,
-                remaining,
-                end + 1,
-                total_lines,
-            )
-        } else {
-            info
-        };
-
+        if window.long_line {
+            info.push_str(
+                "\n[long line preview is incomplete; do not treat it as the full source line]",
+            );
+        }
+        if let Some(warning) = crate::agent::tools::track_read(
+            &canonical.to_string_lossy(),
+            &window.revision,
+            start,
+            end - start,
+        ) {
+            info.push_str(&format!("\n{warning}"));
+        }
         let loaded = crate::context::nested_agents_for_read(
             std::path::Path::new(&path),
             &crate::agent::tools::loaded_context_from(&self.context_tracker),
@@ -303,21 +252,17 @@ impl Tool for ReadTool {
             Some(msg) => format!("{}\n\n{}", msg, info),
             None => info,
         };
-        let info = crate::agent::tools::truncate_live_tool_output(Self::NAME, &info);
         crate::agent::tools::register_read_context_metadata(&info, loaded_paths);
         READ_DISPLAY_ARTIFACTS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(info.clone(), source_snapshot(&path, &content, start, end));
+            .insert(
+                info.clone(),
+                source_artifact(&path, window.source, window.long_line),
+            );
 
         Ok(rig::tool::ToolOutput::text(info))
     }
-}
-
-fn read_bounds(offset: usize, limit: usize, total_lines: usize) -> (usize, usize) {
-    let start = offset.min(total_lines);
-    let end = start.saturating_add(limit).min(total_lines);
-    (start, end)
 }
 
 fn display_start(start: usize, total_lines: usize) -> usize {
@@ -333,24 +278,23 @@ mod tests {
 
     #[cfg(feature = "multimodal")]
     use super::ReadTool;
-    use super::{display_start, read_bounds};
+    use super::display_start;
     #[cfg(feature = "multimodal")]
     use crate::agent::tools::ReadArgs;
 
     #[test]
-    fn source_snapshot_preserves_basename_and_exact_excerpt() {
+    fn source_artifact_preserves_basename_and_exact_excerpt() {
         for name in ["main.rs", "Makefile", ".gitignore"] {
-            let snapshot = super::source_snapshot(
-                &format!("/tmp/project/{name}"),
-                "first\r\nsecond\r\nthird",
-                1,
-                2,
-            );
-            assert_eq!(snapshot.label, name);
-            assert_eq!(snapshot.contents, "second\r\n");
-            assert_eq!(super::source_snapshot(name, "a\nb", 1, 2).contents, "b");
-            assert_eq!(super::source_snapshot(name, "a\nb", 2, 2).contents, "");
+            let artifact =
+                super::source_artifact(&format!("/tmp/project/{name}"), "second\r\n".into(), false);
+            assert_eq!(artifact.label, name);
+            assert_eq!(artifact.contents, "second\r\n");
         }
+        assert!(
+            super::source_artifact("file", "preview".into(), true)
+                .label
+                .contains("truncated")
+        );
     }
 
     #[tokio::test]
@@ -381,16 +325,6 @@ mod tests {
         assert_eq!(snapshot.label, path.file_name().unwrap().to_str().unwrap());
         assert!(super::take_read_display_artifact(&text.text).is_none());
         std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn read_bounds_clamps_offset_past_eof() {
-        assert_eq!(read_bounds(20, 10, 5), (5, 5));
-    }
-
-    #[test]
-    fn read_bounds_uses_requested_window_inside_file() {
-        assert_eq!(read_bounds(2, 3, 10), (2, 5));
     }
 
     #[test]

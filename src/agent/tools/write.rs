@@ -58,15 +58,6 @@ impl Tool for WriteTool {
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "write", &expanded).await?;
 
         let path = Path::new(&expanded);
-        if path.exists() {
-            return Err(ToolError::Msg(format!(
-                "File '{}' already exists. Use edit for targeted changes, or delete and recreate if a full rewrite is needed.",
-                expanded
-            )));
-        }
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         let bytes = args.content.len();
         if bytes as u64 > self.max_text_file_size {
             return Err(ToolError::Msg(format!(
@@ -74,9 +65,37 @@ impl Tool for WriteTool {
                 bytes, self.max_text_file_size
             )));
         }
-        crate::fs::atomic_write(path, &args.content).await?;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let (target, _lock) = crate::fs::lock_file_path(path).await?;
+        // Creation uses the requested final entry, not a symlink's target.
+        // This preserves create-only semantics for dangling and live symlinks.
+        if tokio::fs::symlink_metadata(path).await.is_ok() {
+            return Err(ToolError::Msg(format!(
+                "File '{}' already exists. Use edit with file_crc for targeted changes or guarded full replacement.",
+                expanded
+            )));
+        }
+        crate::fs::atomic_create(&target, args.content.as_bytes())
+            .await
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    ToolError::Msg(format!(
+                        "File '{}' already exists. Use edit with file_crc.",
+                        expanded
+                    ))
+                } else {
+                    error.into()
+                }
+            })?;
         crate::agent::tools::untrack_read_path(&expanded);
-        let mut result = format!("Written {} bytes to {}", bytes, expanded);
+        let mut result = format!(
+            "Written {} bytes to {}\n[CRC: {}]",
+            bytes,
+            expanded,
+            crate::agent::tools::crc::crc32_text(&args.content)
+        );
         if let Some(msg) = coaching {
             result = format!("{}\n\n{}", msg, result);
         }

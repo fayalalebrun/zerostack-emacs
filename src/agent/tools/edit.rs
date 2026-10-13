@@ -1,21 +1,31 @@
 use rig::tool::Tool;
 
-use crate::agent::tools::crc::crc32_hex;
+use crate::agent::tools::crc::{crc32_hex, crc32_text};
 use crate::agent::tools::{
-    AskSender, EditArgs, EditBlock, EditOp, PermCheck, ToolError, check_perm_path, edit_system,
-    levenshtein_similarity, normalize_whitespace,
+    AskSender, EditArgs, EditOp, EditOperation, PermCheck, ToolError, check_perm_path,
 };
-use crate::config::types::EditSystem;
 use crate::event::DisplayArtifact;
 
 pub struct EditTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
+    pub max_text_file_size: u64,
 }
 
 impl EditTool {
     pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        EditTool { permission, ask_tx }
+        EditTool {
+            permission,
+            ask_tx,
+            max_text_file_size: 1024 * 1024,
+        }
+    }
+
+    pub fn with_max_text_file_size(mut self, limit: Option<u64>) -> Self {
+        if let Some(limit) = limit {
+            self.max_text_file_size = limit;
+        }
+        self
     }
 }
 
@@ -43,9 +53,15 @@ fn edit_ranges_diff(path: &str, old: &str, ranges: &[(usize, usize, String)]) ->
     ranges.sort_by_key(|(start, _, _)| *start);
 
     for (byte_start, byte_end, replace) in ranges {
-        let old_start = line_at_byte(&offsets, byte_start);
+        let old_start = if byte_start == old.len() && (old.is_empty() || old.ends_with('\n')) {
+            lines.len()
+        } else {
+            line_at_byte(&offsets, byte_start)
+        };
         let old_end = if byte_end > byte_start {
             line_at_byte(&offsets, byte_end.saturating_sub(1)) + 1
+        } else if byte_start > line_byte(&offsets, old_start, old.len()) {
+            old_start + 1
         } else {
             old_start
         };
@@ -115,331 +131,22 @@ fn line_byte(offsets: &[usize], line: usize, text_len: usize) -> usize {
     offsets.get(line).copied().unwrap_or(text_len)
 }
 
-// ── V1: Similarity (SEARCH/REPLACE) ──────────────────────────────────────
-
-fn parse_blocks(raw: &str) -> Result<Vec<EditBlock>, ToolError> {
-    let mut blocks = Vec::new();
-    let mut in_block = false;
-    let mut search_lines: Vec<String> = Vec::new();
-    let mut replace_lines: Vec<String> = Vec::new();
-    let mut phase: u8 = 0;
-
-    for line in raw.lines() {
-        match line.trim() {
-            "<<<<<<< SEARCH" => {
-                if in_block {
-                    return Err(ToolError::Msg(
-                        "Nested SEARCH/REPLACE block detected. Close each block with >>>>>>> REPLACE before starting a new one.".to_string(),
-                    ));
-                }
-                in_block = true;
-                search_lines.clear();
-                replace_lines.clear();
-                phase = 1;
-            }
-            "=======" if phase == 1 => {
-                phase = 2;
-            }
-            ">>>>>>> REPLACE" if phase == 2 => {
-                let search = search_lines.join("\n");
-                if search.is_empty() {
-                    return Err(ToolError::Msg(format!(
-                        "Block {} has empty search text. Each block must have a non-empty SEARCH section.",
-                        blocks.len() + 1
-                    )));
-                }
-                blocks.push(EditBlock {
-                    search,
-                    replace: replace_lines.join("\n"),
-                });
-                in_block = false;
-                phase = 0;
-            }
-            _ if phase == 1 => {
-                search_lines.push(line.to_string());
-            }
-            _ if phase == 2 => {
-                replace_lines.push(line.to_string());
-            }
-            _ => {}
-        }
-    }
-
-    if in_block {
-        return Err(ToolError::Msg(
-            "Unclosed SEARCH/REPLACE block. Each block must end with >>>>>>> REPLACE.".to_string(),
-        ));
-    }
-
-    if blocks.is_empty() {
-        return Err(ToolError::Msg(
-            "No SEARCH/REPLACE blocks found. Use format:\n<<<<<<< SEARCH\nexisting code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\nMultiple blocks can be included for editing different parts of the same file."
-                .to_string(),
-        ));
-    }
-
-    Ok(blocks)
-}
-
-enum MatchResult {
-    Exact(usize),
-    Normalized(usize, usize),
-    FuzzyApply(usize, usize, f64),
-    FuzzySuggest(usize, f64, String),
-    NotFound,
-}
-
-fn compute_byte_range(content: &str, norm_pos: usize, norm_len: usize) -> (usize, usize) {
-    let content_norm = normalize_whitespace(content);
-    let norm_end = (norm_pos + norm_len).min(content_norm.len());
-
-    let mut orig_pos = 0usize;
-    let mut norm_rem = 0usize;
-    let mut byte_start = None;
-
-    while orig_pos < content.len() && norm_rem < norm_end {
-        if norm_rem >= content_norm.len() {
-            break;
-        }
-
-        let b = content.as_bytes()[orig_pos];
-
-        // Tab -> space expansion: 1 tab byte maps to 4 spaces in normalized
-        if b == b'\t' {
-            let tab_spaces = 4usize;
-            if norm_rem < norm_pos {
-                orig_pos += 1;
-                norm_rem = (norm_rem + tab_spaces).min(content_norm.len());
-                continue;
-            }
-            if byte_start.is_none() {
-                byte_start = Some(orig_pos);
-            }
-            orig_pos += 1;
-            norm_rem = (norm_rem + tab_spaces).min(content_norm.len());
-            continue;
-        }
-
-        if norm_rem < norm_pos {
-            orig_pos += 1;
-            norm_rem += 1;
-            continue;
-        }
-
-        if byte_start.is_none() {
-            byte_start = Some(orig_pos);
-        }
-
-        // CRLF edge case: original \r\n maps to a single \n in normalized
-        if b == b'\r' && norm_rem < content_norm.len() && content_norm.as_bytes()[norm_rem] == b'\n'
-        {
-            orig_pos += 1;
-            continue;
-        }
-
-        orig_pos += 1;
-        norm_rem += 1;
-    }
-
-    // Fallback: no match region found — return zero-length range at end of file
-    let start = byte_start.unwrap_or(content.len());
-    (start, orig_pos)
-}
-
-fn find_best_match(content: &str, search: &str) -> MatchResult {
-    // Step 1: exact match in original content
-    if let Some(pos) = content.find(search) {
-        return MatchResult::Exact(pos);
-    }
-
-    // Step 2: normalized match in full text
-    let content_norm = normalize_whitespace(content);
-    let search_norm = normalize_whitespace(search);
-    if let Some(norm_pos) = content_norm.find(&search_norm) {
-        let (byte_start, byte_end) = compute_byte_range(content, norm_pos, search_norm.len());
-        return MatchResult::Normalized(byte_start, byte_end);
-    }
-
-    // Step 3: fuzzy line-level matching
-    let search_lines: Vec<&str> = search.lines().collect();
-    let content_lines: Vec<&str> = content.lines().collect();
-
-    if search_lines.is_empty() || content_lines.len() < search_lines.len() {
-        return MatchResult::NotFound;
-    }
-
-    let search_norm_lines: Vec<String> = search_lines
-        .iter()
-        .map(|l| normalize_whitespace(l))
-        .collect();
-    let search_norm_joined = search_norm_lines.join("\n");
-
-    let mut best_sim = 0.0f64;
-    let mut best_start = 0usize;
-
-    for start in 0..=content_lines.len() - search_lines.len() {
-        let window_norm: String = content_lines[start..start + search_lines.len()]
-            .iter()
-            .map(|l| normalize_whitespace(l))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let sim = levenshtein_similarity(&search_norm_joined, &window_norm);
-        if sim > best_sim {
-            best_sim = sim;
-            best_start = start;
-        }
-        if sim >= 0.999 {
-            break;
-        }
-    }
-
-    if best_sim >= 0.85 {
-        let byte_start: usize = content_lines[..best_start]
-            .iter()
-            .map(|l| l.len() + 1)
-            .sum();
-        let byte_end = byte_start
-            + content_lines[best_start..best_start + search_lines.len()]
-                .iter()
-                .map(|l| l.len() + 1)
-                .sum::<usize>()
-                .saturating_sub(1);
-        MatchResult::FuzzyApply(byte_start, byte_end, best_sim)
-    } else if best_sim >= 0.60 {
-        let preview: String = search_lines
-            .iter()
-            .take(3)
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
-        MatchResult::FuzzySuggest(best_start + 1, best_sim, preview)
-    } else {
-        MatchResult::NotFound
-    }
-}
-
-fn count_exact_matches(content: &str, search: &str) -> usize {
-    content.match_indices(search).count()
-}
-
-async fn handle_similarity(
-    path: &str,
-    block: &str,
-    content: &str,
-) -> Result<(Vec<String>, Vec<(usize, usize, String)>), ToolError> {
-    let blocks = parse_blocks(block)?;
-
-    struct ResolvedSim {
-        byte_start: usize,
-        byte_end: usize,
-        replace: String,
-        note: String,
-    }
-
-    let mut resolved: Vec<ResolvedSim> = Vec::new();
-
-    for (i, blk) in blocks.iter().enumerate() {
-        let label = if blocks.len() > 1 {
-            format!("Block {}: ", i + 1)
-        } else {
-            String::new()
-        };
-
-        match find_best_match(content, &blk.search) {
-            MatchResult::Exact(pos) => {
-                let count = count_exact_matches(content, &blk.search);
-                if count > 1 {
-                    let line_starts: Vec<usize> = std::iter::once(0)
-                        .chain(content.match_indices('\n').map(|(i, _)| i + 1))
-                        .collect();
-
-                    let mut match_info = Vec::new();
-                    for byte_idx in content.match_indices(&blk.search).map(|(i, _)| i) {
-                        let line_num = match line_starts.binary_search(&byte_idx) {
-                            Ok(i) => i + 1,
-                            Err(i) => i,
-                        };
-                        let ls = line_starts.get(line_num - 1).copied().unwrap_or(0);
-                        let le = content[ls..]
-                            .find('\n')
-                            .map(|e| ls + e)
-                            .unwrap_or(content.len());
-                        let text: String = content[ls..le].chars().take(100).collect();
-                        match_info.push(format!("  Line {}: {}", line_num, text));
-                    }
-
-                    return Err(ToolError::Msg(format!(
-                        "{label}search text matched {} times in {}:\n{}\n\nAdd more surrounding context to the SEARCH block to make it unique.",
-                        count,
-                        path,
-                        match_info.join("\n"),
-                    )));
-                }
-                resolved.push(ResolvedSim {
-                    byte_start: pos,
-                    byte_end: pos + blk.search.len(),
-                    replace: blk.replace.clone(),
-                    note: String::new(),
-                });
-            }
-            MatchResult::Normalized(start, end) => {
-                resolved.push(ResolvedSim {
-                    byte_start: start,
-                    byte_end: end,
-                    replace: blk.replace.clone(),
-                    note: "matched after whitespace normalization".to_string(),
-                });
-            }
-            MatchResult::FuzzyApply(start, end, sim) => {
-                resolved.push(ResolvedSim {
-                    byte_start: start,
-                    byte_end: end,
-                    replace: blk.replace.clone(),
-                    note: format!("fuzzy match, {:.0}% similarity", sim * 100.0),
-                });
-            }
-            MatchResult::FuzzySuggest(line, sim, preview) => {
-                return Err(ToolError::Msg(format!(
-                    "{label}search text not found in '{}'. Closest match at line {}, {:.0}% similar:\n  {}\n\nRead the file around that area, copy the exact text, and retry the edit.",
-                    path,
-                    line,
-                    sim * 100.0,
-                    preview,
-                )));
-            }
-            MatchResult::NotFound => {
-                return Err(ToolError::Msg(format!(
-                    "{label}search text not found in '{}'.\nRead the file and copy the exact text for the SEARCH block, ensuring whitespace and indentation match.",
-                    path,
-                )));
-            }
-        }
-    }
-
-    let mut notes = Vec::new();
-    let mut ranges = Vec::new();
-
-    for rb in &resolved {
-        if !rb.note.is_empty() {
-            notes.push(rb.note.clone());
-        }
-        ranges.push((rb.byte_start, rb.byte_end, rb.replace.clone()));
-    }
-
-    Ok((notes, ranges))
-}
-
 // ── V2: Hashedit (tag-based) ────────────────────────────────────────────
 
 fn parse_tagged_line(raw: &str) -> Option<(usize, String)> {
     let stripped = raw.trim_start_matches([' ', '\t']);
-    let (num_tag, _content) = stripped.split_once(' ')?;
+    let num_tag = stripped
+        .split_once(' ')
+        .map_or(stripped, |(reference, _)| reference);
     let (num_str, tag) = num_tag.split_once('|')?;
     let line_num: usize = num_str.parse().ok()?;
     if tag.len() != 8 || !tag.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    Some((line_num, tag.to_string()))
+    if line_num == 0 {
+        return None;
+    }
+    Some((line_num, tag.to_ascii_lowercase()))
 }
 
 fn extract_line_info(lines_raw: &str) -> Result<Vec<(usize, String)>, ToolError> {
@@ -460,6 +167,13 @@ fn extract_line_info(lines_raw: &str) -> Result<Vec<(usize, String)>, ToolError>
     if result.is_empty() {
         return Err(ToolError::Msg(
             "No valid tagged lines found. Copy lines from the read output exactly.".to_string(),
+        ));
+    }
+    if result.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        || (result.len() > 2 && result.windows(2).any(|pair| pair[0].0 + 1 != pair[1].0))
+    {
+        return Err(ToolError::Msg(
+            "Range references must ascend; lists longer than two must be contiguous.".into(),
         ));
     }
     Ok(result)
@@ -484,146 +198,249 @@ fn validate_tag(content_lines: &[&str], line_num: usize, tag: &str) -> Result<()
     Ok(())
 }
 
-fn line_range_to_byte_range(
-    content_lines: &[&str],
-    start_line: usize,
-    end_line: usize,
-) -> (usize, usize) {
-    if content_lines.is_empty() || start_line == 0 || start_line > content_lines.len() {
-        return (0, 0);
+/// Use the boundary line's ending for inserted text. Leave all untouched bytes
+/// unchanged, including mixed LF/CRLF files and a missing final newline.
+fn line_ending(content: &str, offsets: &[usize], line: usize) -> &'static str {
+    let start = offsets.get(line).copied().unwrap_or(content.len());
+    let end = offsets.get(line + 1).copied().unwrap_or(content.len());
+    let raw = &content[start..end];
+    if raw.ends_with("\r\n") {
+        "\r\n"
+    } else if raw.ends_with('\n') {
+        "\n"
+    } else if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
     }
-    let end_line = end_line.min(content_lines.len());
-
-    // Byte position before start_line
-    let byte_start: usize = content_lines[..start_line.saturating_sub(1)]
-        .iter()
-        .map(|l| l.len() + 1)
-        .sum();
-
-    // The +1 per line accounts for newline separators; saturating_sub(1)
-    // removes the phantom newline from the last line in the range.
-    let byte_end = byte_start
-        + content_lines[start_line.saturating_sub(1)..end_line]
-            .iter()
-            .map(|l| l.len() + 1)
-            .sum::<usize>()
-            .saturating_sub(1);
-
-    (byte_start, byte_end)
 }
 
-async fn handle_hashedit(
-    path: &str,
-    file_crc: &str,
-    edits: &[EditOp],
-    content: &str,
-) -> Result<(Vec<String>, Vec<(usize, usize, String)>), ToolError> {
-    // Validate file-level CRC
-    let actual_crc = crc32_hex(content.as_bytes());
-    if actual_crc != file_crc {
+fn replacement_text(text: &str, ending: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', ending)
+}
+
+fn validate_revision(path: &str, file_crc: &str, content: &str) -> Result<(), ToolError> {
+    let actual = crc32_text(content);
+    if !actual.eq_ignore_ascii_case(file_crc) {
         return Err(ToolError::Msg(format!(
-            "File CRC mismatch for '{}': expected {} but file now has {}. The file has changed since the read. Re-read and retry.",
-            path, file_crc, actual_crc
+            "File CRC mismatch for '{path}': expected {file_crc} but file now has {actual}. Re-read and retry."
         )));
     }
+    Ok(())
+}
 
-    let content_lines: Vec<&str> = content.lines().collect();
-    let notes = Vec::new();
+fn handle_hashedit(
+    content: &str,
+    edits: &[EditOp],
+) -> Result<Vec<(usize, usize, String)>, ToolError> {
+    if edits.is_empty() {
+        return Err(ToolError::Msg("Provide at least one edit.".into()));
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let offsets = line_offsets(content);
+    // Keep insertion provenance: replacing an empty line is also a zero-byte
+    // range, but must not be mistaken for an insertion during validation.
     let mut ranges = Vec::new();
-
-    for (i, op) in edits.iter().enumerate() {
-        let label = if edits.len() > 1 {
-            format!("Edit {}: ", i + 1)
-        } else {
-            String::new()
+    for op in edits {
+        if op.operation == EditOperation::Append {
+            if op.line.is_some() || op.lines.is_some() || op.text.is_empty() {
+                return Err(ToolError::Msg(
+                    "Append requires non-empty text and no line references.".into(),
+                ));
+            }
+            let ending = line_ending(content, &offsets, lines.len().saturating_sub(1));
+            let prefix = if content.is_empty() || content.ends_with('\n') {
+                ""
+            } else {
+                ending
+            };
+            let replacement = replacement_text(&op.text, ending);
+            let suffix = if replacement.ends_with('\n') {
+                ""
+            } else {
+                ending
+            };
+            ranges.push((
+                content.len(),
+                content.len(),
+                format!("{prefix}{replacement}{suffix}"),
+                true,
+            ));
+            continue;
+        }
+        let entries = match (&op.line, &op.lines) {
+            (Some(line), None) => vec![parse_tagged_line(line).ok_or_else(|| {
+                ToolError::Msg("invalid tagged line format. Expected N|TAG.".into())
+            })?],
+            (None, Some(lines)) => extract_line_info(lines)?,
+            _ => {
+                return Err(ToolError::Msg(
+                    "Provide exactly one of line or lines.".into(),
+                ));
+            }
         };
-
-        match (&op.line, &op.lines) {
-            (Some(single_line), None) => {
-                let (line_num, tag) = parse_tagged_line(single_line).ok_or_else(|| {
-                    ToolError::Msg(format!(
-                        "{}invalid tagged line format. Expected 'N|TAG content', got: '{}'",
-                        label, single_line
-                    ))
-                })?;
-                validate_tag(&content_lines, line_num, &tag)
-                    .map_err(|e| ToolError::Msg(format!("{}{}", label, e)))?;
-
-                let (byte_start, byte_end) =
-                    line_range_to_byte_range(&content_lines, line_num, line_num);
-                ranges.push((byte_start, byte_end, op.text.clone()));
-            }
-            (None, Some(multi_lines)) => {
-                let entries = extract_line_info(multi_lines)?;
-                for &(line_num, ref tag) in &entries {
-                    validate_tag(&content_lines, line_num, tag)
-                        .map_err(|e| ToolError::Msg(format!("{}{}", label, e)))?;
+        for (number, tag) in &entries {
+            validate_tag(&lines, *number, tag)?;
+        }
+        let first = entries[0].0 - 1;
+        let last = entries.last().unwrap().0 - 1;
+        let start = offsets[first];
+        let next = offsets.get(last + 1).copied().unwrap_or(content.len());
+        let end = offsets[last] + lines[last].len();
+        let ending = line_ending(content, &offsets, last);
+        let replacement = replacement_text(&op.text, ending);
+        match op.operation {
+            EditOperation::Replace => ranges.push((start, end, replacement, false)),
+            EditOperation::Delete => {
+                if !op.text.is_empty() {
+                    return Err(ToolError::Msg("Delete requires empty text.".into()));
                 }
-                let start_line = entries[0].0;
-                let end_line = entries[entries.len() - 1].0;
-                let (byte_start, byte_end) =
-                    line_range_to_byte_range(&content_lines, start_line, end_line);
-                ranges.push((byte_start, byte_end, op.text.clone()));
+                ranges.push((start, next, String::new(), false));
             }
-            (Some(_), Some(_)) => {
-                return Err(ToolError::Msg(format!(
-                    "{}both 'line' and 'lines' specified — use only one",
-                    label
-                )));
+            EditOperation::InsertBefore | EditOperation::InsertAfter => {
+                if entries.len() != 1 || op.text.is_empty() {
+                    return Err(ToolError::Msg(
+                        "Insertion requires one anchor and non-empty text.".into(),
+                    ));
+                }
+                let suffix = if replacement.ends_with('\n') {
+                    ""
+                } else {
+                    ending
+                };
+                if op.operation == EditOperation::InsertBefore {
+                    ranges.push((start, start, format!("{replacement}{suffix}"), true));
+                } else {
+                    let prefix = if content[offsets[last]..next].ends_with('\n') {
+                        ""
+                    } else {
+                        ending
+                    };
+                    ranges.push((next, next, format!("{prefix}{replacement}{suffix}"), true));
+                }
             }
-            (None, None) => {
-                return Err(ToolError::Msg(format!(
-                    "{}neither 'line' nor 'lines' specified — provide one",
-                    label
-                )));
-            }
+            EditOperation::Append => unreachable!(),
         }
     }
+    // At a shared start, sort the insertion before the replacement. Reverse
+    // application then replaces first and inserts before the replacement text.
+    // This order does not depend on the order of operations in the request.
+    ranges.sort_by_key(|(start, _, _, insertion)| (*start, !insertion));
+    if ranges.windows(2).any(|pair| {
+        let (left_start, left_end, _, left_insertion) = &pair[0];
+        let (right_start, _, _, right_insertion) = &pair[1];
+        let shared_start_conflict =
+            left_start == right_start && !(*left_insertion && !*right_insertion);
+        shared_start_conflict || left_end > right_start
+    }) {
+        return Err(ToolError::Msg(
+            "Edit ranges overlap or multiple edits share an insertion point. Combine them into one edit.".into(),
+        ));
+    }
+    Ok(ranges
+        .into_iter()
+        .map(|(start, end, text, _)| (start, end, text))
+        .collect())
+}
 
-    Ok((notes, ranges))
+/// Small, agent-visible confirmation with fresh references. Large lines keep a
+/// full-content tag, but clearly label their preview as incomplete.
+fn edit_feedback(output: &str, ranges: &[(usize, usize, String)]) -> String {
+    let offsets = line_offsets(output);
+    let lines: Vec<_> = output.lines().collect();
+    let mut feedback = String::new();
+    let mut delta: isize = 0;
+    let mut shown = std::collections::BTreeSet::new();
+    for (start, end, text) in ranges {
+        let new_start = start.saturating_add_signed(delta);
+        let first = line_at_byte(&offsets, new_start).min(lines.len());
+        let last = line_at_byte(
+            &offsets,
+            new_start.saturating_add(text.len().saturating_sub(1)),
+        )
+        .min(lines.len().saturating_sub(1));
+        if feedback.len() < 3000 {
+            feedback.push_str(&format!(
+                "\nChanged result near lines {}-{}",
+                first + 1,
+                last.max(first) + 1
+            ));
+        }
+        for index in first.saturating_sub(1)..=(last + 1).min(lines.len().saturating_sub(1)) {
+            if feedback.len() >= 3000 || shown.len() >= 20 {
+                break;
+            }
+            if let Some(line) = lines.get(index) {
+                if shown.insert(index) {
+                    let preview: String = line.chars().take(250).collect();
+                    let suffix = if preview.len() < line.len() {
+                        " [line preview truncated]"
+                    } else {
+                        ""
+                    };
+                    feedback.push_str(&format!(
+                        "\n{}|{} {preview}{suffix}",
+                        index + 1,
+                        crc32_hex(line.as_bytes())
+                    ));
+                }
+            }
+        }
+        delta += text.len() as isize - (end - start) as isize;
+    }
+    if shown.len() < lines.len() {
+        feedback.push_str("\n[bounded confirmation excerpt; read for more context]");
+    }
+    feedback
+}
+
+async fn verify_source(
+    path: &std::path::Path,
+    target: &std::path::Path,
+    expected: &[u8],
+) -> Result<(), ToolError> {
+    if tokio::fs::canonicalize(path).await? != target || tokio::fs::read(target).await? != expected
+    {
+        return Err(ToolError::Msg(
+            "File changed before replacement. Re-read and retry.".into(),
+        ));
+    }
+    Ok(())
 }
 
 // ── Tool implementation ──────────────────────────────────────────────────
 
 impl EditTool {
     fn metadata(&self) -> (String, serde_json::Value) {
-        let (desc, params) = match edit_system() {
-            EditSystem::Similarity => (
-                "Edit a file using aider-style SEARCH/REPLACE blocks. Each block finds exact text and replaces it. Multiple blocks in one call are applied atomically. If the search text is not an exact match, whitespace normalization and fuzzy matching are attempted as fallbacks.".to_string(),
+        let (desc, params) = (
+                "Edit a file using tag-based line references. Use compact N|TAG references from read output. The file CRC rejects stale reads; this is not a concurrent-write transaction. Provide edits OR content for guarded whole-file replacement. References describe the original file. All operations are validated before atomic file replacement.".to_string(),
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "block": { "type": "string", "description": "One or more SEARCH/REPLACE blocks:\n<<<<<<< SEARCH\nexisting code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\nInclude multiple blocks for separate edits to the same file." }
-                    },
-                    "required": ["path", "block"]
-                }),
-            ),
-            EditSystem::Hashedit => (
-                "Edit a file using tag-based line references. Copy tagged lines from read output. Edit is CAS-guarded via file-level CRC-32 hash. All edits in one call are applied atomically.".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "file_crc": { "type": "string", "description": "8-char hex CRC-32 from the read output header [CRC: ...]" },
+                        "file_crc": { "type": "string", "pattern": "^[0-9a-fA-F]{8}$", "description": "8-char hex CRC-32 from read or the previous edit result [CRC: ...]" },
+                        "content": { "type": "string", "description": "Guarded whole-file replacement. Requires file_crc; do not also supply edits. Content is written exactly." },
                         "edits": {
                             "type": "array",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "line": { "type": "string", "description": "For single-line edits: copy-paste the tagged line from read output. Format: 'N|TAG content'" },
-                                    "lines": { "type": "string", "description": "For range edits: copy-paste multiple tagged lines from read output. Newline-separated." },
-                                    "text": { "type": "string", "description": "Replacement text. Use empty string to delete." }
+                                    "operation": { "type": "string", "enum": ["replace", "delete", "insert_before", "insert_after", "append"], "description": "Defaults to replace. Append needs no anchor; insert operations need one anchor." },
+                                    "line": { "type": "string", "description": "Single-line reference from read: 'N|TAG'. Full tagged lines are also accepted." },
+                                    "lines": { "type": "string", "description": "Inclusive range: two newline-separated N|TAG references, first and last. A contiguous list of full tagged lines is also accepted." },
+                                    "text": { "type": "string", "description": "Replacement or inserted text. Replace with empty text clears content; operation delete removes complete lines." }
                                 },
-                                "required": ["text"]
+                                "required": ["text"],
+                                "additionalProperties": false
                             },
-                            "description": "Array of edit operations"
+                            "description": "Operations against the original file revision. One insertion may share a range boundary; insertions inside ranges and duplicate insertion points are rejected.",
+                            "minItems": 1
                         }
                     },
-                    "required": ["path", "file_crc", "edits"]
+                    "required": ["path", "file_crc"],
+                    "additionalProperties": false
                 }),
-            ),
-        };
+        );
 
         (desc, params)
     }
@@ -653,66 +470,123 @@ impl Tool for EditTool {
         let path = crate::fs::expand_tilde(&args.path);
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "edit", &path).await?;
 
-        let bytes = tokio::fs::read(&path).await?;
-        let has_crlf = bytes.windows(2).any(|w| w == b"\r\n");
-        let content = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-
-        // Determine mode: V1 (block) or V2 (edits)
-        let (notes, mut ranges) = if let Some(ref block) = args.block {
-            handle_similarity(&path, block, &content).await?
-        } else if let (Some(file_crc), Some(edits)) = (&args.file_crc, &args.edits) {
-            handle_hashedit(&path, file_crc, edits, &content).await?
-        } else if args.block.is_some() {
-            // block was Some but empty or parse failed — handle_similarity already errored
-            unreachable!()
-        } else {
-            return Err(ToolError::Msg(
-                "Provide either 'block' (SEARCH/REPLACE) or 'file_crc'+'edits' (hashedit). Use /editsys to check the current mode."
-                    .to_string(),
-            ));
-        };
-
-        let edit_count = ranges.len();
-
-        // Apply last-to-first so earlier byte positions remain valid
-        ranges.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
-
-        let mut modified = content.clone();
-
-        for (byte_start, byte_end, replace) in &ranges {
-            if *byte_end > modified.len() || *byte_start > modified.len() {
+        let (target, _lock) = crate::fs::lock_file_path(std::path::Path::new(&path)).await?;
+        let bytes = tokio::fs::read(&target).await?;
+        let content = String::from_utf8(bytes)
+            .map_err(|_| ToolError::Msg("Cannot edit non-UTF-8 text.".into()))?;
+        let file_crc = args.file_crc.as_ref().ok_or_else(|| {
+            ToolError::Msg("Provide file_crc from read or the previous edit result.".into())
+        })?;
+        validate_revision(&path, file_crc, &content)?;
+        let ranges = match (&args.edits, &args.content) {
+            (Some(edits), None) => {
+                let bytes = edits
+                    .iter()
+                    .try_fold(0usize, |n, op| n.checked_add(op.text.len()))
+                    .ok_or_else(|| ToolError::Msg("Replacement text too large.".into()))?;
+                if bytes as u64 > self.max_text_file_size {
+                    return Err(ToolError::Msg(format!(
+                        "Replacement text too large ({bytes} bytes); maximum is {} bytes.",
+                        self.max_text_file_size
+                    )));
+                }
+                handle_hashedit(&content, edits)?
+            }
+            (None, Some(replacement)) => {
+                if replacement.len() as u64 > self.max_text_file_size {
+                    return Err(ToolError::Msg(format!(
+                        "Replacement too large; maximum is {} bytes.",
+                        self.max_text_file_size
+                    )));
+                }
+                vec![(0, content.len(), replacement.clone())]
+            }
+            _ => {
                 return Err(ToolError::Msg(
-                    "Internal error: edit range exceeds file bounds. The file may have changed. Re-read and retry."
-                        .to_string(),
+                    "Provide exactly one of edits or content.".into(),
                 ));
             }
-            modified.replace_range(*byte_start..*byte_end, replace);
-        }
-
-        let output = if has_crlf {
-            modified.replace('\n', "\r\n")
-        } else {
-            modified
         };
+        let mut output = content.clone();
+        for (start, end, replacement) in ranges.iter().rev() {
+            output.replace_range(*start..*end, replacement);
+        }
+        let revision = crc32_text(&output);
+        // Detect external changes observed before publication (or a no-op
+        // result). External writers still need to cooperate to close the race.
+        verify_source(std::path::Path::new(&path), &target, content.as_bytes()).await?;
+        if output == content {
+            let result = format!("No changes to {path}\n[CRC: {revision}]");
+            return Ok(if let Some(msg) = coaching {
+                format!("{msg}\n\n{result}")
+            } else {
+                result
+            });
+        }
         let diff = edit_ranges_diff(&path, &content, &ranges);
-
-        crate::fs::atomic_write(&path, &output).await?;
+        crate::fs::atomic_write(&target, &output).await?;
         crate::agent::tools::untrack_read_path(&path);
-
-        let mut result = format!("Applied {} edit(s) to {}", edit_count, path);
+        let mut result = format!(
+            "Applied {} edit(s) to {}\n[CRC: {}]{}",
+            ranges.len(),
+            path,
+            revision,
+            edit_feedback(&output, &ranges)
+        );
         set_last_edit_display_artifact(DisplayArtifact {
             kind: "patch".into(),
             label: path.clone().into(),
             contents: diff,
             extension: "patch".into(),
         });
-        for note in &notes {
-            result.push_str(&format!("\n  Note: {}", note));
-        }
         if let Some(msg) = coaching {
             result = format!("{}\n\n{}", msg, result);
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn source_check_detects_raw_change_with_same_normalized_revision() {
+        let path =
+            std::env::temp_dir().join(format!("zerostack-source-check-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"original\r\n").unwrap();
+        let target = std::fs::canonicalize(&path).unwrap();
+        verify_source(&path, &target, b"original\r\n")
+            .await
+            .unwrap();
+        std::fs::write(&path, b"original\n").unwrap();
+        assert!(
+            verify_source(&path, &target, b"original\r\n")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("changed")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_check_detects_retargeted_symlink() {
+        let dir =
+            std::env::temp_dir().join(format!("zerostack-source-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("first");
+        let second = dir.join("second");
+        let link = dir.join("link");
+        std::fs::write(&first, b"same").unwrap();
+        std::fs::write(&second, b"same").unwrap();
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        let target = std::fs::canonicalize(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&second, &link).unwrap();
+        assert!(verify_source(&link, &target, b"same").await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

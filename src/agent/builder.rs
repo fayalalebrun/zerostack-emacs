@@ -178,7 +178,10 @@ pub async fn build_agent_inner<M: Into<rig::DynModel<rig::operation::Completion>
                 ask_tx.clone(),
                 max_text_file_size,
             ))
-            .tool(tools::EditTool::new(permission.clone(), ask_tx.clone()))
+            .tool(
+                tools::EditTool::new(permission.clone(), ask_tx.clone())
+                    .with_max_text_file_size(max_text_file_size),
+            )
             .tool(tools::BashTool::new(
                 permission.clone(),
                 ask_tx.clone(),

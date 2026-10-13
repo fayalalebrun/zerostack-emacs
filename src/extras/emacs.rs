@@ -8912,7 +8912,7 @@ mod imp {
                 let mut session = server.session.lock().await;
                 session.add_tool_call_structured(
                     "edit",
-                    &serde_json::json!({"path":"file.rs", "block":"full edit arguments"}),
+                    &serde_json::json!({"path":"file.rs", "file_crc":"00000000", "content":"full edit arguments"}),
                     "edit-a",
                     None,
                 );

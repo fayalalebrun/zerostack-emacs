@@ -237,3 +237,127 @@ async fn no_torn_reads_during_rewrites() {
     assert_eq!(torn, 0, "reader observed {torn} torn/partial states");
     assert_eq!(temp_residue(dir.path()), 0);
 }
+
+#[tokio::test]
+async fn atomic_create_refuses_existing_entries_and_cleans_temporary_files() {
+    let dir = TempDir::new("no_clobber");
+    let path = dir.join("file");
+    crate::fs::atomic_create(&path, b"first").await.unwrap();
+    assert_eq!(
+        crate::fs::atomic_create(&path, b"second")
+            .await
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    assert_eq!(temp_residue(dir.path()), 0);
+    let directory = dir.join("directory");
+    std::fs::create_dir(&directory).unwrap();
+    assert!(crate::fs::atomic_create(&directory, b"bad").await.is_err());
+    assert!(directory.is_dir());
+    assert_eq!(temp_residue(dir.path()), 0);
+}
+
+#[tokio::test]
+async fn file_lock_child_helper() {
+    let Some(path) = std::env::var_os("ZEROSTACK_TEST_FILE_LOCK") else {
+        return;
+    };
+    use std::io::Write;
+    println!("LOCK_READY");
+    std::io::stdout().flush().unwrap();
+    let (_, _lock) = crate::fs::lock_file_path(Path::new(&path)).await.unwrap();
+    println!("LOCK_ACQUIRED");
+    std::io::stdout().flush().unwrap();
+}
+
+#[tokio::test]
+async fn file_tools_lock_is_shared_between_processes() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let dir = TempDir::new("process_lock");
+    let path = dir.join("file");
+    std::fs::write(&path, b"source").unwrap();
+    let (_, lock) = crate::fs::lock_file_path(&path).await.unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::atomic_write_tests::file_lock_child_helper",
+            "--nocapture",
+        ])
+        .env("ZEROSTACK_TEST_FILE_LOCK", &path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if output
+                .next_line()
+                .await
+                .unwrap()
+                .expect("child output")
+                .contains("LOCK_READY")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), output.next_line())
+            .await
+            .is_err()
+    );
+    drop(lock);
+    let line = tokio::time::timeout(std::time::Duration::from_secs(10), output.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(line.contains("LOCK_ACQUIRED"));
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_aliases_use_the_same_path_lock() {
+    let dir = TempDir::new("alias_lock");
+    let target = dir.join("target");
+    let alias = dir.join("alias");
+    std::fs::write(&target, b"source").unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let (first_target, first_lock) = crate::fs::lock_file_path(&target).await.unwrap();
+    let second = crate::fs::lock_file_path(&alias);
+    tokio::pin!(second);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+            .await
+            .is_err()
+    );
+    drop(first_lock);
+    let (second_target, _lock) = tokio::time::timeout(std::time::Duration::from_secs(10), second)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_target, second_target);
+}
+
+#[tokio::test]
+async fn atomic_publication_finishes_buffered_writes_before_returning() {
+    let dir = TempDir::new("flush_before_publish");
+    let existing = dir.join("existing");
+    for iteration in 0..20 {
+        let payload = vec![b'a' + iteration; 64 * 1024];
+        atomic_write(&existing, &payload).await.unwrap();
+        // Synchronous reads immediately after the call must see complete bytes.
+        assert_eq!(std::fs::read(&existing).unwrap(), payload);
+        let new = dir.join(&format!("new-{iteration}"));
+        crate::fs::atomic_create(&new, &payload).await.unwrap();
+        assert_eq!(std::fs::read(&new).unwrap(), payload);
+    }
+    assert_eq!(temp_residue(dir.path()), 0);
+}

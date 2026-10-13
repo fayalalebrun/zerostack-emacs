@@ -98,6 +98,8 @@ Session is serialized to JSON files in `$XDG_DATA_HOME/zerostack/sessions/`. Cha
 
 11. **One core system prompt** — `src/agent/prompt.rs` defines task scope, quality, verification, safety, and communication. `build_preamble()` adds tool guidance, repository context, skills, added files, memory, and `SUFFIX.md`; selectable prompt modes and prompt chaining are not supported. Security modes remain enforced by the permission checker.
 
+12. **Hash-addressed file tools** — hashedit is the only edit system. Text reads stream a bounded continuous window while computing the file CRC; repeated reads remain recoverable. Edits accept compact references, explicit insertion/deletion operations, or CRC-guarded whole-file replacement. File tools coordinate through canonical-path advisory locks; creation uses atomic no-clobber publication. Edits preserve untouched bytes and return fresh references. External writers do not participate in these locks. (`src/agent/tools/read_text.rs`, `edit.rs`, `write.rs`, `src/fs.rs`)
+
 ## Dependencies
 
 | Crate | Use |

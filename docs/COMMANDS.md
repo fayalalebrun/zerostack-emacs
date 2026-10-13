@@ -137,9 +137,8 @@ the chat directly.
 | ------- | ----------- |
 | `/compress [instructions]` | Compress conversation history to free context window space. |
 | `/compact` | Alias for `/compress`. |
-| `/editsys` | Show the current edit system mode (similarity or hashedit). |
-| `/editsys similarity` | Use SEARCH/REPLACE with fuzzy matching for edits (default). |
-| `/editsys hashedit` | Use CRC-32 tag-based edits (token-efficient, CAS-guarded). |
+| `/editsys` | Show the edit system (hashedit only). |
+| `/editsys hashedit` | Confirm hashedit, the default and only edit system. |
 | `/btw <message>` | Ask a quick side question in parallel, without touching the main conversation. It forks the current context (including the main agent's in-flight turn, if any), answers using read-only tools (read/grep/find_files/list_dir, no writes or bash), and prints the answer inline. Works even while the main agent is running. Nothing is written to history; its token cost is shown separately as `btw:$…`. Ctrl-C cancels an in-flight `/btw` without disturbing the main agent. |
 | `/reasoning` | Toggle LLM reasoning on/off (requires model support). |
 | `/thinking` | Alias for `/reasoning`. |

@@ -343,26 +343,18 @@ async fn handle_editsys(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resul
         write_ok(ctx.renderer, format!("edit system: {}", current));
         write_result(
             ctx.renderer,
-            "  /editsys similarity   SEARCH/REPLACE with fuzzy matching",
-        );
-        write_result(
-            ctx.renderer,
             "  /editsys hashedit     tag-based (CRC-32 line hashes)",
         );
         return Ok(());
     }
     match parts[1] {
-        "similarity" => {
-            tools::set_edit_system(EditSystem::Similarity);
-            write_ok(ctx.renderer, "edit system: similarity (SEARCH/REPLACE)");
-        }
         "hashedit" => {
             tools::set_edit_system(EditSystem::Hashedit);
             write_ok(ctx.renderer, "edit system: hashedit (tag-based)");
         }
         _ => write_error(
             ctx.renderer,
-            format!("unknown: '{}' (similarity|hashedit)", parts[1]),
+            format!("unknown: '{}' (hashedit only)", parts[1]),
         ),
     }
     Ok(())

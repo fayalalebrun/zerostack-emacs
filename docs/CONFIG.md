@@ -122,7 +122,7 @@ reserve_tokens = 8192
 keep_recent_tokens = 10000
 compact_enabled = true
 mid_turn_compact_threshold = 0.80
-edit_system = "similarity"
+edit_system = "hashedit"
 default_permission_mode = "standard"
 permission-modes = ["guarded", "standard", "yolo"]
 show_tool_details = 3
@@ -171,14 +171,14 @@ Accepted top-level keys:
 | `context_window`          | integer | Session context-window size used for status and auto-compaction. When unset, auto-detected from the selected model's catalog entry; falls back to `128000` if the model is not in the catalog. A value of `0` disables auto-compaction. |
 | `reserve_tokens`          | integer | Tokens to reserve before compaction is triggered. When unset globally, falls back to the active quick model's `reserve_tokens` field, then to the hardcoded default of `8192`.                                                                                                         |
 | `keep_recent_tokens`      | integer | Approximate recent-token budget kept verbatim during compaction. Default: `10000`.                                                                                          |
-| `max_text_file_size`      | integer | Maximum allowed file size in bytes for read/write tool operations. Default: `1048576` (1 MB).                                                                               |
-| `deny_repeated_reads`     | boolean | Block repeated reads of the same file section within a session until the file is edited or written. Default: `true`. Set to `false` to allow re-reading.                     |
+| `max_text_file_size`      | integer | Maximum new-file content or supplied edit text in bytes. Text reads use bounded streaming windows instead of a file-size cap. Default: `1048576` (1 MB).                                                                               |
+| `deny_repeated_reads`     | boolean | Legacy name: show a short warning for a repeated, unchanged text window. Reads always remain permitted. Tracks successful reads by canonical path and file CRC. Default: `true`.                     |
 | `show_cost_always`        | boolean | Show the session cost in the status bar even when it is `$0.0000` (for example when the model has no per-token pricing configured). Default: `false`, which hides the cost until it is above zero. |
 | `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `true`. When `false`, nothing is ever compacted automatically.            |
 | `mid_turn_compact_threshold` | number | Opt-in mid-turn compaction. Fraction of the context window (`0.0`–`1.0`) of real provider prompt pressure at which to compact *during* a turn, not just between turns. Unset by default, meaning no mid-turn compaction. Honored only when `compact_enabled` is `true`. Recommended starting value: `0.80`. See Mid-turn compaction below.            |
 | `always_show_welcome`     | boolean | Always show the welcome banner on startup, bypassing the one-shot marker file. Default: `false`.                                                                               |
 | `auto-update-themes`      | boolean | When `true`, always regenerate themes on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
-| `edit_system`             | string  | Edit system mode: `"similarity"` (SEARCH/REPLACE with fuzzy matching, default) or `"hashedit"` (CRC-32 tag-based CAS edits). See Edit System Modes below.                     |
+| `edit_system`             | string  | Edit system: `"hashedit"` (default and only mode). Legacy `"similarity"` settings select hashedit.                     |
 | `custom_providers`        | object  | Map of provider aliases to `{ "provider_type", "base_url", "api_key_env", "api_style", "headers", "danger_accept_invalid_certs", "timeout_secs" }`. `provider_type` must resolve to a built-in provider type; `api_key_env` is optional. For OpenAI providers, `api_style` selects `"responses"` or `"completions"`, `headers` sets custom HTTP headers (values support `${ENV_VAR}` expansion), and `timeout_secs` overrides the HTTP timeout. `danger_accept_invalid_certs` disables TLS verification. See the OpenAI API styles section below. |
 | `permission`              | object  | Permission rules using glob patterns; see the permission config notes below.                                |
 | `permission-regex`        | object  | Same structure as `permission` but patterns are interpreted as regex instead of glob.                       |
@@ -772,43 +772,115 @@ All top-level keys use kebab-case when they contain hyphens (e.g.
 their JSON counterpart. Quoted keys (`"*"`, `"**"`) are required when the key
 contains special characters like `*` or `/`.
 
-## Edit System Modes
+## File Tools and Edit System
 
-zerostack supports two edit systems, selectable via `edit_system` config key,
-`--edit-system` CLI flag, or `/editsys` slash command:
+Hashedit is the default and only edit system. The read tool returns a file CRC
+header and lines with `N|TAG` references. Legacy configuration and CLI values of
+`similarity` select hashedit. SEARCH/REPLACE editing is removed.
 
-### `similarity` (default)
-
-The classic aider-style SEARCH/REPLACE format. The LLM copies exact text from
-read output into `<<<<<<< SEARCH` blocks and provides replacements in
-`>>>>>>> REPLACE` blocks. Falls back to whitespace normalization and fuzzy
-matching when the exact text doesn't match.
-
-```
-edit_system = "similarity"
-```
-
-### `hashedit`
-
-Tag-based edits using CRC-32 line hashes and file-level CAS (check-and-set)
-tokens. The read tool annotates each line with an 8-char hex CRC-32 tag (e.g.
-`"  10|f1e2d3c4 int count = 10;"`) and a file-level CRC header. The edit tool
-receives tagged lines from the read output and provides only the replacement
-text — no old-text reproduction needed.
-
-Key advantages:
-- **Token-efficient**: No old-text reproduction (significant savings for
-  deletions and large edits)
-- **CAS-guarded**: File-level CRC prevents applying edits to stale content
-- **Reliable**: Per-line tag validation catches content mismatches
-
-```
+```toml
 edit_system = "hashedit"
 ```
 
-Switching between modes is immediate and does not require agent restart.
-The `/editsys` `similarity` and `/editsys` `hashedit` slash commands
-provide the same functionality at runtime.
+### Read
+
+Text reads return a continuous window with a source-text budget of approximately
+9,000 bytes, plus headers and repository instruction reminders. `offset` and
+`limit` must be positive. The default line limit is unchanged. A truncated window
+reports the continuation offset. Very long lines return a labeled UTF-8-safe
+preview; their tags still cover the complete line. Do not treat a preview as the
+full source line.
+
+Large text files are scanned with bounded memory to compute the whole-file CRC.
+Small requested windows still require a complete scan. Images retain their
+separate size and format validation, including images without a filename extension.
+
+Repeated reads remain permitted. `deny_repeated_reads` is a compatibility setting
+that now controls an unchanged-window warning, not a denial. Failed reads do not
+enter the tracker. External file changes produce a new revision.
+
+### Create
+
+`write` creates new files only. It creates parent directories and refuses existing
+files, directories, and symlinks, including dangling symlinks. It publishes a
+complete temporary file with an atomic no-clobber hard link. Filesystems without
+hard-link support fail safely; there is no overwrite fallback. A successful
+creation returns the file CRC.
+
+For an existing file, use `edit`. Do not delete and recreate it to perform a rewrite.
+
+### Edit
+
+Use `line: "N|TAG"` for one line. Use two newline-separated endpoint references
+in `lines` for an inclusive range. Full tagged lines remain accepted. Lists longer
+than two references must be contiguous. Replacement and deletion ranges must
+ascend and must not overlap. One insertion may share the start or end boundary
+of a replacement or deletion. At a shared start, inserted text appears before
+the replacement text, regardless of request order. Insertions inside a range
+and multiple insertions at the same position are rejected. Replacing an empty
+line is still a replacement, not an insertion. All references describe the file
+before the call.
+
+```json
+{
+  "path": "src/example.rs",
+  "file_crc": "01234567",
+  "edits": [
+    {"line": "42|89abcdef", "text": "replacement line"},
+    {"lines": "50|12345678\n60|abcdef01", "text": "replacement range"}
+  ]
+}
+```
+
+The CRCs and references above are illustrative. Copy actual values from `read`
+or a previous successful `edit` result.
+
+Each operation requires `text`. The optional `operation` selects:
+
+| Operation | References | Behavior |
+|---|---|---|
+| `replace` (default) | One line or a range | Replace line content. Empty text clears content but retains the boundary newline. |
+| `delete` | One line or a range | Remove complete lines, including their line endings. Requires empty text. |
+| `insert_before` | One line | Insert non-empty text before the anchor. |
+| `insert_after` | One line | Insert non-empty text after the anchor. |
+| `append` | None | Append non-empty text. Works for an empty file. |
+
+Insertions ensure a terminating newline and preserve any additional trailing
+newlines in the supplied text. Append and insert-after add a separator when the
+existing final line has no newline. Targeted edits preserve untouched bytes,
+including mixed LF/CRLF endings. Inserted text uses the boundary line's ending.
+Non-UTF-8 files and malformed operations are rejected before mutation.
+
+For exact whole-file replacement, provide `content` instead of `edits`:
+
+```json
+{"path": "small_config.toml", "file_crc": "01234567", "content": "complete replacement\n"}
+```
+
+Whole-file replacement requires the expected CRC and writes the supplied content
+exactly. Do not supply both `content` and `edits`. The configured
+`max_text_file_size` bounds the supplied replacement text, not the size of an
+existing file used for targeted edits.
+
+Successful edits return the new CRC, changed-result locations, and a bounded
+confirmation excerpt with fresh line references. Unchanged edits return an
+explicit no-op result without replacing the file.
+
+### Mutation guarantees
+
+File tools share a cross-process advisory lock by canonical target path. Lock
+files remain under `$XDG_CACHE_HOME/zerostack/file-locks` (normally
+`~/.cache/zerostack/file-locks`). Keep them while agents are running. All edit
+operations are validated before atomic replacement. Edits recheck the raw source
+bytes and target path before publication. Existing permission bits are preserved.
+Tokio writes are flushed before publication; this does not add power-loss `fsync`.
+
+CRC-32 detects ordinary stale content; it is not a cryptographic integrity check.
+Shell commands, formatters, and external editors do not acquire the tool lock.
+An external write can still race the final check and replacement. There are no
+multi-file transaction or power-loss durability guarantees.
+
+`--edit-system hashedit`, `/editsys`, and `/editsys hashedit` remain available.
 
 ## Advisor
 

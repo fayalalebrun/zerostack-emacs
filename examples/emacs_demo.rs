@@ -1797,7 +1797,9 @@ timeout_secs = 60
             .to_string(),
             "edit" => json!({
                 "path": generated_path,
-                "block": "<<<<<<< SEARCH\nstatus: draft\n=======\nstatus: edited by the edit tool\n>>>>>>> REPLACE\n"
+                // Hashes of the known draft content written above.
+                "file_crc": "58061594",
+                "edits": [{"line": "3|52f40e13", "text": "status: edited by the edit tool"}]
             })
             .to_string(),
             "bash" => {

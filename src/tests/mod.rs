@@ -45,8 +45,6 @@ mod models_catalog_tests;
 #[cfg(all(test, feature = "multimodal"))]
 mod multimodal_tests;
 #[cfg(test)]
-mod normalize_tests;
-#[cfg(test)]
 mod picker_tests;
 #[cfg(test)]
 mod provider_tests;
@@ -78,3 +76,6 @@ mod tools_mod_tests;
 mod veles_tests;
 #[cfg(all(test, feature = "git-worktree"))]
 mod worktree_tests;
+
+#[cfg(test)]
+mod file_tools_tests;

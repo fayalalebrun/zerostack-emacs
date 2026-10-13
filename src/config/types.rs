@@ -102,14 +102,13 @@ pub struct CustomProviderConfig {
 #[serde(rename_all = "lowercase")]
 pub enum EditSystem {
     #[default]
-    Similarity,
+    #[serde(alias = "similarity")]
     Hashedit,
 }
 
 impl std::fmt::Display for EditSystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EditSystem::Similarity => write!(f, "similarity"),
             EditSystem::Hashedit => write!(f, "hashedit"),
         }
     }
@@ -119,12 +118,9 @@ impl std::str::FromStr for EditSystem {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "similarity" => Ok(EditSystem::Similarity),
+            "similarity" => Ok(EditSystem::Hashedit),
             "hashedit" => Ok(EditSystem::Hashedit),
-            _ => Err(format!(
-                "unknown edit system '{}' (valid: similarity, hashedit)",
-                s
-            )),
+            _ => Err(format!("unknown edit system '{}' (valid: hashedit)", s)),
         }
     }
 }

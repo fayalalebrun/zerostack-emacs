@@ -173,7 +173,7 @@ pub struct Cli {
 
     #[arg(
         long = "edit-system",
-        help = "Edit system (similarity or hashedit). Default: similarity"
+        help = "Edit system: hashedit (default). Legacy similarity selects hashedit"
     )]
     pub edit_system: Option<String>,
 
