@@ -2641,6 +2641,47 @@
      (should (equal (get-text-property (point) 'display) '(image :type png)))
      (should (equal calls '(("/repo/artifacts/calibration.png" png)))))))
 
+(ert-deftest zerostack-test-markdown-image-resolves-local-paths-and-urls ()
+  (dolist (case '(("artifacts/plot.png" . "/repo/artifacts/plot.png")
+                  ("/tmp/plot.png" . "/tmp/plot.png")
+                  ("file:///tmp/plot.png" . "/tmp/plot.png")
+                  ("file://localhost/tmp/plot.png" . "/tmp/plot.png")
+                  ("file:///tmp/calibration%20%C3%A9.png" . "/tmp/calibration é.png")
+                  ("file:///tmp/plot%23one.png" . "/tmp/plot#one.png")
+                  ("artifacts/plot%20one.png" . "/repo/artifacts/plot%20one.png")))
+    (should (equal (zerostack--markdown-image-path (car case) "/repo/")
+                   (cdr case)))))
+
+(ert-deftest zerostack-test-markdown-image-rejects-nonlocal-urls ()
+  (dolist (path '(nil "" "https://example.com/plot.png"
+                  "data:image/png;base64,abc" "file://server/tmp/plot.png"
+                  "file://user@localhost/tmp/plot.png"
+                  "file://localhost:123/tmp/plot.png" "file:relative.png"
+                  "file:///tmp/plot.png?download=1" "file:///tmp/plot.png#fragment"
+                  "file:///tmp/plot%00.png" "/ssh:server:/tmp/plot.png"))
+    (cl-letf (((symbol-function 'create-image)
+               (lambda (&rest _) (ert-fail "nonlocal image must not be decoded"))))
+      (should-not (zerostack--markdown-image-display path)))))
+
+(ert-deftest zerostack-test-markdown-image-displays-file-url ()
+  (zerostack-test--with-buffer
+   (let (decoded)
+     (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) t))
+               ((symbol-function 'file-readable-p)
+                (lambda (path) (equal path "/tmp/calibration é.png")))
+               ((symbol-function 'create-image)
+                (lambda (path &rest _)
+                  (setq decoded path)
+                  '(image :type png))))
+       (zerostack--replace-lines
+        0 '((:text "Before" :face zs-normal
+                   :spans ((:text "Before" :face zs-normal
+                                  :image "file:///tmp/calibration%20%C3%A9.png")))))
+       (goto-char (point-min))
+       (search-forward "Before")
+       (should (equal (get-text-property (1- (point)) 'display) '(image :type png)))
+       (should (equal decoded "/tmp/calibration é.png"))))))
+
 (ert-deftest zerostack-test-markdown-image-keeps-alt-text-when-unreadable ()
   (zerostack-test--with-buffer
    (cl-letf (((symbol-function 'image-type-from-file-name) (lambda (_) 'png))

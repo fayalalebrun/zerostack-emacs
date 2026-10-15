@@ -322,9 +322,12 @@ Markdown link spans include their destination, for example
 `(:text "docs" :face zs-link :url "https://example.com/docs")`, so the client
 can open them with `browse-url`. Markdown image spans include their alt text and
 path, for example `(:text "plot" :face zs-normal :image "artifacts/plot.png")`.
-The bundled Emacs client resolves relative paths against the session worktree and
-displays readable, locally supported image files inline, retaining alt text when
-loading is unavailable or fails.
+The bundled Emacs client resolves relative paths against the session worktree.
+It also accepts absolute paths and local `file:///...` or `file://localhost/...`
+URLs, including URL-encoded spaces and UTF-8 filenames. It displays readable,
+locally supported image files inline and retains alt text when loading fails.
+Remote hosts and other URL schemes are not loaded. File URLs with credentials,
+ports, queries, or fragments are not supported.
 Provider usage events include `:reasoning-tokens` when the provider reports
 thinking token usage, on both `completion-call` and final `done` events. Final
 assistant turns render persisted `thinking:12k` markers, and persisted tool
