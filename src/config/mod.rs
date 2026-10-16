@@ -75,10 +75,8 @@ pub struct Config {
     // --- End subagent limits ---
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compact_enabled: Option<bool>,
-    /// Opt-in mid-turn compaction threshold, as a fraction of the context
-    /// window (0.0–1.0) of real provider prompt pressure. `None` (default)
-    /// disables mid-turn compaction entirely; the agent only compacts between
-    /// turns. Honored only when `compact_enabled` is also true.
+    /// Mid-turn compaction threshold as a fraction of the context window.
+    /// Defaults to 0.80. Honored only when `compact_enabled` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mid_turn_compact_threshold: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -362,17 +360,13 @@ impl Config {
     }
 
     /// Mid-turn compaction pressure threshold as a fraction of the context
-    /// window. Unlike the other resolvers this one substitutes **no** enabling
-    /// default: `None` means the mid-turn trigger never fires (preserving the
-    /// historical between-turn-only behavior). Values outside `(0.0, 1.0]` are
-    /// treated as unset; [`load`](crate::config::load) warns about such values
-    /// once at startup, since this resolver runs in the per-call hot path and
-    /// must not log. The caller must additionally check
-    /// [`resolve_compact_enabled`](Self::resolve_compact_enabled), which is the
-    /// master switch for all compaction.
+    /// window. Defaults to 80% to protect long tool-call sequences. Invalid
+    /// explicit values disable this check. The caller must also check
+    /// [`resolve_compact_enabled`](Self::resolve_compact_enabled).
     pub fn resolve_mid_turn_compact_threshold(&self) -> Option<f64> {
         match self.mid_turn_compact_threshold {
             Some(t) if t > 0.0 && t <= 1.0 => Some(t),
+            None => Some(0.80),
             _ => None,
         }
     }

@@ -175,7 +175,7 @@ Accepted top-level keys:
 | `deny_repeated_reads`     | boolean | Legacy name: show a short warning for a repeated, unchanged text window. Reads always remain permitted. Tracks successful reads by canonical path and file CRC. Default: `true`.                     |
 | `show_cost_always`        | boolean | Show the session cost in the status bar even when it is `$0.0000` (for example when the model has no per-token pricing configured). Default: `false`, which hides the cost until it is above zero. |
 | `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `true`. When `false`, nothing is ever compacted automatically.            |
-| `mid_turn_compact_threshold` | number | Opt-in mid-turn compaction. Fraction of the context window (`0.0`–`1.0`) of real provider prompt pressure at which to compact *during* a turn, not just between turns. Unset by default, meaning no mid-turn compaction. Honored only when `compact_enabled` is `true`. Recommended starting value: `0.80`. See Mid-turn compaction below.            |
+| `mid_turn_compact_threshold` | number | Mid-turn compaction threshold as a fraction of the context window. Defaults to `0.80`. Honored only when `compact_enabled` is `true`. See Mid-turn compaction below. |
 | `always_show_welcome`     | boolean | Always show the welcome banner on startup, bypassing the one-shot marker file. Default: `false`.                                                                               |
 | `auto-update-themes`      | boolean | When `true`, always regenerate themes on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
 | `edit_system`             | string  | Edit system: `"hashedit"` (default and only mode). Legacy `"similarity"` settings select hashedit.                     |
@@ -219,33 +219,41 @@ boolean so the agent can bypass RTK for commands that need raw output.
 
 ## Mid-turn compaction
 
-By default zerostack only compacts the conversation *between* turns, after a
-response finishes, when the accumulated session history exceeds
-`context_window - reserve_tokens`. A single long turn (many tool calls and large
-tool results) can still blow past the model's real context limit before that
-check ever runs, because the in-flight tool traffic never enters the session's
-token estimate.
+Auto-compaction protects long tool-call sequences in both the TUI and Emacs.
+After each provider call, zerostack compares the provider-reported input tokens
+with `context_window`. When the ratio exceeds `mid_turn_compact_threshold`, it
+stops the current run, saves its progress, compacts the history, and resumes the
+same task. The threshold defaults to **0.80**. An explicit value overrides it.
 
-`mid_turn_compact_threshold` opts in to a second, *within-turn* check. On every
-provider call zerostack compares the real provider-reported prompt size against
-`context_window`; when the ratio crosses the threshold it stops the run at a
-clean boundary, compacts, and resumes the same task on the compacted history.
+A successful call below the threshold resets the recovery guard. Thus, a long
+turn can compact again when context grows. If the first call after compaction
+is still above the threshold, zerostack stops and reports that compaction did
+not give enough space. It does not repeat compaction without limit.
 
-- **Unset by default.** With no value set, behavior is unchanged: no mid-turn
-  compaction. Setting a value is the opt-in.
-- **Gated by `compact_enabled`.** `compact_enabled` is the master switch. If it
-  is `false`, `mid_turn_compact_threshold` is ignored and nothing compacts.
-- **Range.** A fraction in `(0.0, 1.0]`. An out-of-range value is ignored
-  (mid-turn compaction stays off) and zerostack prints a warning at startup
-  explaining the correct form, rather than failing silently. `0.80` is a
-  reasonable starting value; it leaves headroom below the
-  context window while still keeping the live prompt small enough to avoid the
-  attention degradation ("context rot") that large, full context windows suffer.
+If a provider rejects a request with a context-limit error, zerostack also
+attempts compaction and continuation. This covers a large tool result or a
+configured context window that is larger than the provider's actual limit.
+If the next request fails again before a successful call below the threshold,
+zerostack reports the error instead of retrying without limit. Compaction
+failures do not discard the saved conversation.
+
+- **Master switch.** `compact_enabled = false` disables automatic compaction,
+  including context-limit recovery. `--no-session` also disables it. The TUI
+  `/loop` mode uses its own loop controls and does not use these checks.
+- **Range.** Set a fraction in `(0.0, 1.0]`. An invalid explicit value disables
+  the pressure check. Context-limit recovery still applies when automatic
+  compaction is enabled.
+- **Headroom.** Use a threshold below `1.0` to leave space for new tool results
+  and output. Set `context_window` to the actual limit for your model.
+- **Between turns.** Zerostack also checks whether session context exceeds
+  `context_window - reserve_tokens` after a response finishes.
+- **Running sessions.** Restart a persistent session to load a new binary or
+  changed configuration. Installing a new binary does not update a running daemon.
 
 ```toml
 compact_enabled = true            # master switch (default true)
 context_window = 24576
-mid_turn_compact_threshold = 0.80 # compact mid-turn at 80% real prompt pressure
+mid_turn_compact_threshold = 0.80 # default: compact above 80% input pressure
 ```
 
 ## OpenAI API styles and custom headers

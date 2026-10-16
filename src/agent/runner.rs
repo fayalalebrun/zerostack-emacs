@@ -270,6 +270,20 @@ fn is_retryable_provider_error(message: &str) -> bool {
             .any(is_retryable_http_status)
 }
 
+pub fn is_context_limit_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "exceeds the context window",
+        "maximum context length",
+        "prompt is too long",
+        "input is too long",
+        "too large for model",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn is_non_retryable_provider_error(lower: &str) -> bool {
     [
         "context_length_exceeded",
@@ -1567,8 +1581,8 @@ mod tests {
     #[cfg(feature = "subagents")]
     use super::{SubagentLimits, subagent_cutoff_prompt, subagent_invalid_tool_feedback};
     use super::{
-        convert_history, prepare_retry_continuation, push_tool_call, retry_delay_ms,
-        streamed_assistant_content_has_output, streamed_provider_reasoning,
+        convert_history, is_context_limit_error, prepare_retry_continuation, push_tool_call,
+        retry_delay_ms, streamed_assistant_content_has_output, streamed_provider_reasoning,
         streamed_reasoning_text,
     };
     use crate::session::assistant_message_with_reasoning;
@@ -2236,6 +2250,28 @@ mod tests {
             matches!(&history[3], Message::Assistant(rig::message::AssistantMessage { content, .. }) if
             matches!(content.first().unwrap(), AssistantContent::Text(text) if text.text == "second half"))
         );
+    }
+
+    #[test]
+    fn context_limit_errors_are_distinct_from_other_request_errors() {
+        for message in [
+            "ProviderResponseError: {\"code\":\"context_length_exceeded\"}",
+            "Your input exceeds the context window of this model.",
+            "Maximum context length is 100000 tokens",
+            "Prompt is too long",
+            "Input is too long",
+        ] {
+            assert!(is_context_limit_error(message), "{message}");
+        }
+        for message in [
+            "invalid_request_error",
+            "invalid API key",
+            "rate limit",
+            "context window is 100000",
+            "connection reset",
+        ] {
+            assert!(!is_context_limit_error(message), "{message}");
+        }
     }
 
     #[test]
