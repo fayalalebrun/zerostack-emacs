@@ -166,6 +166,7 @@ Accepted top-level keys:
 | `goal_max_nudges`         | integer | Maximum automatic continuations when the active goal remains open at turn end. Default: `10`.                                                                               |
 | `temperature`             | number  | Model temperature value. Only configurable via the `--temperature` CLI flag (`0.0` to `2.0`). Config-file value is parsed but not currently applied.                        |
 | `extra_body`              | object  | Provider-specific JSON shallow-merged into every completion request body as a global default (e.g. OpenRouter `plugins` routing presets). A matching `quick_models` entry's `extra_body` overrides this. See Provider-specific request body parameters below. |
+| `service_tier` | string | Codex subscription processing tier: `standard` or `fast`. Fast mode uses credits at a higher rate. See Codex Fast mode below. |
 | `no_tools`                | boolean | Disable all tools. Default: `false`.                                                                                                                                        |
 | `no_context_files`        | boolean | Disable loading global/project `AGENTS.md`, `CLAUDE.md`, and `ARCHITECTURE.md` (if `archmd` feature enabled) context files. Default: `false`.                               |
 | `context_window`          | integer | Session context-window size used for status and auto-compaction. When unset, auto-detected from the selected model's catalog entry; falls back to `128000` if the model is not in the catalog. A value of `0` disables auto-compaction. |
@@ -349,6 +350,54 @@ global `extra_body` does not follow model switches, so prefer setting it per
 `quick_models` entry — bundled with the matching `provider`/`model` — when the
 parameter is tied to a specific provider.
 
+## Codex Fast mode
+
+For the `openai-codex` subscription provider, set the top-level processing tier:
+
+```toml
+provider = "openai-codex"
+model = "gpt-5.5"
+service_tier = "fast"
+```
+
+Use `--service-tier fast` to enable Fast mode for a process. Use
+`--service-tier standard` to override a configured Fast mode setting.
+The accepted values are `standard` and `fast` in both TOML and JSON.
+
+Fast mode requests faster processing for the same model. It is separate from
+reasoning effort and from the Codex-Spark model. **Fast mode uses subscription
+credits at a higher rate.** Model availability and usage rates depend on OpenAI.
+See the [Codex speed documentation](https://developers.openai.com/codex/speed/).
+The setting requests a tier; it does not confirm which tier the backend used.
+
+At startup, `--service-tier` overrides the saved session preference, which
+otherwise overrides the config setting. Interactive changes then override the
+startup setting. The preference is saved with the session unless `--no-session`
+is set. Old sessions without a preference use the config setting.
+
+Use `/fast on`, `/fast off`, or `/fast status` in the TUI or Emacs. `/fast` without
+an argument toggles the setting. Changes require an idle session. Fast mode
+controls require the `openai-codex` or `codex` subscription provider. The saved
+preference survives model/provider switches but does not affect other providers.
+Model and account eligibility are enforced by the backend; an unsupported request
+can fail rather than silently changing to another model or reasoning effort.
+
+The default TUI status bar and Emacs prompt show `fast (requested)` when enabled.
+Custom TUI layouts can add `{ item = "fast" }`. Emacs also offers
+`M-x zerostack-fast-mode` and `C-c /` → `fast` (Hydra key `f`). These indicators
+report the requested mode, not a tier confirmed by the backend. Cost estimates do
+not apply a Fast mode billing multiplier.
+
+An explicit setting overrides `extra_body.service_tier`: `fast` sends
+`"priority"`, and `standard` removes that field. When no typed setting is present,
+existing `extra_body` behavior remains unchanged. There is no per-quick-model
+typed tier setting.
+
+Fast mode applies to main-agent turns, including print and loop turns.
+This typed setting does not affect compaction, explore agents, or `/btw`.
+Process-isolated task subagents explicitly use standard processing, even when the parent or global
+config selects Fast mode. This avoids an implicit increase in their credit use.
+
 ## Status bar
 
 The status bar at the bottom is configurable through `[statusline]`: up to 3
@@ -462,6 +511,7 @@ Available items:
 | `compaction`          | Number of compactions (`cmp:<n>`). |
 | `btw`                 | `/btw` side-question token/cost usage. |
 | `reasoning`           | Shows `reasoning` when reasoning is enabled (hidden when off). |
+| `fast` | Shows `fast (requested)` when the session selects Codex Fast mode. Hidden for standard mode and other providers. |
 | `message_count`       | Number of messages in the session. |
 | `session_age`         | Time since the session was created (e.g. `5m`, `2h10m`). |
 | `session_updated`     | Time since the last message (same format). |

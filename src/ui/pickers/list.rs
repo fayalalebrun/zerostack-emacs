@@ -15,6 +15,7 @@ const BASE_COMMANDS: &[&str] = &[
     "/drop-all",
     "/editsys", // Hashedit is the only edit system.
     "/exit",
+    "/fast",
     "/rewind",
     "/goal",
     "/help",

@@ -288,6 +288,7 @@ async fn run_prompt(
             .as_deref(),
         temperature,
         extra_body,
+        None,
         #[cfg(feature = "mcp")]
         None::<&crate::extras::mcp::McpClientManager>,
     )

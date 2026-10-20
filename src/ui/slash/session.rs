@@ -100,9 +100,21 @@ async fn handle_sessions(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
         if sessions.is_empty() {
             write_ok(ctx.renderer, format!("no session matching '{}'", prefix));
         } else if sessions.len() == 1 {
-            if let Some(s) = sessions.into_iter().next() {
+            if let Some(mut s) = sessions.into_iter().next() {
+                // Resolve the client before replacing any live session state.
+                let client = crate::provider::create_client(
+                    &s.provider,
+                    ctx.cli.api_key.as_deref(),
+                    &ctx.cfg.custom_providers_map(),
+                    ctx.cfg.api_keys.as_ref(),
+                    Some(s.id.as_str()),
+                )?;
+                s.initialize_service_tier(ctx.cli, ctx.cfg);
                 let msg_count = s.messages.len();
                 *ctx.session = s;
+                *ctx.client = client;
+                *ctx.reasoning_enabled = ctx.session.reasoning_enabled;
+                ctx.rebuild_agent().await;
                 render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
                 write_ok(ctx.renderer, format!("loaded session ({} msgs)", msg_count));
             }

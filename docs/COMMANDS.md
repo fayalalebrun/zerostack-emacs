@@ -142,6 +142,7 @@ the chat directly.
 | `/btw <message>` | Ask a quick side question in parallel, without touching the main conversation. It forks the current context (including the main agent's in-flight turn, if any), answers using read-only tools (read/grep/find_files/list_dir, no writes or bash), and prints the answer inline. Works even while the main agent is running. Nothing is written to history; its token cost is shown separately as `btw:$…`. Ctrl-C cancels an in-flight `/btw` without disturbing the main agent. |
 | `/reasoning` | Toggle LLM reasoning on/off (requires model support). |
 | `/thinking` | Alias for `/reasoning`. |
+| `/fast [on\|off\|status]` | Set or inspect Codex Fast mode. With no argument, toggle it. Fast mode uses subscription credits at a higher rate. The preference persists with the session. |
 | `/review [msg]` | Run a one-shot code review. Submits a review message using the core system prompt, temporarily enforces readonly security mode, and restores the previous security mode afterward. Without a message, auto-generates one based on session and worktree context. |
 
 Before each successful compaction, zerostack archives the complete pre-compaction
@@ -286,6 +287,7 @@ The socket protocol is one escaped S-expression per line. Core client commands:
 | `(set-view :cols 120)` | Change markdown render width for later updates. |
 | `(provider :request 2 :provider "openai-codex")` | Switch this live Emacs session to another provider and reset the session model to that provider's configured/default model. Rejected while a prompt or loop is running. |
 | `(model :request 2 :model "gpt-5.5")` | Switch this live Emacs session to another model for the current provider. Rejected while a prompt or loop is running. |
+| `(fast :request 2 :state on)` | Request Codex Fast mode. Accepts `on`, `off`, `status`, or `toggle` (the default). Changes require an idle session; status queries do not. The preference persists unless `--no-session` is set. |
 | `(file-add :request 2 :path "/path/to/file")` | Queue a file for the next prompt. Text files become extra context; with feature `multimodal`, recognized images/audio/PDFs become media attachments. |
 | `(file-list :request 2)` | Return queued context files and media attachments as easy-parse item plists. |
 | `(file-drop :request 2 :path "/path/to/file")` | Remove one queued file/media attachment by path. `:index N` can be used with indexes from `file-list`. |
@@ -298,6 +300,14 @@ The socket protocol is one escaped S-expression per line. Core client commands:
 | `(permission-answer :request 9 :decision allow-once)` | Answer a permission prompt. Decisions are `allow-once`, `allow-always`, or `deny`; `allow-always` may include `:pattern "..."`. |
 | `(list-sessions :limit 50)` | Return live native Emacs sessions. |
 | `(dismiss-attention :session "...")` | Remove a session from the board Needs attention section. Defaults to the current session when `:session` is omitted. |
+
+Fast mode responses and session metadata include `:fast-mode-available` and
+`:fast-mode`. Availability here means that the selected provider is the Codex
+subscription provider; the backend still checks model and account eligibility.
+`:fast-mode` reports the requested mode, not a backend-confirmed processing tier.
+Changes broadcast a `fast-mode` event with these fields. Reconnect status restores
+them from the saved session preference. Switching to another provider hides the
+indicator without deleting the preference.
 
 Compaction completion events include the post-compaction `:tokens` and
 `:context-window` values. End-of-turn automatic compaction immediately continues
@@ -786,6 +796,7 @@ Command menu actions:
 | `model` | Switch the live session model for the current provider. This is session-local and does not rewrite config. |
 | `compact` | Ask zerostack to compact history, then rerender the buffer. |
 | `loop` | Start or stop the iterative loop. Starting prompts for objective, optional max iterations, and optional validation command. |
+| `fast` | Set Codex Fast mode to on/off or inspect status. Also available as `M-x zerostack-fast-mode`, `/fast [on\|off\|status]`, or Hydra key `f`. Fast mode increases subscription credit use. |
 | `skill` | Discover runtime skills from the same home/project skill roots and insert an explicit selected-skill directive into the input line. |
 | `artifact` | Open the most recent artifact. |
 | `log` | Open the stdout/stderr log file for a daemon launched by this buffer. |

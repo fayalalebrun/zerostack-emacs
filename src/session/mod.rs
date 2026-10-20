@@ -417,6 +417,9 @@ pub struct Session {
     pub subagents_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<CompactString>,
+    /// Requested Codex processing tier. Other providers ignore this preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<crate::config::ServiceTier>,
     /// Estimated tokens for the fixed request overhead that never lives in
     /// `messages` — system prompt, tool-use preamble, context files, memory.
     /// Used only before the first real calibration (see
@@ -458,6 +461,68 @@ fn encode_url(value: &str) -> String {
 }
 
 impl Session {
+    /// Apply startup precedence once. Later interactive changes override the CLI.
+    pub fn initialize_service_tier(&mut self, cli: &crate::cli::Cli, cfg: &crate::config::Config) {
+        self.service_tier = if cli.subagent_parent_session.is_some() {
+            Some(crate::config::ServiceTier::Standard)
+        } else {
+            cli.service_tier.or(self.service_tier).or(cfg.service_tier)
+        };
+    }
+
+    pub fn fast_mode_available(&self) -> bool {
+        matches!(self.provider.as_str(), "codex" | "openai-codex")
+    }
+
+    /// This reports the requested mode, not a tier confirmed by the backend.
+    pub fn fast_mode_requested(&self, cfg: &crate::config::Config) -> bool {
+        use crate::config::ServiceTier;
+        match self.service_tier.or(cfg.service_tier) {
+            Some(tier) => tier == ServiceTier::Fast,
+            None => crate::config::resolve_extra_body(cfg, &self.model)
+                .and_then(|body| {
+                    body.get("service_tier")
+                        .and_then(|tier| tier.as_str())
+                        .map(str::to_owned)
+                })
+                .is_some_and(|tier| matches!(tier.as_str(), "priority" | "fast")),
+        }
+    }
+
+    /// Return true for a setting change, or false for a read-only status query.
+    pub fn update_fast_mode(
+        &mut self,
+        action: &str,
+        cfg: &crate::config::Config,
+    ) -> anyhow::Result<bool> {
+        use crate::config::ServiceTier;
+        anyhow::ensure!(
+            self.fast_mode_available(),
+            "Fast mode is only available with the Codex subscription provider"
+        );
+        let enabled = match action {
+            "status" => return Ok(false),
+            "on" => true,
+            "off" => false,
+            "toggle" => !self.fast_mode_requested(cfg),
+            _ => anyhow::bail!("usage: /fast [on|off|status]"),
+        };
+        self.service_tier = Some(if enabled {
+            ServiceTier::Fast
+        } else {
+            ServiceTier::Standard
+        });
+        Ok(true)
+    }
+
+    pub fn fast_mode_message(&self, cfg: &crate::config::Config) -> &'static str {
+        if self.fast_mode_requested(cfg) {
+            "Fast mode: on (requested; higher subscription credit use)"
+        } else {
+            "Fast mode: off"
+        }
+    }
+
     pub fn estimate_tokens(text: &str) -> u64 {
         let mut wide: u64 = 0;
         let mut narrow: u64 = 0;
@@ -524,6 +589,7 @@ impl Session {
             #[cfg(feature = "subagents")]
             subagents_enabled: None,
             reasoning_effort: None,
+            service_tier: None,
             overhead_tokens: 0,
         }
     }

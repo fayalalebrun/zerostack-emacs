@@ -88,6 +88,7 @@ impl SlashCtx<'_> {
                 reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
+                self.session.service_tier,
                 #[cfg(feature = "mcp")]
                 self.mcp_manager,
             )
@@ -140,6 +141,7 @@ impl SlashCtx<'_> {
                 reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
+                self.session.service_tier,
                 #[cfg(feature = "mcp")]
                 self.mcp_manager,
             )
@@ -314,6 +316,7 @@ pub async fn handle_compress(
                 .as_deref(),
             temperature,
             extra_body,
+            session.service_tier,
             #[cfg(feature = "mcp")]
             mcp_manager,
         )
@@ -380,8 +383,8 @@ pub async fn handle_slash(
         "/provider" | "/model" | "/models" | "/models-add" | "/model-subagent"
         | "/models-subagent" => providers::handle(&parts, &mut ctx).await,
         "/theme" | "/regen-themes" => content::handle(&parts, &mut ctx).await,
-        "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys" | "/advisor"
-        | "/subagents" => settings::handle(&parts, &mut ctx).await,
+        "/fast" | "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys"
+        | "/advisor" | "/subagents" => settings::handle(&parts, &mut ctx).await,
         "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"
         | "/rewind" => session::handle(&parts, &mut ctx).await,
         "/goal" => goal::handle(&parts, &mut ctx).await,

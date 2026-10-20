@@ -58,6 +58,7 @@ pub async fn ensure_agent(
                 .as_deref(),
             temperature,
             extra_body,
+            session.service_tier,
             mcp_manager,
         )
         .await,
@@ -101,6 +102,7 @@ pub async fn ensure_agent(
                 .as_deref(),
             temperature,
             extra_body,
+            session.service_tier,
         )
         .await,
     );
@@ -702,6 +704,7 @@ async fn handle_agent_done(
                     .as_deref(),
                     temperature,
                     extra_body,
+                    session.service_tier,
                     #[cfg(feature = "mcp")]
                     mcp_manager,
                 )
@@ -805,6 +808,7 @@ async fn handle_agent_done(
                     .as_deref(),
                     temperature,
                     extra_body,
+                    session.service_tier,
                     #[cfg(feature = "mcp")]
                     mcp_manager,
                 )
@@ -857,6 +861,7 @@ async fn handle_agent_done(
                         .as_deref(),
                         temperature,
                         extra_body,
+                        session.service_tier,
                         #[cfg(feature = "mcp")]
                         mcp_manager,
                     )

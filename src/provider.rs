@@ -1748,6 +1748,33 @@ fn openai_reasoning_params(effort: Option<&str>) -> Option<serde_json::Value> {
         .map(|effort| serde_json::json!({ "reasoning": { "effort": effort } }))
 }
 
+/// Session changes override startup CLI/config settings and extra_body.
+/// Standard mode omits the field, as the Codex client does for the default tier.
+fn codex_request_params(
+    cli: &Cli,
+    cfg: &Config,
+    service_tier: Option<crate::config::ServiceTier>,
+    reasoning_effort: Option<&str>,
+    extra_body: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let params = merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body);
+    let Some(tier) = service_tier.or(cli.service_tier).or(cfg.service_tier) else {
+        return params;
+    };
+    let mut params = params
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    match tier {
+        crate::config::ServiceTier::Fast => {
+            params.insert("service_tier".to_string(), serde_json::json!("priority"));
+        }
+        crate::config::ServiceTier::Standard => {
+            params.remove("service_tier");
+        }
+    }
+    Some(serde_json::Value::Object(params))
+}
+
 /// Builds an OpenAiModel (Responses / Completions) into the matching OpenAiAgent.
 #[allow(clippy::too_many_arguments)]
 async fn build_openai_agent(
@@ -1762,6 +1789,7 @@ async fn build_openai_agent(
     reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
+    service_tier: Option<crate::config::ServiceTier>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> OpenAiAgent {
     match model {
@@ -1816,7 +1844,7 @@ async fn build_openai_agent(
                 sandbox,
                 reasoning_enabled,
                 temperature,
-                merge_extra_body(openai_reasoning_params(reasoning_effort), extra_body),
+                codex_request_params(cli, cfg, service_tier, reasoning_effort, extra_body),
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -1888,6 +1916,7 @@ pub async fn build_agent(
     reasoning_effort: Option<&str>,
     temperature: Option<f64>,
     extra_body: Option<serde_json::Value>,
+    service_tier: Option<crate::config::ServiceTier>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> AnyAgent {
     match model {
@@ -1921,6 +1950,7 @@ pub async fn build_agent(
                 reasoning_effort,
                 temperature,
                 extra_body,
+                service_tier,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -2286,6 +2316,131 @@ mod tests {
     };
     use bytes::Bytes;
     use serde_json::json;
+
+    #[test]
+    fn codex_service_tier_config_is_typed_and_optional() {
+        use crate::config::{Config, ServiceTier};
+
+        assert_eq!(
+            serde_json::from_value::<Config>(json!({}))
+                .unwrap()
+                .service_tier,
+            None
+        );
+        for (name, tier) in [
+            ("standard", ServiceTier::Standard),
+            ("fast", ServiceTier::Fast),
+        ] {
+            let cfg: Config = serde_json::from_value(json!({"service_tier": name})).unwrap();
+            assert_eq!(cfg.service_tier, Some(tier));
+            assert_eq!(serde_json::to_value(&cfg).unwrap()["service_tier"], name);
+            let cfg: Config = toml::from_str(&format!("service_tier = \"{name}\"\n")).unwrap();
+            assert_eq!(cfg.service_tier, Some(tier));
+        }
+        assert!(serde_json::from_value::<Config>(json!({"service_tier": "invalid"})).is_err());
+        assert!(toml::from_str::<Config>("service_tier = \"invalid\"").is_err());
+    }
+
+    #[test]
+    fn codex_service_tier_reaches_prepared_request_and_preserves_reasoning() {
+        use crate::{
+            cli::Cli,
+            config::{Config, ServiceTier},
+        };
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from(["zerostack"]).unwrap();
+        let cfg = Config {
+            service_tier: Some(ServiceTier::Fast),
+            ..Default::default()
+        };
+        let params = super::codex_request_params(
+            &cli,
+            &cfg,
+            None,
+            Some("high"),
+            Some(json!({"text": {"verbosity": "low"}})),
+        )
+        .unwrap();
+        let patched = ensure_codex_instructions(Bytes::from(params.to_string()), None).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(body["service_tier"], "priority");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["text"]["verbosity"], "low");
+        assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn codex_service_tier_cli_overrides_config_and_extra_body() {
+        use crate::{
+            cli::Cli,
+            config::{Config, ServiceTier},
+        };
+        use clap::Parser;
+
+        for (arg, configured, expected) in [
+            ("fast", ServiceTier::Standard, Some("priority")),
+            ("standard", ServiceTier::Fast, None),
+        ] {
+            let cli = Cli::try_parse_from(["zerostack", "--service-tier", arg]).unwrap();
+            let cfg = Config {
+                service_tier: Some(configured),
+                ..Default::default()
+            };
+            let body = super::codex_request_params(
+                &cli,
+                &cfg,
+                None,
+                Some("medium"),
+                Some(json!({"service_tier": "flex"})),
+            )
+            .unwrap();
+            assert_eq!(
+                body.get("service_tier").and_then(|value| value.as_str()),
+                expected
+            );
+            assert_eq!(body["reasoning"]["effort"], "medium");
+        }
+    }
+
+    #[test]
+    fn codex_service_tier_session_change_overrides_original_cli() {
+        use crate::config::{Config, ServiceTier};
+        let cli = crate::cli::Cli {
+            service_tier: Some(ServiceTier::Fast),
+            ..Default::default()
+        };
+        let cfg = Config {
+            service_tier: Some(ServiceTier::Fast),
+            ..Default::default()
+        };
+        let body = super::codex_request_params(
+            &cli,
+            &cfg,
+            Some(ServiceTier::Standard),
+            Some("high"),
+            Some(json!({"service_tier": "priority"})),
+        )
+        .unwrap();
+        assert!(body.get("service_tier").is_none());
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn codex_service_tier_unset_preserves_existing_request_params() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(["zerostack"]).unwrap();
+        let cfg = crate::config::Config::default();
+        assert_eq!(
+            super::codex_request_params(&cli, &cfg, None, None, None),
+            None
+        );
+        let extra = json!({"service_tier": "priority"});
+        assert_eq!(
+            super::codex_request_params(&cli, &cfg, None, None, Some(extra.clone())),
+            Some(extra)
+        );
+    }
 
     #[test]
     fn codex_removes_uri_format_from_linear_tools() {

@@ -379,3 +379,20 @@ fn session_age_is_short_duration() {
     let text = line_text(&statusline::build_lines(&spec, &session, &ctx())[0]);
     assert!(text.ends_with('s') || text.ends_with('m'), "got {text:?}");
 }
+
+#[test]
+fn fast_mode_statusline_is_visible_only_for_codex_fast_requests() {
+    let mut session = Session::new("openai-codex", "gpt-5.5", 1000);
+    let spec = statusline::default_spec();
+    assert!(!line_text(&statusline::build_lines(&spec, &session, &ctx())[0]).contains("fast"));
+    session.service_tier = Some(crate::config::ServiceTier::Fast);
+    assert!(
+        line_text(&statusline::build_lines(&spec, &session, &ctx())[0])
+            .contains("fast (requested)")
+    );
+    session.provider = "openai".into();
+    assert!(!line_text(&statusline::build_lines(&spec, &session, &ctx())[0]).contains("fast"));
+    session.provider = "codex".into();
+    session.service_tier = Some(crate::config::ServiceTier::Standard);
+    assert!(!line_text(&statusline::build_lines(&spec, &session, &ctx())[0]).contains("fast"));
+}

@@ -79,3 +79,6 @@ mod worktree_tests;
 
 #[cfg(test)]
 mod file_tools_tests;
+
+#[cfg(test)]
+mod fast_mode_tests;

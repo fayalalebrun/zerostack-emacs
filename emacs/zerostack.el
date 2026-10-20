@@ -287,6 +287,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
 (defvar-local zerostack--loop-active nil)
 (defvar-local zerostack--loop-label nil)
 (defvar-local zerostack--thinking-level "on")
+(defvar-local zerostack--fast-mode-available nil)
+(defvar-local zerostack--fast-mode nil)
 (defvar-local zerostack--reasoning-effort-supported nil)
 (defvar-local zerostack--reasoning-effort nil)
 (defvar-local zerostack--reasoning-efforts nil)
@@ -358,6 +360,8 @@ math macros while keeping the original LaTeX source and artifact link intact."
   (setq-local zerostack--loop-active nil)
   (setq-local zerostack--loop-label nil)
   (setq-local zerostack--thinking-level "on")
+  (setq-local zerostack--fast-mode-available nil)
+  (setq-local zerostack--fast-mode nil)
   (setq-local zerostack--reasoning-effort-supported nil)
   (setq-local zerostack--reasoning-effort nil)
   (setq-local zerostack--reasoning-efforts nil)
@@ -2277,6 +2281,19 @@ Return non-nil when DIRECTORY was newly added."
   "Return server-advertised reasoning efforts, with an old-server fallback."
   (or zerostack--reasoning-efforts '("minimal" "low" "medium" "high")))
 
+(defun zerostack-fast-mode (&optional state)
+  "Set Codex Fast mode to STATE: on, off, status, or toggle.
+Fast mode uses subscription credits at a higher rate.  A nil STATE toggles."
+  (interactive
+   (list (completing-read "Codex Fast mode (higher credit use): "
+                          '("on" "off" "status") nil t nil nil
+                          (if zerostack--fast-mode "off" "on"))))
+  (let ((state (or state "toggle")))
+    (unless (member state '("on" "off" "status" "toggle"))
+      (user-error "Usage: /fast [on|off|status]"))
+    (zerostack--send-command 'fast :request (zerostack--next-request)
+                             :state state)))
+
 (defun zerostack-thinking-menu (&optional level)
   "Set native zerostack thinking/reasoning LEVEL."
   (interactive)
@@ -2663,7 +2680,7 @@ _u_ redo        _t_ thinking     _m_ model               _M_ MCP
 _c_ compact     _i_ timing       _e_ subagents           _v_ view
 _g_ goal        _k_ skill        _P_ subagent provider   _h_ hydrate
 _G_ clear goal  _a_ attach       _S_ subagent models     _L_ log
-_o_ artifact                                              _R_ restart
+_o_ artifact    _f_ fast mode                             _R_ restart
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
@@ -2675,6 +2692,7 @@ _o_ artifact                                              _R_ restart
     ("l" zerostack-loop)
     ("h" zerostack-rerun-hydrate)
     ("t" zerostack-thinking-menu)
+    ("f" zerostack-fast-mode)
     ("i" zerostack-timing)
     ("p" zerostack-provider-menu)
     ("m" zerostack-model-menu)
@@ -2697,7 +2715,7 @@ _o_ artifact                                              _R_ restart
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking" "timing"
+  (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking" "fast" "timing"
                     "provider" "model" "subagents" "subagent-provider" "subagent-model" "goal"
                     "clear-goal" "hydrate" "tools" "mcp" "view" "artifact" "log" "restart"))
          (choice (completing-read "Zerostack command: " commands nil t)))
@@ -2709,6 +2727,7 @@ _o_ artifact                                              _R_ restart
       ("redo" (call-interactively #'zerostack-redo))
       ("loop" (call-interactively #'zerostack-loop))
       ("thinking" (call-interactively #'zerostack-thinking-menu))
+      ("fast" (call-interactively #'zerostack-fast-mode))
       ("timing" (zerostack-timing))
       ("provider" (call-interactively #'zerostack-provider-menu))
       ("model" (call-interactively #'zerostack-model-menu))
@@ -2835,6 +2854,9 @@ _o_ artifact                                              _R_ restart
       ("/goal" (zerostack-goal nil))
       ((or "/tools" "/list-tools") (zerostack-list-tools))
       ("/mcp" (zerostack-mcp))
+      ("/fast"
+       (when (cdr args) (user-error "Usage: /fast [on|off|status]"))
+       (zerostack-fast-mode (car args)))
       ((or "/thinking" "/reasoning")
        (if (car args)
            (zerostack-thinking-menu (car args))
@@ -2871,7 +2893,7 @@ _o_ artifact                                              _R_ restart
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
    (zerostack--set-notice
-    "commands: C-c / opens skill, attach, compact, rewind, redo, loop, thinking, provider, model, mcp, view, artifact, restart"))
+    "commands: C-c / opens skill, attach, compact, rewind, redo, loop, thinking, fast, provider, model, mcp, view, artifact, restart"))
 
 (defun zerostack-restart-daemon ()
   "Restart this buffer's zerostack daemon without closing the buffer."
@@ -3039,6 +3061,10 @@ _o_ artifact                                              _R_ restart
     (setq zerostack--context-window window))
   (when-let ((level (plist-get plist :thinking)))
     (setq zerostack--thinking-level (format "%s" level)))
+  (when (plist-member plist :fast-mode-available)
+    (setq zerostack--fast-mode-available (eq (plist-get plist :fast-mode-available) t)))
+  (when (plist-member plist :fast-mode)
+    (setq zerostack--fast-mode (eq (plist-get plist :fast-mode) t)))
   (when (plist-member plist :reasoning-effort-supported)
     (setq zerostack--reasoning-effort-supported
           (not (null (plist-get plist :reasoning-effort-supported)))))
@@ -3121,6 +3147,8 @@ _o_ artifact                                              _R_ restart
      (zerostack--flush-backfill)
      (zerostack--replace-lines (or (plist-get plist :replace-from) 0)
                                (or (plist-get plist :lines) nil)))
+    ('fast-mode
+     (zerostack--update-provider-model plist))
     ('activity-row
      (zerostack--update-activity-row plist))
     ('tool-row
@@ -4102,6 +4130,8 @@ inserted into the transcript."
    (delq nil
          (list zerostack--notice
                zerostack--status
+               (and zerostack--fast-mode-available zerostack--fast-mode
+                    "fast (requested)")
                (and zerostack--reasoning-effort-supported zerostack--reasoning-effort
                     (format "reasoning:%s" zerostack--reasoning-effort))
                (and zerostack--thinking-level

@@ -117,6 +117,13 @@ pub struct Cli {
     )]
     pub reasoning_effort: Option<String>,
 
+    #[arg(
+        long = "service-tier",
+        value_enum,
+        help = "Codex processing tier (fast uses subscription credits at a higher rate)"
+    )]
+    pub service_tier: Option<crate::config::ServiceTier>,
+
     #[arg(short = 't', long = "tools", help = "Allowlist specific tools")]
     pub tools: Vec<String>,
 
@@ -544,6 +551,24 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command, ConfigCommand};
+
+    #[test]
+    fn service_tier_accepts_only_standard_and_fast() {
+        use crate::config::ServiceTier;
+
+        assert_eq!(
+            Cli::try_parse_from(["zerostack"]).unwrap().service_tier,
+            None
+        );
+        for (value, expected) in [
+            ("standard", ServiceTier::Standard),
+            ("fast", ServiceTier::Fast),
+        ] {
+            let cli = Cli::try_parse_from(["zerostack", "--service-tier", value]).unwrap();
+            assert_eq!(cli.service_tier, Some(expected));
+        }
+        assert!(Cli::try_parse_from(["zerostack", "--service-tier", "invalid"]).is_err());
+    }
 
     #[test]
     fn parses_board_list() {

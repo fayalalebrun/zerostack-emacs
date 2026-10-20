@@ -6,6 +6,7 @@ use crate::ui::slash::{SlashCtx, write_error, write_ok, write_result};
 pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     match parts[0] {
         "/reasoning" | "/thinking" => handle_reasoning(parts, ctx).await,
+        "/fast" => handle_fast(parts, ctx).await,
         "/mode" => handle_mode(parts, ctx).await,
         "/toggle" => handle_toggle(parts, ctx).await,
         #[cfg(feature = "subagents")]
@@ -37,6 +38,40 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
         }
         _ => Ok(()),
     }
+}
+
+async fn handle_fast(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
+    let action = parts.get(1).copied().unwrap_or("toggle");
+    if parts.len() > 2 {
+        write_error(ctx.renderer, "usage: /fast [on|off|status]");
+        return Ok(());
+    }
+    if *ctx.is_running && action != "status" {
+        write_error(
+            ctx.renderer,
+            "cannot change Fast mode while the agent is running",
+        );
+        return Ok(());
+    }
+    let previous = ctx.session.service_tier;
+    match ctx.session.update_fast_mode(action, ctx.cfg) {
+        Ok(true) => {
+            if !ctx.cli.no_session
+                && let Err(error) = crate::session::storage::save_session(ctx.session)
+            {
+                ctx.session.service_tier = previous;
+                return Err(error);
+            }
+            ctx.rebuild_agent().await;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            write_error(ctx.renderer, error);
+            return Ok(());
+        }
+    }
+    write_ok(ctx.renderer, ctx.session.fast_mode_message(ctx.cfg));
+    Ok(())
 }
 
 #[cfg(feature = "subagents")]

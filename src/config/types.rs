@@ -3,6 +3,14 @@ use std::collections::HashMap;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
+/// Processing tier requested for the Codex subscription provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    Standard,
+    Fast,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuickModelConfig {
     pub provider: CompactString,

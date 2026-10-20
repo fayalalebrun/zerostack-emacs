@@ -130,6 +130,7 @@ async fn apply_model(ctx: &mut SlashCtx<'_>, model_id: &str) {
             .as_deref(),
             temperature,
             extra_body,
+            ctx.session.service_tier,
             #[cfg(feature = "mcp")]
             ctx.mcp_manager,
         )

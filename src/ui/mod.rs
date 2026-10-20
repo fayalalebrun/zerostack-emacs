@@ -756,6 +756,7 @@ pub async fn run_interactive(
     status_signals: Option<StatusSignals>,
     #[cfg(feature = "advisor")] mut handoff_rx: Option<crate::extras::advisor::HandoffReceiver>,
 ) -> anyhow::Result<()> {
+    session.initialize_service_tier(cli, cfg);
     let _guard = TerminalGuard::new()?;
     crate::startup_profile::mark("ui:terminal_ready");
 
@@ -956,6 +957,7 @@ pub async fn run_interactive(
                         .as_deref(),
                         temperature,
                         extra_body,
+                        session.service_tier,
                         #[cfg(feature = "mcp")]
                         mcp_ref,
                     )
@@ -1005,6 +1007,7 @@ pub async fn run_interactive(
                         .as_deref(),
                         temperature,
                         extra_body,
+                        session.service_tier,
                         #[cfg(feature = "mcp")]
                         mcp_ref,
                     )
@@ -1072,6 +1075,7 @@ pub async fn run_interactive(
         let client_clone = client.clone();
         let session_model = session.model.to_string();
         let session_provider = session.provider.to_string();
+        let session_service_tier = session.service_tier;
         let cli_clone = cli.clone();
         let cfg_clone = cfg.clone();
         let context_clone = context.clone();
@@ -1112,6 +1116,7 @@ pub async fn run_interactive(
                 reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
+                session_service_tier,
                 #[cfg(feature = "mcp")]
                 mcp.as_ref(),
             )
@@ -1228,6 +1233,7 @@ pub async fn run_interactive(
                                                 model, cli, cfg, context,
                                                 permission.clone(), ask_tx.clone(), sandbox.clone(),
                                                 reasoning_enabled, reasoning_effort.as_deref(), temperature, extra_body,
+                                                session.service_tier,
                                                 mcp_manager.as_ref(),
                                             ).await);
                                             renderer.write_line(&format!("authorized and connected '{}'", server), C_AGENT)?;
@@ -1695,6 +1701,7 @@ pub async fn run_interactive(
                                                     .as_deref(),
                                                     temperature,
                                                     extra_body,
+                                                    session.service_tier,
                                                     #[cfg(feature = "mcp")] mcp_ref,
                                                 ).await);
                                                 render_session(&mut renderer, session, cli, cfg, context)?;

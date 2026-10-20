@@ -430,6 +430,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    session.initialize_service_tier(&cli, &cfg);
+
     crate::agent::tools::goal::set_goal_state(session.goal.clone());
     #[cfg(feature = "subagents")]
     crate::extras::subagents::set_enabled(session.resolve_subagents_enabled(&cfg));
@@ -842,6 +844,7 @@ async fn main() -> anyhow::Result<()> {
                 reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
+                session.service_tier,
                 #[cfg(feature = "mcp")]
                 None,
             )
@@ -929,6 +932,7 @@ async fn main() -> anyhow::Result<()> {
                 reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
+                session.service_tier,
                 #[cfg(feature = "mcp")]
                 None,
             )

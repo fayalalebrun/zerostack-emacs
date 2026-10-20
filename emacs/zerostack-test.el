@@ -3188,6 +3188,53 @@
       (should (equal (plist-get opened :id) "session-id"))
       (should (equal (plist-get opened :cwd) "/repo")))))
 
+(ert-deftest zerostack-test-fast-mode-sends-valid-commands-only ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (dolist (state '("on" "off" "status" nil))
+       (zerostack-fast-mode state))
+     (should (equal (mapcar (lambda (form) (plist-get (cdr form) :state))
+                           (zerostack-test--sent-forms (copy-sequence sent)))
+                    '("on" "off" "status" "toggle")))
+     (should-error (zerostack-fast-mode "invalid") :type 'user-error)
+     (should (= (length sent) 4)))))
+
+(ert-deftest zerostack-test-fast-slash-dispatch-and-argument-validation ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (dolist (command '("/fast" "/fast on" "/fast off" "/fast status"))
+       (zerostack--dispatch-slash command))
+     (should (equal (mapcar (lambda (form) (plist-get (cdr form) :state))
+                           (zerostack-test--sent-forms (copy-sequence sent)))
+                    '("toggle" "on" "off" "status")))
+     (should-error (zerostack--dispatch-slash "/fast on extra") :type 'user-error)
+     (should (= (length sent) 4)))))
+
+(ert-deftest zerostack-test-fast-mode-status-reconnect-and-events-update-prompt ()
+  (zerostack-test--with-buffer
+   (zerostack--handle-status '(:session (:provider "openai-codex" :model "gpt-5.5"
+                                                 :fast-mode-available t :fast-mode t)))
+   (should zerostack--fast-mode)
+   (should (string-match-p "fast (requested)" (zerostack--prompt-prefix)))
+   (zerostack--handle-event '(:type fast-mode :fast-mode-available t :fast-mode nil))
+   (should-not zerostack--fast-mode)
+   (should-not (string-match-p "fast (requested)" (zerostack--prompt-prefix)))
+   (zerostack--handle-ok '(:provider "anthropic" :model "claude"
+                                   :fast-mode-available nil :fast-mode nil))
+   (should-not zerostack--fast-mode-available)
+   (zerostack--handle-ok '(:provider "openai-codex" :model "gpt-5.4"
+                                   :fast-mode-available t :fast-mode t))
+   (should zerostack--fast-mode-available)
+   (should zerostack--fast-mode)))
+
+(ert-deftest zerostack-test-fast-mode-status-does-not-clear-running-state ()
+  (zerostack-test--with-buffer
+   (zerostack--set-thinking t)
+   (zerostack--handle-ok '(:fast-mode-available t :fast-mode t :message "Fast mode: on"))
+   (should zerostack--thinking)))
+
 (provide 'zerostack-test)
 
 ;;; zerostack-test.el ends here

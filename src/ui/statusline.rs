@@ -240,6 +240,9 @@ fn resolve_item(
             .or_else(|_| std::env::var("USERNAME"))
             .ok()
             .filter(|u| !u.is_empty()),
+        "fast" => (session.fast_mode_available()
+            && session.service_tier == Some(crate::config::ServiceTier::Fast))
+        .then(|| "fast (requested)".to_string()),
         "reasoning" => session.reasoning_enabled.then(|| "reasoning".to_string()),
         "tokens_input" => (session.total_input_tokens > 0 || always)
             .then(|| fmt_tokens(session.total_input_tokens)),
@@ -516,6 +519,8 @@ pub fn default_spec() -> StatusLineConfig {
         seg("git_changes", Some("yellow")),
         sep("  |  "),
         seg("model", Some("white")),
+        sep(" "),
+        seg("fast", Some("yellow")),
         sep("  |  "),
         seg("context_used", Some("green")),
         sep("/"),

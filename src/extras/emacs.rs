@@ -67,6 +67,10 @@ mod imp {
         pub reasoning_effort: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub reasoning_efforts: Vec<String>,
+        #[serde(default)]
+        pub fast_mode_available: bool,
+        #[serde(default)]
+        pub fast_mode: bool,
     }
 
     fn default_thinking_level() -> String {
@@ -784,13 +788,14 @@ mod imp {
         cli: Cli,
         cfg: Config,
         context: ContextFiles,
-        session: Session,
+        mut session: Session,
         permission: Option<PermCheck>,
         ask_tx: Option<AskSender>,
         sandbox: Sandbox,
         status_signals: Option<StatusSignals>,
         read_only: bool,
     ) -> anyhow::Result<(Arc<Server>, Registration, UnixListener)> {
+        session.initialize_service_tier(&cli, &cfg);
         let initial_reasoning_enabled = session.reasoning_enabled;
         let initial_reasoning_effort = session.reasoning_effort.clone();
         let (registration, listener) = Registration::create(&session)?;
@@ -1034,6 +1039,9 @@ mod imp {
                 reasoning_effort_supported: false,
                 reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
+                fast_mode_available: session.fast_mode_available(),
+                fast_mode: session.fast_mode_available()
+                    && session.service_tier == Some(crate::config::ServiceTier::Fast),
             }
         }
     }
@@ -1121,6 +1129,8 @@ mod imp {
         async fn update_meta_from_session(&self) {
             let session = self.session.lock().await;
             let mut meta = SessionMeta::from_session(&session, &self.socket_path);
+            meta.fast_mode =
+                session.fast_mode_available() && session.fast_mode_requested(&self.cfg);
             let mutable = self.mutable.lock().await;
             if let Some(last_event_at) = mutable.last_event_at.clone() {
                 meta.updated_at = last_event_at;
@@ -1358,6 +1368,7 @@ mod imp {
             "goal" => handle_goal(&server, &cmd, out).await,
             "mcp" => handle_mcp(&server, &cmd, out).await,
             "thinking" | "reasoning" => handle_thinking(&server, &cmd, out).await,
+            "fast" => handle_fast(&server, &cmd, out).await,
             "loop-start" => handle_loop_start(server.clone(), &cmd, out).await,
             "loop-stop" => handle_loop_stop(&server, &cmd, out).await,
             "loop-status" => handle_loop_status(&server, &cmd, out).await,
@@ -1699,12 +1710,70 @@ mod imp {
             out,
             request_arg(cmd),
             format!(
-                " :provider {} :model {}{} :message {}",
+                " :provider {} :model {}{}{} :message {}",
                 sexp_quote(&provider),
                 sexp_quote(&model),
                 reasoning_effort_fields(&provider, &model, effort.as_deref()),
+                fast_mode_fields(&*server.session.lock().await, &server.cfg),
                 sexp_quote(&message),
             ),
+        )
+        .await;
+        Ok(())
+    }
+
+    fn fast_mode_fields(session: &Session, cfg: &Config) -> String {
+        format!(
+            " :fast-mode-available {} :fast-mode {}",
+            if session.fast_mode_available() {
+                "t"
+            } else {
+                "nil"
+            },
+            if session.fast_mode_available() && session.fast_mode_requested(cfg) {
+                "t"
+            } else {
+                "nil"
+            },
+        )
+    }
+
+    async fn handle_fast(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        let action = string_arg(cmd, "state")
+            .or_else(|| atom_arg(cmd, "state"))
+            .unwrap_or_else(|| "toggle".to_string());
+        if action != "status" {
+            ensure_idle_for_switch(server, "Fast mode").await?;
+        }
+        let (changed, fields, message) = {
+            let mut session = server.session.lock().await;
+            let previous = session.service_tier;
+            let changed = session.update_fast_mode(&action, &server.cfg)?;
+            if changed
+                && !server.cli.no_session
+                && let Err(error) = crate::session::storage::save_session(&session)
+            {
+                session.service_tier = previous;
+                return Err(error);
+            }
+            (
+                changed,
+                fast_mode_fields(&session, &server.cfg),
+                session.fast_mode_message(&server.cfg),
+            )
+        };
+        if changed {
+            server.update_meta_from_session().await;
+            server.broadcast_event("fast-mode", fields.clone()).await;
+        }
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!("{} :message {}", fields, sexp_quote(message)),
         )
         .await;
         Ok(())
@@ -2014,10 +2083,11 @@ mod imp {
             out,
             request_arg(cmd),
             format!(
-                " :provider {} :model {}{} :message {}",
+                " :provider {} :model {}{}{} :message {}",
                 sexp_quote(&provider),
                 sexp_quote(&model),
                 reasoning_effort_fields(&provider, &model, effort.as_deref()),
+                fast_mode_fields(&*server.session.lock().await, &server.cfg),
                 sexp_quote(&message),
             ),
         )
@@ -3403,7 +3473,10 @@ mod imp {
     ) -> anyhow::Result<()> {
         let mut meta = {
             let session = server.session.lock().await;
-            SessionMeta::from_session(&session, &server.socket_path)
+            let mut meta = SessionMeta::from_session(&session, &server.socket_path);
+            meta.fast_mode =
+                session.fast_mode_available() && session.fast_mode_requested(&server.cfg);
+            meta
         };
         {
             let mutable = server.mutable.lock().await;
@@ -3637,7 +3710,7 @@ mod imp {
             let session = server.session.lock().await;
             session.model.to_string()
         });
-        let (temperature, extra_body, reasoning_effort) = {
+        let (temperature, extra_body, reasoning_effort, service_tier) = {
             let session = server.session.lock().await;
             let temperature = config::resolve_temperature(&server.cli, &server.cfg, &session.model);
             let extra_body = config::resolve_extra_body(&server.cfg, &session.model);
@@ -3652,7 +3725,12 @@ mod imp {
                     )
                 })
             };
-            (temperature, extra_body, reasoning_effort)
+            (
+                temperature,
+                extra_body,
+                reasoning_effort,
+                session.service_tier,
+            )
         };
         let (reasoning_enabled, finalizing) = {
             let mutable = server.mutable.lock().await;
@@ -3691,6 +3769,7 @@ mod imp {
                 reasoning_effort.as_deref(),
                 temperature,
                 extra_body,
+                service_tier,
                 #[cfg(feature = "mcp")]
                 mcp_guard.as_ref(),
             )
@@ -7026,7 +7105,7 @@ mod imp {
 
     fn meta_to_sexp(meta: &SessionMeta) -> String {
         format!(
-            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {} :reasoning-efforts {} :activity {})",
+            "(:session {} :pid {} :cwd {} :model {} :provider {} :created-at {} :updated-at {} :title {} :tokens {} :reasoning-tokens {} :context-window {} :protocol {} :socket {} :thinking {} :reasoning-effort-supported {} :reasoning-effort {} :reasoning-efforts {} :fast-mode-available {} :fast-mode {} :activity {})",
             sexp_quote(&meta.session_id),
             meta.pid,
             sexp_quote(&meta.cwd),
@@ -7051,6 +7130,8 @@ mod imp {
                 .map(sexp_quote)
                 .unwrap_or_else(|| "nil".to_string()),
             string_list_to_sexp(&meta.reasoning_efforts),
+            if meta.fast_mode_available { "t" } else { "nil" },
+            if meta.fast_mode { "t" } else { "nil" },
             meta.activity
                 .as_deref()
                 .map(sexp_quote)
@@ -9704,6 +9785,113 @@ mod imp {
             let legacy = serde_json::json!({"session_id":"old", "pid":1, "cwd":"/tmp", "model":"test", "provider":"test", "created_at":"now", "updated_at":"now", "title":"test", "tokens":0, "context_window":0, "protocol":1, "socket":"/tmp/sock"});
             let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
             assert!(meta.activity.is_none());
+        }
+
+        #[tokio::test]
+        async fn fast_mode_protocol_changes_state_broadcasts_and_restores_status() {
+            let (server, _registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            server.session.lock().await.provider = "openai-codex".into();
+            let mut events = server.events.subscribe();
+            let (tx, mut rx) = mpsc::channel(8);
+            for (action, expected) in [("on", true), ("status", true), ("off", false)] {
+                let cmd = parse_command(&format!("(fast :request 1 :state {action})")).unwrap();
+                handle_fast(&server, &cmd, &tx).await.unwrap();
+                let response = rx.recv().await.unwrap();
+                assert!(response.contains(":fast-mode-available t"), "{response}");
+                assert!(
+                    response.contains(if expected {
+                        ":fast-mode t"
+                    } else {
+                        ":fast-mode nil"
+                    }),
+                    "{response}"
+                );
+                assert_eq!(
+                    server.session.lock().await.service_tier,
+                    Some(if expected {
+                        crate::config::ServiceTier::Fast
+                    } else {
+                        crate::config::ServiceTier::Standard
+                    })
+                );
+                if action == "status" {
+                    assert!(events.try_recv().is_err());
+                } else {
+                    assert!(events.recv().await.unwrap().contains(":type fast-mode"));
+                }
+                handle_status(&server, &parse_command("(status :request 2)").unwrap(), &tx)
+                    .await
+                    .unwrap();
+                let status = rx.recv().await.unwrap();
+                assert!(
+                    status.contains(if expected {
+                        ":fast-mode t"
+                    } else {
+                        ":fast-mode nil"
+                    }),
+                    "{status}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn fast_mode_protocol_rejects_busy_invalid_and_non_codex_changes() {
+            let (server, _registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            let (tx, mut rx) = mpsc::channel(8);
+            let on = parse_command("(fast :state on)").unwrap();
+            assert!(handle_fast(&server, &on, &tx).await.is_err());
+            server.session.lock().await.provider = "codex".into();
+            server.mutable.lock().await.running = true;
+            assert!(handle_fast(&server, &on, &tx).await.is_err());
+            assert_eq!(server.session.lock().await.service_tier, None);
+            handle_fast(
+                &server,
+                &parse_command("(fast :state status)").unwrap(),
+                &tx,
+            )
+            .await
+            .unwrap();
+            assert!(rx.recv().await.unwrap().contains(":fast-mode nil"));
+            server.mutable.lock().await.running = false;
+            assert!(
+                handle_fast(
+                    &server,
+                    &parse_command("(fast :state invalid)").unwrap(),
+                    &tx
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(server.session.lock().await.service_tier, None);
+        }
+
+        #[test]
+        fn fast_mode_metadata_keeps_saved_preference_and_hides_it_for_other_providers() {
+            let mut session = Session::new("codex", "gpt-5.5", 1000);
+            session.service_tier = Some(crate::config::ServiceTier::Fast);
+            let saved = serde_json::to_string(&session).unwrap();
+            let mut session: Session = serde_json::from_str(&saved).unwrap();
+            let meta = SessionMeta::from_session(&session, Path::new("/tmp/unused-socket"));
+            assert!(meta.fast_mode);
+            assert!(meta.fast_mode_available);
+            let encoded = meta_to_sexp(&meta);
+            assert!(encoded.contains(":fast-mode-available t :fast-mode t"));
+            let mut legacy = serde_json::to_value(&meta).unwrap();
+            legacy.as_object_mut().unwrap().remove("fast_mode");
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("fast_mode_available");
+            let legacy: SessionMeta = serde_json::from_value(legacy).unwrap();
+            assert!(!legacy.fast_mode);
+            assert!(!legacy.fast_mode_available);
+            session.provider = "anthropic".into();
+            let meta = SessionMeta::from_session(&session, Path::new("/tmp/unused-socket"));
+            assert!(!meta.fast_mode);
+            assert!(!meta.fast_mode_available);
+            assert_eq!(session.service_tier, Some(crate::config::ServiceTier::Fast));
         }
 
         fn test_server(
