@@ -188,18 +188,42 @@ mod imp {
         session.needs_compaction(reserve)
     }
 
+    fn should_recover_context_limit(
+        message: &str,
+        cfg: &Config,
+        no_session: bool,
+        awaiting_relief: bool,
+    ) -> bool {
+        cfg.resolve_compact_enabled()
+            && !no_session
+            && !awaiting_relief
+            && crate::agent::runner::is_context_limit_error(message)
+    }
+
     fn should_mid_turn_compact(
         input_tokens: u64,
         context_window: u64,
         cfg: &Config,
-        already_compacted: bool,
-    ) -> Option<f64> {
-        if already_compacted || !cfg.resolve_compact_enabled() || context_window == 0 {
-            return None;
+        awaiting_relief: &mut bool,
+    ) -> Result<Option<f64>, &'static str> {
+        if !cfg.resolve_compact_enabled() || context_window == 0 || input_tokens == 0 {
+            return Ok(None);
         }
-        let threshold = cfg.resolve_mid_turn_compact_threshold()?;
+        let Some(threshold) = cfg.resolve_mid_turn_compact_threshold() else {
+            return Ok(None);
+        };
         let pressure = input_tokens as f64 / context_window as f64;
-        (pressure > threshold).then_some(pressure)
+        if pressure <= threshold {
+            *awaiting_relief = false;
+            Ok(None)
+        } else if *awaiting_relief {
+            Err(
+                "context remains above the compaction threshold after compaction; reduce fixed context, keep_recent_tokens, or use a larger context window",
+            )
+        } else {
+            *awaiting_relief = true;
+            Ok(Some(pressure))
+        }
     }
 
     struct AttachmentOutcome {
@@ -3791,7 +3815,7 @@ mod imp {
         let mut reasoning_buf = String::new();
         let mut reasoning_start_line: Option<usize> = None;
         let mut reasoning_segment = 0usize;
-        let mut retried_after_mid_turn_compact = false;
+        let mut awaiting_compaction_relief = false;
         let mut continued_after_auto_compact = false;
 
         loop {
@@ -4217,14 +4241,53 @@ mod imp {
                             ),
                         )
                         .await;
-                    if !server.cli.no_session
-                        && let Some(pressure) = should_mid_turn_compact(
+                    let pressure = if server.cli.no_session {
+                        None
+                    } else {
+                        match should_mid_turn_compact(
                             usage.input_tokens,
                             context_window,
                             &server.cfg,
-                            retried_after_mid_turn_compact,
-                        )
-                    {
+                            &mut awaiting_compaction_relief,
+                        ) {
+                            Ok(pressure) => pressure,
+                            Err(message) => {
+                                runner.abort_handle.abort();
+                                persist_partial_assistant_output(
+                                    &server,
+                                    &response_buf,
+                                    Vec::new(),
+                                )
+                                .await?;
+                                {
+                                    let mut mutable = server.mutable.lock().await;
+                                    mutable.last_error = Some(message.to_string());
+                                    mutable.active_response = None;
+                                }
+                                server
+                                    .append_lines(
+                                        "error-render",
+                                        turn,
+                                        vec![WireLine::new(
+                                            format!("error: {message}"),
+                                            "zs-error",
+                                        )],
+                                    )
+                                    .await;
+                                server
+                                    .broadcast_event(
+                                        "error",
+                                        format!(" :turn {} :message {}", turn, sexp_quote(message)),
+                                    )
+                                    .await;
+                                return Ok(None);
+                            }
+                        }
+                    };
+                    if pressure.is_none() && !awaiting_compaction_relief {
+                        continued_after_auto_compact = false;
+                    }
+                    if let Some(pressure) = pressure {
                         if let Some(handle) = server.mutable.lock().await.abort_handle.take() {
                             handle.abort();
                         }
@@ -4247,6 +4310,8 @@ mod imp {
                                 ),
                             )
                             .await;
+                        persist_partial_assistant_output(&server, &response_buf, Vec::new())
+                            .await?;
                         match compact_session(&server, None).await {
                             Ok(outcome) => {
                                 finish_auto_compact(
@@ -4259,7 +4324,7 @@ mod imp {
                                 if !outcome.compacted {
                                     return Ok(None);
                                 }
-                                retried_after_mid_turn_compact = true;
+                                awaiting_compaction_relief = true;
                                 response_buf.clear();
                                 response_start_line = None;
                                 stream_render.reset(Instant::now());
@@ -4421,7 +4486,7 @@ mod imp {
                     }
                     if auto_compacted {
                         continued_after_auto_compact = true;
-                        retried_after_mid_turn_compact = true;
+                        awaiting_compaction_relief = true;
                         response_buf.clear();
                         response_start_line = None;
                         stream_render.reset(Instant::now());
@@ -4457,6 +4522,76 @@ mod imp {
                     return Ok(Some(response.to_string()));
                 }
                 AgentEvent::Error { message, reasoning } => {
+                    persist_partial_assistant_output(&server, &response_buf, reasoning).await?;
+                    if should_recover_context_limit(
+                        &message,
+                        &server.cfg,
+                        server.cli.no_session,
+                        awaiting_compaction_relief,
+                    ) {
+                        runner.abort_handle.abort();
+                        server
+                            .broadcast_event(
+                                "compact-started",
+                                format!(" :turn {} :auto t :context-limit t", turn),
+                            )
+                            .await;
+                        match compact_session(&server, None).await {
+                            Ok(outcome) if outcome.compacted => {
+                                finish_auto_compact(
+                                    &server,
+                                    turn,
+                                    &outcome,
+                                    " :auto t :context-limit t",
+                                )
+                                .await;
+                                awaiting_compaction_relief = true;
+                                response_buf.clear();
+                                response_start_line = None;
+                                stream_render.reset(Instant::now());
+                                advance_reasoning_render_segment(
+                                    &mut reasoning_buf,
+                                    &mut reasoning_start_line,
+                                    &mut reasoning_segment,
+                                );
+                                let history = {
+                                    let session = server.session.lock().await;
+                                    assistant_index = session.messages.len();
+                                    convert_history(&session)
+                                };
+                                runner = agent
+                                    .clone()
+                                    .spawn_runner(mid_turn_continue_prompt(), history);
+                                let mut mutable = server.mutable.lock().await;
+                                mutable.abort_handle = Some(runner.abort_handle.clone());
+                                mutable.active_response = Some((turn, String::new()));
+                                continue;
+                            }
+                            Ok(outcome) => {
+                                finish_auto_compact(
+                                    &server,
+                                    turn,
+                                    &outcome,
+                                    " :auto t :context-limit t",
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                server
+                                    .broadcast_event(
+                                        "error",
+                                        format!(
+                                            " :turn {} :message {}",
+                                            turn,
+                                            sexp_quote(&format!(
+                                                "context-limit compact error: {error}"
+                                            ))
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
                     {
                         let mut mutable = server.mutable.lock().await;
                         mutable.last_error = Some(message.to_string());
@@ -4468,7 +4603,6 @@ mod imp {
                             mutable.active_response = None;
                         }
                     }
-                    persist_partial_assistant_output(&server, &response_buf, reasoning).await?;
                     server
                         .append_lines(
                             "error-render",
@@ -8285,12 +8419,89 @@ mod imp {
                 mid_turn_compact_threshold: Some(0.90),
                 ..Config::default()
             };
+            let mut awaiting_relief = false;
             assert_eq!(
-                should_mid_turn_compact(901, 1_000, &cfg, false),
-                Some(0.901)
+                should_mid_turn_compact(900, 1_000, &cfg, &mut awaiting_relief),
+                Ok(None)
             );
-            assert_eq!(should_mid_turn_compact(900, 1_000, &cfg, false), None);
-            assert_eq!(should_mid_turn_compact(901, 1_000, &cfg, true), None);
+            assert_eq!(
+                should_mid_turn_compact(901, 1_000, &cfg, &mut awaiting_relief),
+                Ok(Some(0.901))
+            );
+            assert!(awaiting_relief);
+            assert_eq!(
+                should_mid_turn_compact(0, 1_000, &cfg, &mut awaiting_relief),
+                Ok(None)
+            );
+            assert!(
+                awaiting_relief,
+                "missing usage cannot prove compaction relief"
+            );
+            assert!(should_mid_turn_compact(901, 1_000, &cfg, &mut awaiting_relief).is_err());
+            assert_eq!(
+                should_mid_turn_compact(500, 1_000, &cfg, &mut awaiting_relief),
+                Ok(None)
+            );
+            assert!(!awaiting_relief);
+            assert_eq!(
+                should_mid_turn_compact(950, 1_000, &cfg, &mut awaiting_relief),
+                Ok(Some(0.95))
+            );
+        }
+
+        #[test]
+        fn emacs_mid_turn_gate_respects_disabled_compaction_and_unknown_window() {
+            let disabled = Config {
+                compact_enabled: Some(false),
+                ..Config::default()
+            };
+            let invalid = Config {
+                mid_turn_compact_threshold: Some(0.0),
+                ..Config::default()
+            };
+            for (cfg, window) in [(disabled, 1000), (invalid, 1000), (Config::default(), 0)] {
+                let mut awaiting = false;
+                assert_eq!(
+                    should_mid_turn_compact(9999, window, &cfg, &mut awaiting),
+                    Ok(None)
+                );
+                assert!(!awaiting);
+            }
+            let mut awaiting = false;
+            assert_eq!(
+                should_mid_turn_compact(801, 1000, &Config::default(), &mut awaiting),
+                Ok(Some(0.801))
+            );
+        }
+
+        #[test]
+        fn emacs_context_limit_recovery_is_bounded_until_pressure_falls() {
+            let cfg = Config::default();
+            let error = "ProviderResponseError: context_length_exceeded";
+            assert!(should_recover_context_limit(error, &cfg, false, false));
+            assert!(!should_recover_context_limit(error, &cfg, true, false));
+            assert!(!should_recover_context_limit(
+                "invalid_request_error",
+                &cfg,
+                false,
+                false
+            ));
+            let disabled = Config {
+                compact_enabled: Some(false),
+                ..Config::default()
+            };
+            assert!(!should_recover_context_limit(
+                error, &disabled, false, false
+            ));
+            // A failed retry must stop. Only a successful call under the ceiling
+            // permits another recovery later in the same turn.
+            let mut awaiting = true;
+            assert!(!should_recover_context_limit(error, &cfg, false, awaiting));
+            assert_eq!(
+                should_mid_turn_compact(400, 1000, &cfg, &mut awaiting),
+                Ok(None)
+            );
+            assert!(should_recover_context_limit(error, &cfg, false, awaiting));
         }
 
         #[test]

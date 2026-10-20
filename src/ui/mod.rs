@@ -492,7 +492,7 @@ user's original task. Do not redo work already completed per the summary; focus 
 on what remains. Context was tight, so prefer narrower follow-up tool calls over \
 wide ones until pressure subsides.";
 
-/// Mid-turn auto-compaction (PR H). Invoked when real provider prompt pressure
+/// Mid-turn auto-compaction and context-limit recovery. Invoked when prompt pressure
 /// (`CompletionCall` usage / context window) crosses
 /// `mid_turn_compact_threshold`, and only when `compact_enabled` is true.
 ///
@@ -502,9 +502,8 @@ wide ones until pressure subsides.";
 /// lives only in the now-aborted runner and never reaches the session, so
 /// without this the agent would redo the turn), the session is compacted, and
 /// the agent is respawned on the compacted history with a continuation prompt.
-/// The dominant pressure relief is dropping the aborted run's in-flight tool
-/// context, which the respawn achieves even when the session itself is under the
-/// between-turn limit and `handle_compress` is a no-op.
+/// The mid-turn trigger already supplies the budget gate, so compression must
+/// not also require the higher between-turn threshold.
 #[allow(clippy::too_many_arguments)]
 async fn mid_turn_compact_and_respawn(
     pressure: f64,
@@ -561,12 +560,8 @@ async fn mid_turn_compact_and_respawn(
     *response_start_line = None;
     *agent_line_started = false;
 
-    // Unlike the between-turn gate, this announces unconditionally: the relief
-    // here is dropping the aborted run's in-flight tool context via the respawn
-    // below, which always happens even when the `handle_compress` step is a
-    // no-op. So the message describes the restart rather than promising a
-    // summarize step (which may not run and would otherwise leave the user
-    // waiting on a "compressed N messages" line that never comes).
+    // Announce the restart even if all retained messages are recent and there
+    // is no older history to summarize.
     renderer.write_line(
         &format!(
             "mid-turn context relief, restarting (at {}%)...",
@@ -575,12 +570,16 @@ async fn mid_turn_compact_and_respawn(
         Color::DarkGrey,
     )?;
 
+    if !cli.no_session {
+        save_session(session)?;
+    }
+
     // 3. Compact the session.
     #[cfg(feature = "mcp")]
     let mcp_ref = ensure_mcp_manager(mcp_manager, cfg).await;
     let compress_result = handle_compress(
         None,
-        true,
+        false,
         agent,
         client,
         renderer,
@@ -1964,15 +1963,18 @@ pub async fn run_interactive(
                             )));
                         }
                     }
-                    AgentEvent::Done { .. } | AgentEvent::Error { .. } => {
+                    AgentEvent::Done { .. } => {
                         active_bash_output = None;
                         turn_trace.clear();
                         awaiting_compaction_relief = false;
                     }
+                    AgentEvent::Error { .. } => {
+                        active_bash_output = None;
+                    }
                     _ => {}
                 }
                 // Mid-turn compaction (PR H). On a provider-call boundary, if
-                // real prompt pressure crossed the opt-in threshold, abort the
+                // real prompt pressure crossed the threshold, abort the
                 // run cleanly, compact, and respawn on the compacted history.
                 if let AgentEvent::CompletionCall {
                     call_index,
@@ -2002,6 +2004,7 @@ pub async fn run_interactive(
                     && !cli.no_session
                     && cfg.resolve_compact_enabled()
                     && session.context_window > 0
+                    && usage.input_tokens > 0
                     && let Some(threshold) = cfg.resolve_mid_turn_compact_threshold()
                 {
                     let input_tokens = usage.input_tokens;
@@ -2041,11 +2044,38 @@ pub async fn run_interactive(
                         awaiting_compaction_relief = false;
                     }
                 }
+                if let AgentEvent::Error { message, reasoning } = &event
+                    && is_running
+                    && !loop_running
+                    && !cli.no_session
+                    && cfg.resolve_compact_enabled()
+                    && !awaiting_compaction_relief
+                    && crate::agent::runner::is_context_limit_error(message)
+                {
+                    session.add_partial_assistant_output("", reasoning.clone());
+                    renderer.write_line("provider context limit reached; compacting before retry...", Color::DarkGrey)?;
+                    mid_turn_compact_and_respawn(
+                        1.0, &mut renderer, &mut agent, &mut client, session,
+                        cli, cfg, context, &permission, &ask_tx, &sandbox,
+                        reasoning_enabled, &mut agent_rx, &mut main_abort,
+                        &mut is_running, &status_signals, &mut turn_trace,
+                        &mut response_buf, &mut response_start_line,
+                        &mut agent_line_started, &mut was_reasoning,
+                        #[cfg(feature = "mcp")] &mut mcp_manager,
+                    ).await?;
+                    awaiting_compaction_relief = true;
+                    refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), perm_mode().as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
+                    continue;
+                }
                 #[cfg(feature = "mcp")]
                 let mcp_ref = ensure_mcp_manager(&mut mcp_manager, cfg).await;
                 // Peek before the event is consumed: a failed turn with no
                 // persisted output rolls its user message back into the editor.
                 let turn_errored = matches!(&event, AgentEvent::Error { .. });
+                if turn_errored {
+                    turn_trace.clear();
+                    awaiting_compaction_relief = false;
+                }
                 handle_agent_event(
                     event, &mut renderer, session, cfg, cli, context,
                     &mut is_running, &mut agent_rx, &mut agent_line_started,

@@ -80,9 +80,9 @@ fn is_anthropic_native_resolves_custom_provider_type() {
 }
 
 #[test]
-fn mid_turn_threshold_unset_by_default() {
+fn mid_turn_threshold_defaults_to_eighty_percent() {
     let cfg = Config::default();
-    assert_eq!(cfg.resolve_mid_turn_compact_threshold(), None);
+    assert_eq!(cfg.resolve_mid_turn_compact_threshold(), Some(0.80));
 }
 
 #[test]
