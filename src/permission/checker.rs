@@ -408,6 +408,14 @@ impl PermissionChecker {
         }
     }
 
+    /// Start an independent session without carrying approvals or repeat counts.
+    pub fn reset_session(&mut self, session_id: &str) {
+        self.session_allowlist.clear();
+        self.last_call = None;
+        self.consecutive_repeat_count = 0;
+        self.allow_session_tool_outputs(session_id);
+    }
+
     pub fn allow_session_tool_outputs(&mut self, session_id: &str) {
         let dir = crate::session::storage::tool_output_dir(session_id)
             .to_string_lossy()
@@ -515,4 +523,32 @@ fn is_read_equivalent_mcp(input: &str) -> bool {
     lower.starts_with("mcp_tool:exa web search:")
         || lower.starts_with("mcp_tool:context7:")
         || lower.starts_with("mcp_tool:grep.app:")
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    #[test]
+    fn reset_session_clears_old_approvals_and_repeat_state_but_keeps_security_mode() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfigs::default(),
+            SecurityMode::Guarded,
+            None,
+            None,
+        );
+        checker.add_session_allowlist("bash".to_string(), "*");
+        checker.allow_session_tool_outputs("original");
+        checker.last_call = Some(("bash".to_string(), "same command".to_string()));
+        checker.consecutive_repeat_count = 6;
+        checker.reset_session("fork");
+        assert!(!checker.is_session_allowed("bash", "any command"));
+        assert!(checker.last_call.is_none());
+        assert_eq!(checker.consecutive_repeat_count, 0);
+        assert_eq!(checker.mode, SecurityMode::Guarded);
+        let path = crate::session::storage::tool_output_dir("fork").join("output.txt");
+        assert!(checker.is_session_allowed("read", &path.to_string_lossy()));
+        let old = crate::session::storage::tool_output_dir("original").join("output.txt");
+        assert!(!checker.is_session_allowed("read", &old.to_string_lossy()));
+    }
 }

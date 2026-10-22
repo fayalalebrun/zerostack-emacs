@@ -1569,7 +1569,22 @@ pub async fn run_interactive(
                                 // `/btw` is handled earlier in the bypass-slot (it
                                 // runs in parallel and never goes through the main
                                 // run), so it never reaches here.
+                                if text.split_whitespace().next() == Some("/fork") && btw_inflight > 0 {
+                                    renderer.write_line("cannot fork while a side question is running; wait for it to finish", C_AGENT)?;
+                                    continue;
+                                }
+                                let previous_session_id = session.id.clone();
                                 let result = handle_slash(&text, &mut agent, &mut client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut reasoning_enabled, &mut is_running, &mut input, &permission, &ask_tx, &mut todo_tools_enabled, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_ref).await;
+                                if session.id != previous_session_id {
+                                    turn_trace.clear();
+                                    response_buf.clear();
+                                    response_start_line = None;
+                                    agent_line_started = false;
+                                    awaiting_compaction_relief = false;
+                                    btw_total_cost = 0.0;
+                                    btw_total_in = 0;
+                                    btw_total_out = 0;
+                                }
                                 // provider may have changed via /provider or /models — re-warm the picker's live list
                                 {
                                     let provider = session.provider.to_string();

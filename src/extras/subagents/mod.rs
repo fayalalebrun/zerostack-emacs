@@ -157,6 +157,13 @@ pub fn init(
     });
 }
 
+pub(crate) fn set_parent_session_id(session_id: &str) {
+    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(cfg) = guard.as_mut() {
+        cfg.parent_session_id = session_id.to_string();
+    }
+}
+
 pub fn set_client_and_model(client: AnyClient, provider_name: String, model_name: String) {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(cfg) = guard.as_mut() {

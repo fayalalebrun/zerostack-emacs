@@ -13,8 +13,92 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
         "/quit" | "/exit" => handle_quit(ctx).await,
         "/history" => handle_history(ctx).await,
         "/rewind" => handle_rewind(parts, ctx).await,
+        "/fork" => handle_fork(parts, ctx).await,
         _ => Ok(()),
     }
+}
+
+async fn handle_fork(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !*ctx.is_running,
+        "cannot fork while an agent turn is running"
+    );
+    #[cfg(feature = "loop")]
+    anyhow::ensure!(
+        !ctx.loop_state.as_ref().is_some_and(|state| state.active),
+        "cannot fork while a loop is active"
+    );
+    anyhow::ensure!(
+        !ctx.cli.no_session,
+        "fork requires session persistence; --no-session is active"
+    );
+    anyhow::ensure!(
+        ctx.cli.subagent_parent_session.is_none(),
+        "fork requires a main session"
+    );
+    anyhow::ensure!(parts.len() <= 2, "usage: /fork [message-index]");
+    let before = parts
+        .get(1)
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("usage: /fork [message-index]"))?;
+    let mut fork = crate::session::fork::save(ctx.session, before)?;
+    // Resolve credentials before replacing live state. On failure the saved fork
+    // remains available, and the original session remains active.
+    let client = crate::provider::create_client(
+        &fork.provider,
+        ctx.cli.api_key.as_deref(),
+        &ctx.cfg.custom_providers_map(),
+        ctx.cfg.api_keys.as_ref(),
+        Some(fork.id.as_str()),
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "fork {} was saved but could not be activated: {error}",
+            fork.id
+        )
+    })?;
+    let text = before
+        .map(|index| ctx.session.messages[index].content.clone())
+        .unwrap_or_default();
+    #[cfg(feature = "multimodal")]
+    if let Some(index) = before {
+        fork.pending_media = ctx.session.messages[index]
+            .attachments
+            .iter()
+            .map(|attachment| {
+                crate::extras::multimodal::load_persisted_attachment(&fork.id, attachment)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    let original_id = ctx.session.id.clone();
+    *ctx.session = fork;
+    *ctx.client = client;
+    *ctx.reasoning_enabled = ctx.session.reasoning_enabled;
+    crate::agent::tools::goal::clear_goal_state();
+    if let Some(permission) = ctx.permission {
+        permission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset_session(&ctx.session.id);
+    }
+    #[cfg(feature = "subagents")]
+    crate::extras::subagents::set_parent_session_id(&ctx.session.id);
+    crate::agent::tools::set_active_session_id(Some(ctx.session.id.to_string()));
+    crate::agent::tools::reset_read_context_loaded(ctx.session.loaded_read_context_paths());
+    ctx.rebuild_agent().await;
+    render_session(ctx.renderer, ctx.session, ctx.cli, ctx.cfg, ctx.context)?;
+    ctx.input.buffer = text;
+    ctx.input.cursor = ctx.input.buffer.len();
+    write_ok(
+        ctx.renderer,
+        format!(
+            "forked {} → {} (same working directory)",
+            &original_id[..8],
+            &ctx.session.id[..8]
+        ),
+    );
+    Ok(())
 }
 
 async fn handle_sessions(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {

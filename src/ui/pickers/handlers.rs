@@ -254,6 +254,15 @@ pub fn handle_command_key(
                     pp.activate();
                     return (true, Some(Picker::Prefixed(pp, "/provider ")));
                 }
+                if selected == "/fork" {
+                    picker.deactivate();
+                    let mut fp = ListPicker::new();
+                    let mut items = vec!["full  Full conversation".to_string()];
+                    items.extend(ctx.rewind_targets.iter().cloned());
+                    fp.set_items(items);
+                    fp.activate();
+                    return (true, Some(Picker::Prefixed(fp, "/fork ")));
+                }
                 if selected == "/rewind" && !ctx.rewind_targets.is_empty() {
                     picker.deactivate();
                     let mut fp = ListPicker::new();
@@ -393,8 +402,19 @@ pub fn handle_prefixed_key(
                 let after_offset = prefix_len + picker.query.chars().count();
                 let before: String = buffer.chars().take(prefix_len).collect();
                 let after: String = buffer.chars().skip(after_offset).collect();
-                *buffer = format!("{}{}{}", before, name, after).into();
-                *cursor = prefix_len + name.len();
+                if prefix == "/fork " {
+                    let target = name.split_whitespace().next().unwrap_or("full");
+                    *buffer = if target == "full" {
+                        format!("/fork{after}")
+                    } else {
+                        format!("/fork {target}{after}")
+                    }
+                    .into();
+                    *cursor = buffer.len().saturating_sub(after.len());
+                } else {
+                    *buffer = format!("{}{}{}", before, name, after).into();
+                    *cursor = prefix_len + name.len();
+                }
             }
             picker.deactivate();
             true
@@ -526,5 +546,50 @@ pub fn handle_models_key(
             true
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    #[test]
+    fn fork_picker_offers_full_history_and_user_targets_and_submits_only_the_index() {
+        let targets = vec!["2  first prompt".to_string(), "7  later prompt".to_string()];
+        let ctx = CommandPickerCtx {
+            theme_names: &[],
+            quick_model_names: &[],
+            live_model_names: &[],
+            provider_names: &[],
+            rewind_targets: &targets,
+        };
+        for (selection, expected) in [(0, "/fork"), (1, "/fork 2"), (2, "/fork 7")] {
+            let mut commands = ListPicker::with_static_commands();
+            commands.activate();
+            for c in "fork".chars() {
+                commands.char_input(c);
+            }
+            assert_eq!(commands.selected_name(), Some("/fork"));
+            let mut buffer: CompactString = "/fork".into();
+            let mut cursor = buffer.len();
+            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            let (_, next) =
+                handle_command_key(&mut buffer, &mut cursor, &ctx, &mut commands, enter);
+            let Some(Picker::Prefixed(mut choices, prefix)) = next else {
+                panic!("fork picker missing")
+            };
+            assert_eq!(
+                choices.matches,
+                vec![
+                    "full  Full conversation",
+                    "2  first prompt",
+                    "7  later prompt"
+                ]
+            );
+            choices.selected = selection;
+            handle_prefixed_key(&mut buffer, &mut cursor, &mut choices, prefix, enter);
+            assert_eq!(buffer, expected);
+            assert_eq!(cursor, buffer.len());
+        }
     }
 }

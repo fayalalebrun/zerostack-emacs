@@ -8,6 +8,37 @@
 (require 'cl-lib)
 (require 'zerostack)
 
+(ert-deftest zerostack-test-fork-sends-one-request-without-changing-source ()
+  (zerostack-test--with-buffer
+   (let ((zerostack--session "source-session") sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (zerostack-fork)
+     (let ((forms (zerostack-test--sent-forms (copy-sequence sent))))
+       (should (= (length forms) 1))
+       (should (eq (caar forms) 'fork))
+       (should (integerp (plist-get (cdar forms) :request))))
+     (should (equal zerostack--session "source-session")))))
+
+(ert-deftest zerostack-test-fork-response-launches-independent-buffer-and-restores-filter-context ()
+  (zerostack-test--with-buffer
+   (let ((source (current-buffer))
+         (fork (generate-new-buffer " *zerostack-fork-test*"))
+         (zerostack--session "source-session")
+         launched)
+     (unwind-protect
+         (cl-letf (((symbol-function 'zerostack)
+                    (lambda (&rest args)
+                      (setq launched args)
+                      (set-buffer fork)
+                      fork)))
+           (zerostack--handle-ok '(:request 1 :fork-session "fork-session"
+                                  :fork-title "Conversation (fork)" :fork-cwd "/project/"))
+           (should (eq (current-buffer) source))
+           (should (equal launched '(("--session" "fork-session") "Conversation (fork)"
+                                     "/project/" nil "fork-session")))
+           (should (equal zerostack--session "source-session")))
+       (kill-buffer fork)))))
+
 (ert-deftest zerostack-test-patch-artifact-selects-diff-mode-from-extension ()
   (let ((path (make-temp-file "zerostack-patch-" nil ".patch"))
         buffer)
@@ -3234,6 +3265,73 @@
    (zerostack--set-thinking t)
    (zerostack--handle-ok '(:fast-mode-available t :fast-mode t :message "Fast mode: on"))
    (should zerostack--thinking)))
+
+(ert-deftest zerostack-test-fork-index-and-slash-validation ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (zerostack--dispatch-slash "/fork")
+     (zerostack--dispatch-slash "/fork 0")
+     (zerostack-fork 7)
+     (let ((forms (zerostack-test--sent-forms (copy-sequence sent))))
+       (should (equal (mapcar (lambda (form) (plist-get (cdr form) :index)) forms)
+                      '(nil 0 7))))
+     (dolist (text '("/fork bad" "/fork -1" "/fork 1 extra" "/fork 1.2"))
+       (should-error (zerostack--dispatch-slash text) :type 'user-error))
+     (dolist (index '(-1 "2" 1.5))
+       (should-error (zerostack-fork index) :type 'user-error))
+     (should (= (length sent) 3)))))
+
+(ert-deftest zerostack-test-fork-prefix-uses-message-at-point ()
+  (zerostack-test--with-buffer
+   (let ((current-prefix-arg '(4)) sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (cl-letf (((symbol-function 'zerostack--message-index-at-point) (lambda () 5)))
+       (call-interactively #'zerostack-fork))
+     (should (= (plist-get (cdr (car (zerostack-test--sent-forms sent))) :index) 5)))))
+
+(ert-deftest zerostack-test-fork-response-loads-draft-only-in-new-buffer ()
+  (zerostack-test--with-buffer
+   (let ((source (current-buffer))
+         (fork (generate-new-buffer " *zerostack-indexed-fork*")))
+     (unwind-protect
+         (progn
+           (with-current-buffer fork (zerostack-mode))
+           (cl-letf (((symbol-function 'zerostack) (lambda (&rest _) (set-buffer fork) fork)))
+             (zerostack--handle-ok '(:fork-session "fork-id" :fork-cwd "/project/"
+                                    :fork-text "edit this prompt" :fork-files ("/tmp/draft.png"))))
+           (should (eq (current-buffer) source))
+           (should-not zerostack--fork-files)
+           (should-not (string-match-p "edit this prompt" (buffer-string)))
+           (with-current-buffer fork
+             (should (equal zerostack--fork-files '("/tmp/draft.png")))
+             (should (string-match-p "edit this prompt" (buffer-string)))))
+       (kill-buffer fork)))))
+
+(ert-deftest zerostack-test-fork-ready-attaches-draft-media-once ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--fork-files '("/tmp/draft.png")
+           zerostack--send-function (lambda (line) (push line sent)))
+     (cl-letf (((symbol-function 'zerostack--dedupe-current-chat-buffer) (lambda () nil))
+               ((symbol-function 'zerostack--rename-chat-buffer) #'ignore))
+       (dotimes (_ 2)
+         (zerostack--handle-ready '(:protocol 1 :session "fork-id" :pid 1 :socket "/tmp/fork.sock"))))
+     (let ((forms (zerostack-test--sent-forms (copy-sequence sent))))
+       (should (= (length forms) 1))
+       (should (eq (caar forms) 'file-add))
+       (should (equal (plist-get (cdar forms) :path) "/tmp/draft.png")))
+     (should-not zerostack--fork-files))))
+
+(ert-deftest zerostack-test-fork-menu-offers-command ()
+  (zerostack-test--with-buffer
+   (let (sent)
+     (setq zerostack--send-function (lambda (line) (push line sent)))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt choices &rest _)
+                  (should (member "fork" choices)) "fork")))
+       (zerostack--command-menu-fallback))
+     (should (eq (caar (zerostack-test--sent-forms sent)) 'fork)))))
 
 (provide 'zerostack-test)
 

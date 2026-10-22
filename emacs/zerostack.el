@@ -2318,6 +2318,23 @@ Fast mode uses subscription credits at a higher rate.  A nil STATE toggles."
   "Return rendered zerostack message index at point."
   (get-text-property (point) 'zerostack-message-index))
 
+(defvar-local zerostack--fork-files nil
+  "Draft media paths to attach after a fork daemon connects.")
+
+(defun zerostack-fork (&optional index)
+  "Fork the conversation in the same directory, before user message INDEX.
+With no INDEX, copy the full retained conversation.  With a prefix argument,
+use the user message at point, or ask for an index.  Open a separate buffer
+and daemon.  Leave the original session unchanged."
+  (interactive (list (when current-prefix-arg
+                       (or (zerostack--message-index-at-point)
+                           (read-number "Fork before user message index: ")))))
+  (unless (or (null index) (and (integerp index) (>= index 0)))
+    (user-error "Fork index must be a nonnegative integer"))
+  (apply #'zerostack--send-command 'fork
+         (append (list :request (zerostack--next-request))
+                 (when index (list :index index)))))
+
 (defun zerostack-rewind (&optional index)
   "Rewind the current session to before message INDEX and load it for editing."
   (interactive)
@@ -2681,11 +2698,13 @@ _c_ compact     _i_ timing       _e_ subagents           _v_ view
 _g_ goal        _k_ skill        _P_ subagent provider   _h_ hydrate
 _G_ clear goal  _a_ attach       _S_ subagent models     _L_ log
 _o_ artifact    _f_ fast mode                             _R_ restart
+_F_ fork
 "
     ("k" zerostack-skill-menu)
     ("a" zerostack-attachment-menu)
     ("c" zerostack-compact)
     ("w" zerostack-rewind)
+    ("F" zerostack-fork)
     ("u" zerostack-redo)
     ("g" zerostack-goal-set)
     ("G" zerostack-clear-goal)
@@ -2715,7 +2734,7 @@ _o_ artifact    _f_ fast mode                             _R_ restart
 
 (defun zerostack--command-menu-fallback ()
   "Fallback command menu used when Hydra is unavailable."
-  (let* ((commands '("skill" "attach" "compact" "rewind" "redo" "loop" "thinking" "fast" "timing"
+  (let* ((commands '("skill" "attach" "compact" "fork" "rewind" "redo" "loop" "thinking" "fast" "timing"
                     "provider" "model" "subagents" "subagent-provider" "subagent-model" "goal"
                     "clear-goal" "hydrate" "tools" "mcp" "view" "artifact" "log" "restart"))
          (choice (completing-read "Zerostack command: " commands nil t)))
@@ -2723,6 +2742,7 @@ _o_ artifact    _f_ fast mode                             _R_ restart
       ("skill" (zerostack-skill-menu))
       ("attach" (zerostack-attachment-menu))
       ("compact" (call-interactively #'zerostack-compact))
+      ("fork" (call-interactively #'zerostack-fork))
       ("rewind" (call-interactively #'zerostack-rewind))
       ("redo" (call-interactively #'zerostack-redo))
       ("loop" (call-interactively #'zerostack-loop))
@@ -2837,6 +2857,12 @@ _o_ artifact    _f_ fast mode                             _R_ restart
          (zerostack--append-local-line "usage: /view <cols>" 'zs-error)))
       ("/abort" (zerostack-abort))
       ((or "/compact" "/compress") (zerostack-compact rest))
+      ("/fork"
+       (unless (or (null args)
+                   (and (= (length args) 1)
+                        (string-match-p "\\`[0-9]+\\'" (car args))))
+         (user-error "Usage: /fork [message-index]"))
+       (zerostack-fork (and args (string-to-number (car args)))))
       ("/rewind"
        (if (car args)
            (zerostack-rewind (string-to-number (car args)))
@@ -2893,7 +2919,7 @@ _o_ artifact    _f_ fast mode                             _R_ restart
 (defun zerostack--show-help ()
   "Show concise command-menu help in the prompt status line."
    (zerostack--set-notice
-    "commands: C-c / opens skill, attach, compact, rewind, redo, loop, thinking, fast, provider, model, mcp, view, artifact, restart"))
+    "commands: C-c / opens skill, attach, compact, fork, rewind, redo, loop, thinking, fast, provider, model, mcp, view, artifact, restart"))
 
 (defun zerostack-restart-daemon ()
   "Restart this buffer's zerostack daemon without closing the buffer."
@@ -3020,7 +3046,11 @@ _o_ artifact    _f_ fast mode                             _R_ restart
         zerostack--pid (plist-get plist :pid)
         zerostack--socket (zerostack--normalize-socket (plist-get plist :socket)))
   (unless (zerostack--dedupe-current-chat-buffer)
-    (zerostack--rename-chat-buffer)))
+    (zerostack--rename-chat-buffer))
+  (let ((files zerostack--fork-files))
+    (setq zerostack--fork-files nil)
+    (dolist (file files)
+      (zerostack-add-file file))))
 
 (defun zerostack--handle-ok (plist)
   "Handle ok PLIST."
@@ -3037,7 +3067,17 @@ _o_ artifact    _f_ fast mode                             _R_ restart
     (when (plist-get plist :compacted)
       (zerostack-render))
     (zerostack--set-thinking nil)
-    (zerostack--set-status nil)))
+    (zerostack--set-status nil))
+  (when-let ((session (plist-get plist :fork-session)))
+    ;; Keep subsequent forms from the source socket in the source buffer.
+    (save-current-buffer
+      (with-current-buffer
+          (zerostack (list "--session" session)
+                     (plist-get plist :fork-title)
+                     (plist-get plist :fork-cwd) nil session)
+        (setq zerostack--fork-files (plist-get plist :fork-files))
+        (when-let ((text (plist-get plist :fork-text)))
+          (zerostack--insert-input text))))))
 
 (defun zerostack--update-provider-model (plist)
   "Update provider/model buffer-local state from PLIST."

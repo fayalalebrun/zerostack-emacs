@@ -50,13 +50,59 @@ running sessions are not restarted automatically.
 | `/sessions delete <id-prefix>` | Delete a session by its ID prefix. |
 | `/timing` | Show individual command and text-generation block wait times, slowest first. |
 | `/history` | Show global chat history (last 10 entries across sessions). |
-| `/fork [message-index]` | Fork the current conversation into a new session before a selected user message, or before `message-index`. |
+| `/fork` | Copy the full retained conversation into a new session in the same directory. |
+| `/fork <message-index>` | Fork before that user message and load its prompt for editing. |
 
 Resuming an interrupted session preserves completed tool calls and results.
 Native tool calls without a recorded result are replayed as an interruption
 notice, not executed automatically: a command may already have had side effects.
 Empty assistant turns are omitted from provider history; the saved transcript
 is left unchanged.
+
+### Conversation forks
+
+Run `/fork` to copy the full retained conversation into a new saved session.
+The TUI switches to the fork. Emacs starts a separate daemon and opens a separate
+buffer. The original session and its saved file stay unchanged. In the TUI,
+use `/sessions <original-id>` to return to the original session.
+
+Use `/fork <message-index>` to stop before a retained user message. Indexes are
+zero-based positions in the current message list. Assistant and tool messages
+also occupy positions, but they are not valid fork targets. The selected user
+message and all later messages are excluded from the new history. The client
+loads the selected prompt into the input editor and restores its media as draft
+attachments. Nothing is submitted automatically. Draft text and draft attachment
+selection are client state, not saved conversation messages.
+
+The TUI `/` picker offers `/fork`, followed by a full-conversation option and
+prior user messages. In Emacs, use `M-x zerostack-fork` or the `C-c /` command
+menu. Use `C-u M-x zerostack-fork` on a prior user message to fork before it.
+If point has no message index, Emacs asks for one. The menu supports the same
+prefix argument. Both clients also accept `/fork <message-index>` directly.
+
+Both sessions use the same working directory. A fork does not create a Git branch
+or worktree. It does not copy, change, or undo project files. Later edits from
+either session affect the same project files.
+
+The fork keeps the retained messages, compaction summary, model, reasoning
+preferences, and Fast mode preference. It copies retained user and tool media,
+full tool outputs, and display snapshots into its own storage. These copies
+remain available if you delete the original session. Earlier compaction archives
+are not copied.
+
+The new session starts with zero spending and usage counters. Its history still
+uses context tokens. It does not inherit the active goal, permission approvals,
+rewind undo state, or subagent identity. Existing unsent attachments are not
+copied. The TUI keeps its current configuration and runtime context. A new Emacs
+daemon loads its normal configuration and repository context; runtime context
+files and CLI-only options from the original daemon are not copied.
+
+Forking is not available during a running turn or active loop, from a read-only
+subagent connection, or with `--no-session`. In the TUI, wait for any running
+`/btw` side question to finish too. Missing retained or selected-draft assets
+cause an error; no incomplete fork is published. Invalid indexes do not change
+the active session. If the TUI saves a fork but cannot create its provider client,
+the error includes the saved fork ID and the original session stays active.
 
 ## Provider & Model
 

@@ -52,6 +52,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     write_result(ctx.renderer, "  /sessions delete <id>  delete a session");
     write_result(
         ctx.renderer,
+        "  /fork [idx]            fork full conversation, or before a user message (same directory)",
+    );
+    write_result(
+        ctx.renderer,
         "  /fast [on|off|status]   Codex Fast mode (higher subscription credit use)",
     );
     write_result(

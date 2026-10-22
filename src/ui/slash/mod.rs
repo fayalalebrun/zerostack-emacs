@@ -386,7 +386,7 @@ pub async fn handle_slash(
         "/fast" | "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys"
         | "/advisor" | "/subagents" => settings::handle(&parts, &mut ctx).await,
         "/sessions" | "/clear" | "/new" | "/undo" | "/retry" | "/quit" | "/exit" | "/history"
-        | "/rewind" => session::handle(&parts, &mut ctx).await,
+        | "/rewind" | "/fork" => session::handle(&parts, &mut ctx).await,
         "/goal" => goal::handle(&parts, &mut ctx).await,
         "/timing" => timing::handle(&mut ctx).await,
         "/help" => {

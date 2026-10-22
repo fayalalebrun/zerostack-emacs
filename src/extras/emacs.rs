@@ -1381,6 +1381,7 @@ mod imp {
             "prompt" => handle_prompt(server.clone(), &cmd, out).await,
             "compact" => handle_compact(&server, &cmd, out).await,
             "rewind" => handle_rewind(&server, &cmd, out).await,
+            "fork" => handle_fork(&server, &cmd, out).await,
             "redo" => handle_redo(&server, &cmd, out).await,
             "provider" => handle_provider(&server, &cmd, out).await,
             "model" => handle_model(&server, &cmd, out).await,
@@ -2388,6 +2389,72 @@ mod imp {
             }
         }
         server.update_meta_from_session().await;
+        Ok(())
+    }
+
+    async fn handle_fork(
+        server: &Arc<Server>,
+        cmd: &Command,
+        out: &mpsc::Sender<String>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !server.cli.no_session,
+            "fork requires session persistence; --no-session is active"
+        );
+        let before = if cmd.args.contains_key("index") {
+            Some(usize_arg(cmd, "index").context("fork :index must be a nonnegative integer")?)
+        } else {
+            None
+        };
+        let (fork, draft, files) = {
+            // Keep the idle check and snapshot together. A second client must not
+            // start a turn between the check and the copy.
+            let mutable = server.mutable.lock().await;
+            anyhow::ensure!(
+                !mutable.running,
+                "cannot fork while an agent turn is running"
+            );
+            #[cfg(feature = "loop")]
+            anyhow::ensure!(
+                !mutable
+                    .loop_state
+                    .as_ref()
+                    .is_some_and(|state| state.active),
+                "cannot fork while a loop is active"
+            );
+            let session = server.session.lock().await;
+            let fork = crate::session::fork::save(&session, before)?;
+            let draft = before.map(|index| session.messages[index].content.to_string());
+            let files = before
+                .into_iter()
+                .flat_map(|index| &session.messages[index].attachments)
+                .map(|attachment| {
+                    sexp_quote(
+                        &crate::session::storage::media_dir(&fork.id)
+                            .join(attachment.stored_name.as_str())
+                            .to_string_lossy(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (fork, draft, files)
+        };
+        send_ok(
+            out,
+            request_arg(cmd),
+            format!(
+                " :fork-session {} :fork-title {} :fork-cwd {} :fork-text {} :fork-files ({})",
+                sexp_quote(&fork.id),
+                sexp_quote(&fork.title()),
+                sexp_quote(&fork.working_dir),
+                draft
+                    .as_deref()
+                    .map(sexp_quote)
+                    .unwrap_or_else(|| "nil".to_string()),
+                files,
+            ),
+        )
+        .await;
         Ok(())
     }
 
@@ -10103,6 +10170,169 @@ mod imp {
             assert!(!meta.fast_mode);
             assert!(!meta.fast_mode_available);
             assert_eq!(session.service_tier, Some(crate::config::ServiceTier::Fast));
+        }
+
+        #[tokio::test]
+        async fn fork_protocol_saves_new_session_without_changing_source_or_broadcasting() {
+            struct TestData(PathBuf, Option<PathBuf>);
+            impl Drop for TestData {
+                fn drop(&mut self) {
+                    crate::session::storage::set_test_data_dir(self.1.take());
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let root =
+                std::env::temp_dir().join(format!("zs-fork-protocol-{}", uuid::Uuid::new_v4()));
+            let _data = TestData(
+                root.clone(),
+                crate::session::storage::set_test_data_dir(Some(root)),
+            );
+            let (mut server, _registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            Arc::get_mut(&mut server).unwrap().cli.no_session = false;
+            {
+                let mut session = server.session.lock().await;
+                session.add_message(MessageRole::User, "original prompt");
+                session.add_message(MessageRole::Assistant, "original answer");
+                session.add_message(MessageRole::User, "edit this prompt");
+                session.messages[2]
+                    .attachments
+                    .push(crate::session::SessionAttachment {
+                        filename: "draft.png".into(),
+                        stored_name: "draft.png".into(),
+                        mime: "image/png".into(),
+                        size_bytes: 5,
+                    });
+                let media = crate::session::storage::media_dir(&session.id);
+                std::fs::create_dir_all(&media).unwrap();
+                std::fs::write(media.join("draft.png"), b"image").unwrap();
+                session.service_tier = Some(crate::config::ServiceTier::Fast);
+                crate::session::storage::save_session(&session).unwrap();
+            }
+            let original = server.session.lock().await.clone();
+            let original_bytes =
+                std::fs::read(crate::session::storage::session_path(&original.id)).unwrap();
+            let mut events = server.events.subscribe();
+            let (tx, mut rx) = mpsc::channel(8);
+            handle_command(
+                server.clone(),
+                parse_command("(fork :request 12)").unwrap(),
+                &tx,
+            )
+            .await;
+            let response = parse_command(&rx.recv().await.unwrap()).unwrap();
+            assert_eq!(response.name, "ok");
+            assert_eq!(request_arg(&response).as_deref(), Some("12"));
+            let id = string_arg(&response, "fork-session").unwrap();
+            assert_ne!(id, original.id.as_str());
+            assert_eq!(
+                string_arg(&response, "fork-cwd").unwrap(),
+                original.working_dir.as_str()
+            );
+            let saved: Session = serde_json::from_slice(
+                &std::fs::read(crate::session::storage::session_path(&id)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.messages.len(), original.messages.len());
+            assert_eq!(saved.service_tier, original.service_tier);
+            assert_eq!(
+                std::fs::read(crate::session::storage::session_path(&original.id)).unwrap(),
+                original_bytes
+            );
+            assert_eq!(
+                serde_json::to_value(&*server.session.lock().await).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+            for invalid in ["nil", "-1", "invalid", "1", "99"] {
+                handle_command(
+                    server.clone(),
+                    parse_command(&format!("(fork :index {invalid})")).unwrap(),
+                    &tx,
+                )
+                .await;
+                assert_eq!(
+                    parse_command(&rx.recv().await.unwrap()).unwrap().name,
+                    "error"
+                );
+            }
+            handle_command(
+                server.clone(),
+                parse_command("(fork :request 13 :index 2)").unwrap(),
+                &tx,
+            )
+            .await;
+            let response = parse_command(&rx.recv().await.unwrap()).unwrap();
+            assert_eq!(response.name, "ok");
+            assert_eq!(
+                string_arg(&response, "fork-text").as_deref(),
+                Some("edit this prompt")
+            );
+            let id = string_arg(&response, "fork-session").unwrap();
+            let saved: Session = serde_json::from_slice(
+                &std::fs::read(crate::session::storage::session_path(&id)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.messages.len(), 2);
+            let files = string_list_arg(&response, "fork-files").unwrap();
+            assert_eq!(files.len(), 1);
+            assert!(Path::new(&files[0]).starts_with(crate::session::storage::media_dir(&id)));
+            assert_eq!(std::fs::read(&files[0]).unwrap(), b"image");
+            assert_eq!(
+                std::fs::read(crate::session::storage::session_path(&original.id)).unwrap(),
+                original_bytes
+            );
+        }
+
+        #[tokio::test]
+        async fn fork_protocol_rejects_no_session_busy_loop_and_read_only_requests() {
+            let (mut server, _registration, _listener) =
+                test_server(Arc::new(std::sync::Mutex::new(Vec::new())));
+            let (tx, mut rx) = mpsc::channel(8);
+            let cmd = parse_command("(fork :request 1)").unwrap();
+            assert!(
+                handle_fork(&server, &cmd, &tx)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--no-session")
+            );
+            Arc::get_mut(&mut server).unwrap().cli.no_session = false;
+            server.mutable.lock().await.running = true;
+            assert!(
+                handle_fork(&server, &cmd, &tx)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("running")
+            );
+            server.mutable.lock().await.running = false;
+            #[cfg(feature = "loop")]
+            {
+                server.mutable.lock().await.loop_state =
+                    Some(crate::extras::r#loop::LoopState::new(
+                        "test".to_string(),
+                        PathBuf::from("PLAN.md"),
+                        None,
+                        None,
+                    ));
+                assert!(
+                    handle_fork(&server, &cmd, &tx)
+                        .await
+                        .unwrap_err()
+                        .to_string()
+                        .contains("loop")
+                );
+                server.mutable.lock().await.loop_state = None;
+            }
+            let indexed = parse_command("(fork :index -1)").unwrap();
+            assert!(handle_fork(&server, &indexed, &tx).await.is_err());
+            Arc::get_mut(&mut server).unwrap().read_only = true;
+            handle_command(server.clone(), cmd, &tx).await;
+            assert!(rx.recv().await.unwrap().contains("read-only"));
         }
 
         fn test_server(

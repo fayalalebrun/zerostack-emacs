@@ -1,4 +1,5 @@
 pub mod chat_history;
+pub mod fork;
 pub mod storage;
 pub mod timing;
 
@@ -356,6 +357,8 @@ pub struct PermissionAllowEntry {
 pub struct Session {
     pub id: CompactString,
     pub name: CompactString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_source: Option<fork::ForkSource>,
     pub messages: Vec<SessionMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_calls: Vec<SessionProviderCall>,
@@ -554,6 +557,7 @@ impl Session {
         Session {
             id: CompactString::new(Uuid::new_v4().to_string()),
             name: CompactString::new(""),
+            fork_source: None,
             messages: Vec::new(),
             provider_calls: Vec::new(),
             compactions: Vec::new(),
