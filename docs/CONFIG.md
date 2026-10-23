@@ -565,6 +565,9 @@ permission tool keys are `bash`, `read`, `write`, `edit`, `grep`, `find_files`,
 `external_directory` for absolute-path rules outside the working directory, and
 `doom_loop` for repeated identical tool calls (default: `ask`). If `bash` is
 omitted, zerostack installs its built-in safe bash allow/deny rules.
+Calls that permission rules allow stay allowed when repeated. They do not produce
+loop coaching messages. The `doom_loop` action applies only to calls that would
+otherwise require approval.
 
 There are two config fields for controlling permissions by pattern:
 

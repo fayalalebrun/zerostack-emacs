@@ -381,7 +381,6 @@ pub async fn check_perm(
     };
     match result {
         CheckResult::Allowed => Ok(None),
-        CheckResult::AllowedWithCoaching(msg) => Ok(Some(msg)),
         CheckResult::Denied(reason) => {
             Err(ToolError::Msg(format!("Permission denied: {}", reason)))
         }
@@ -412,7 +411,6 @@ pub async fn check_perm_path(
     };
     match result {
         CheckResult::Allowed => Ok(None),
-        CheckResult::AllowedWithCoaching(msg) => Ok(Some(msg)),
         CheckResult::Denied(reason) => {
             Err(ToolError::Msg(format!("Permission denied: {}", reason)))
         }

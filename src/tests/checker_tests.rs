@@ -217,16 +217,17 @@ fn deny_rule_is_denied_in_yolo() {
 // --- Doom loop detection ---
 
 #[test]
-fn doom_loop_triggers_after_three_repeated_calls() {
-    let mut checker = make_checker(SecurityMode::Standard);
-    checker.check("bash", "ls");
-    checker.check("bash", "ls");
-    let result = checker.check("bash", "ls");
-    assert!(
-        matches!(result, CheckResult::AllowedWithCoaching(_)),
-        "expected AllowedWithCoaching from doom loop in Standard, got {:?}",
-        result,
-    );
+fn repeated_allowed_calls_stay_allowed_without_coaching() {
+    for mode in [
+        SecurityMode::Standard,
+        SecurityMode::Guarded,
+        SecurityMode::Yolo,
+    ] {
+        let mut checker = make_checker(mode);
+        for _ in 0..10 {
+            assert_eq!(checker.check("bash", "echo test"), CheckResult::Allowed);
+        }
+    }
 }
 
 #[test]
@@ -1140,18 +1141,11 @@ fn guarded_allows_internal_path_read() {
 // --- Doom loop across different modes ---
 
 #[test]
-fn doom_loop_triggers_in_guarded() {
+fn repeated_allowed_calls_stay_allowed_in_guarded() {
     let mut checker = make_checker(SecurityMode::Guarded);
-    // "echo test" matches echo ** allow rule, so action is Allow.
-    // Doom loop should coach instead of asking.
-    checker.check("bash", "echo test");
-    checker.check("bash", "echo test");
-    let result = checker.check("bash", "echo test");
-    assert!(
-        matches!(result, CheckResult::AllowedWithCoaching(_)),
-        "expected AllowedWithCoaching from doom loop in Guarded, got {:?}",
-        result,
-    );
+    for _ in 0..10 {
+        assert_eq!(checker.check("bash", "echo test"), CheckResult::Allowed);
+    }
 }
 
 #[test]
@@ -1169,24 +1163,14 @@ fn doom_loop_still_asks_for_read_tool_in_restrictive() {
 }
 
 #[test]
-fn doom_loop_path_coaches_in_standard_auto_allow() {
+fn repeated_allowed_path_calls_stay_allowed_without_coaching() {
     let mut checker = make_checker(SecurityMode::Standard);
-    // In Standard, path tools within CWD are auto-allowed.
-    // Doom loop should coach instead of asking.
-    assert!(matches!(
-        checker.check_path("edit", "src/main.rs"),
-        CheckResult::Allowed,
-    ));
-    assert!(matches!(
-        checker.check_path("edit", "src/main.rs"),
-        CheckResult::Allowed,
-    ));
-    let result = checker.check_path("edit", "src/main.rs");
-    assert!(
-        matches!(result, CheckResult::AllowedWithCoaching(_)),
-        "expected AllowedWithCoaching for path doom loop in Standard, got {:?}",
-        result,
-    );
+    for _ in 0..10 {
+        assert_eq!(
+            checker.check_path("edit", "src/main.rs"),
+            CheckResult::Allowed,
+        );
+    }
 }
 
 // --- Path edge cases ---

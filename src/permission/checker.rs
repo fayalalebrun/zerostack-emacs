@@ -12,18 +12,8 @@ pub type PermCheck = Arc<Mutex<PermissionChecker>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckResult {
     Allowed,
-    AllowedWithCoaching(String),
     Ask,
     Denied(String),
-}
-
-impl CheckResult {
-    pub fn allowed_with_coaching(tool: &str, _input: &str, count: usize) -> Self {
-        CheckResult::AllowedWithCoaching(format!(
-            "Coaching: You've called {tool} on the same input {count} times in a row. \
-             This looks like a loop — try a different approach.",
-        ))
-    }
 }
 
 pub struct PermissionChecker {
@@ -292,8 +282,7 @@ impl PermissionChecker {
             self.track_doom_loop(tool, doom_key);
             if self.is_doom_loop() {
                 if action == Action::Allow {
-                    let count = self.count_doom_loop();
-                    return CheckResult::allowed_with_coaching(tool, doom_key, count);
+                    return CheckResult::Allowed;
                 }
                 match self.doom_loop_action {
                     Action::Deny => {
@@ -478,10 +467,6 @@ impl PermissionChecker {
 
     fn is_doom_loop(&self) -> bool {
         self.consecutive_repeat_count >= 3
-    }
-
-    fn count_doom_loop(&self) -> usize {
-        self.consecutive_repeat_count
     }
 }
 
