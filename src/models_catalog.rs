@@ -1,12 +1,8 @@
-//! Static, embedded model catalog.
+//! Embedded model metadata snapshot.
 //!
-//! Model ids change rarely between releases, so instead of hitting each
-//! provider's `/models` endpoint at startup (slow — OpenRouter alone returns
-//! hundreds of entries and used to block the first frame), we bake a snapshot
-//! into the binary. The picker is seeded from this synchronously, with zero
-//! network. The live listing is still available on demand via `/models refresh`
-//! (see [`crate::ui::slash`]) and for providers not baked here (custom gateways,
-//! ollama).
+//! Live discovery in `model_discovery` supplies available model IDs. This
+//! snapshot supplies known context limits and other compatibility metadata;
+//! it never seeds the model picker or expands a provider's live result.
 //!
 //! The data lives in `data/models.json`, keyed by *zerostack* provider name
 //! (so `gemini`, not models.dev's `google`). Refresh it with

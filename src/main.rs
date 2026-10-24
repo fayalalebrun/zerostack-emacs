@@ -9,6 +9,7 @@ mod docs;
 mod event;
 mod extras;
 mod fs;
+mod model_discovery;
 mod models_catalog;
 mod permission;
 mod pricing;
@@ -133,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(cli::Command::Config { command }) = &cli.command {
-        handle_config_command(&mut cfg, command)?;
+        handle_config_command(&mut cfg, command, cli.api_key.as_deref()).await?;
         return Ok(());
     }
 
@@ -1099,9 +1100,10 @@ async fn run_subagent_child(
     anyhow::bail!("subagent agent loop stopped before completion")
 }
 
-fn handle_config_command(
+async fn handle_config_command(
     cfg: &mut config::Config,
     command: &cli::ConfigCommand,
+    api_key: Option<&str>,
 ) -> anyhow::Result<()> {
     match command {
         cli::ConfigCommand::Providers => {
@@ -1109,14 +1111,17 @@ fn handle_config_command(
                 println!("{provider}");
             }
         }
-        cli::ConfigCommand::Models { provider } => {
+        cli::ConfigCommand::Models { provider, refresh } => {
             let provider = provider
                 .as_deref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| config::commands::default_provider_name(cfg));
             config::commands::validate_provider(cfg, &provider)?;
-            for model in config::commands::model_ids_for_provider(&provider) {
-                println!("{model}");
+            for model in model_discovery::list(&provider, api_key, cfg, *refresh)
+                .await?
+                .iter()
+            {
+                println!("{}", model.id);
             }
         }
         cli::ConfigCommand::QuickModels => {

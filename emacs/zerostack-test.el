@@ -39,6 +39,23 @@
            (should (equal zerostack--session "source-session")))
        (kill-buffer fork)))))
 
+(ert-deftest zerostack-test-model-discovery-failure-keeps-manual-entry ()
+  (cl-letf (((symbol-function 'zerostack--config-lines)
+             (lambda (&rest _) (user-error "Provider listing unavailable")))
+            ((symbol-function 'completing-read)
+             (lambda (_prompt collection &optional _predicate require-match &rest _)
+               (should-not collection)
+               (should-not require-match)
+               "manual-model")))
+    (should (equal (zerostack--read-model "gateway" "old-model") "manual-model"))))
+
+(ert-deftest zerostack-test-model-discovery-uses-provider-cli-results ()
+  (cl-letf (((symbol-function 'zerostack--config-lines)
+             (lambda (&rest args)
+               (should (equal args '("models" "gateway")))
+               '("live-model"))))
+    (should (equal (zerostack--model-choices "gateway") '("live-model")))))
+
 (ert-deftest zerostack-test-patch-artifact-selects-diff-mode-from-extension ()
   (let ((path (make-temp-file "zerostack-patch-" nil ".patch"))
         buffer)

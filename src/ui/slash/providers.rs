@@ -1,9 +1,10 @@
+#[cfg(test)]
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 
 use crate::cli::Cli;
 use crate::config::{self, Config};
-use crate::provider::{AnyClient, ModelEntry, list_models_manual};
+use crate::provider::ModelEntry;
 use crate::ui::slash::{SlashCtx, write_error, write_ok, write_result};
 
 pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
@@ -20,69 +21,18 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
     }
 }
 
-static MODEL_CACHE: LazyLock<Mutex<HashMap<String, Arc<[ModelEntry]>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Returns the provider's models.
-///
-/// Network is only touched on `refresh`, for custom gateways, or for built-in
-/// providers that aren't baked (e.g. ollama). Baked built-ins are served from
-/// the embedded catalog with no network call — this is what keeps startup instant.
+/// Shared persistent discovery. Normal TUI reads never wait for the network.
 pub(crate) async fn fetch_models_cached(
     provider: &str,
-    is_custom: bool,
-    client: &AnyClient,
     cli: &Cli,
     cfg: &Config,
     refresh: bool,
 ) -> anyhow::Result<Arc<[ModelEntry]>> {
-    if !refresh {
-        if let Some(hit) = MODEL_CACHE.lock().unwrap().get(provider) {
-            return Ok(Arc::clone(hit)); // guard dropped here, NOT across any await
-        }
-        // No cache yet: serve the baked catalog for built-in providers — no network.
-        if !is_custom && let Some(entries) = crate::models_catalog::catalog_entries(provider) {
-            let models: Vec<ModelEntry> = entries
-                .iter()
-                .filter(|m| crate::provider::is_agent_model(m))
-                .cloned()
-                .collect();
-            let arc: Arc<[ModelEntry]> = Arc::from(models.into_boxed_slice());
-            MODEL_CACHE
-                .lock()
-                .unwrap()
-                .insert(provider.to_string(), Arc::clone(&arc));
-            return Ok(arc);
-        }
-    }
-    let mut models = if is_custom {
-        list_models_manual(
-            provider,
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        )
-        .await?
+    if refresh {
+        crate::model_discovery::list(provider, cli.api_key.as_deref(), cfg, true).await
     } else {
-        client.list_models().await?
-    };
-    models.retain(crate::provider::is_agent_model);
-    let arc: Arc<[ModelEntry]> = Arc::from(models.into_boxed_slice());
-    MODEL_CACHE
-        .lock()
-        .unwrap()
-        .insert(provider.to_string(), Arc::clone(&arc));
-    Ok(arc)
-}
-
-/// sync read for the picker (no await)
-pub(crate) fn cached_model_ids(provider: &str) -> Vec<String> {
-    MODEL_CACHE
-        .lock()
-        .unwrap()
-        .get(provider)
-        .map(|v| v.iter().map(|m| m.id.clone()).collect())
-        .unwrap_or_default()
+        crate::model_discovery::warm(provider, cli.api_key.as_deref(), cfg)
+    }
 }
 
 pub(crate) fn quick_model_names_for_provider(cfg: &Config, provider: &str) -> Vec<String> {
@@ -95,15 +45,10 @@ pub(crate) fn quick_model_names_for_provider(cfg: &Config, provider: &str) -> Ve
 }
 
 /// best-effort warm; returns id list (empty on failure, never errors)
-pub(crate) async fn warm_model_cache(
-    provider: &str,
-    is_custom: bool,
-    client: &AnyClient,
-    cli: &Cli,
-    cfg: &Config,
-) -> Vec<String> {
-    let _ = fetch_models_cached(provider, is_custom, client, cli, cfg, false).await;
-    cached_model_ids(provider)
+pub(crate) fn warm_model_cache(provider: &str, cli: &Cli, cfg: &Config) -> Vec<String> {
+    crate::model_discovery::warm(provider, cli.api_key.as_deref(), cfg)
+        .map(|models| models.iter().map(|model| model.id.clone()).collect())
+        .unwrap_or_default()
 }
 
 async fn apply_model(ctx: &mut SlashCtx<'_>, model_id: &str) {
@@ -271,7 +216,6 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
 async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     let qm = config::quick_models_map(ctx.cfg);
     let provider = ctx.session.provider.to_string();
-    let is_custom = ctx.cfg.custom_providers_map().contains_key(&provider);
     let provider_quick_models = quick_model_names_for_provider(ctx.cfg, &provider);
 
     let refresh = parts.get(1).map(|s| s.trim()) == Some("refresh");
@@ -301,11 +245,12 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
     }
 
     // ---- list mode (+ optional refresh) ----
-    match fetch_models_cached(&provider, is_custom, ctx.client, ctx.cli, ctx.cfg, refresh).await {
+    match fetch_models_cached(&provider, ctx.cli, ctx.cfg, refresh).await {
         Ok(models) => {
             ctx.input
                 .set_quick_model_names(quick_model_names_for_provider(ctx.cfg, &provider));
-            ctx.input.set_live_model_names(cached_model_ids(&provider));
+            ctx.input
+                .set_live_model_names(models.iter().map(|model| model.id.clone()).collect());
             if refresh {
                 // Explicit refresh: just confirm with a count overview — the picker
                 // already holds the full list, so don't dump it to the scrollback.
@@ -344,7 +289,7 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
                 if !models.is_empty() {
                     write_ok(
                         ctx.renderer,
-                        format!("available from {} ({}):", provider, models.len()),
+                        format!("cached models from {} ({}):", provider, models.len()),
                     );
                     const CAP: usize = 50;
                     for m in models.iter().take(CAP) {
@@ -368,6 +313,11 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
                             ),
                         );
                     }
+                } else {
+                    write_result(
+                        ctx.renderer,
+                        "  No cached model choices. Use /models refresh to query now, or enter a model ID directly.",
+                    );
                 }
             }
         }
@@ -375,7 +325,7 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
             tracing::debug!("model listing failed for {}: {}", provider, e);
             if refresh {
                 write_error(ctx.renderer, format!("model list refresh failed: {}", e));
-            } else if is_custom {
+            } else {
                 write_result(
                     ctx.renderer,
                     "  (live model list unavailable; type the model id directly)",

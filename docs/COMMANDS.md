@@ -112,7 +112,8 @@ the error includes the saved fork ID and the original session stays active.
 | `/provider <name>` | Switch to a different provider. |
 | `/model` | Show the current model. |
 | `/model <name>` | Switch to a different model. |
-| `/models` | List all quick models defined in config. |
+| `/models` | List quick models and cached provider models. Refresh stale lists in the background. |
+| `/models refresh` | Query the provider now and update the persistent model cache and picker. |
 | `/models <name>` | Switch to a named quick model. |
 | `/models-add <name> <provider> <model>` | Save a new quick model to the config file. |
 
@@ -123,11 +124,14 @@ These are top-level CLI commands, not slash commands:
 | Command | Description |
 | ------- | ----------- |
 | `zerostack config providers` | List built-in and custom provider names. |
-| `zerostack config models [provider]` | List baked model IDs for a provider, or for the current default provider when omitted. Custom/uncataloged providers may return no rows so clients can allow manual model entry. |
+| `zerostack config models [provider] [--refresh]` | List account-scoped provider model IDs. Reuse a fresh persistent cache, or query the provider when missing/stale. `--refresh` forces a query. |
 | `zerostack config set-provider <provider>` | Persist the default provider in config and reset the default model to that provider's configured/default model. |
 | `zerostack config set-model <model>` | Persist the default model for the current default provider. |
 | `zerostack auth login codex` | Log in to ChatGPT Codex subscription auth with the browser/redirect flow. |
 | `zerostack auth login codex --device` | Log in with the device-code flow. |
+| `zerostack auth login opencode-go` | Log in to OpenCode Console with the browser-based device-code flow. `--device` also selects this same flow. |
+| `zerostack auth status opencode-go` | Show stored OpenCode OAuth or API-key status. |
+| `zerostack auth logout opencode-go` | Remove stored OpenCode credentials. |
 | `zerostack auth status` | Show stored provider auth state. |
 | `zerostack auth logout codex` | Remove stored Codex credentials. |
 
@@ -136,6 +140,40 @@ with private file permissions. Use them with `--provider openai-codex` and a Cod
 model such as `gpt-5.1-codex`. Provider requests reload and refresh the shared
 credentials while a long-lived Emacs/TUI session is running; the next request will
 use the updated file.
+
+### OpenCode Console OAuth
+
+Run `zerostack auth login opencode-go`. Open the printed URL and approve the
+printed device code in OpenCode Console. The command also tries to open your
+browser. This flow works over SSH: open the URL on another device. No local
+callback port is needed. `opencode` is an alias for authentication commands;
+use `opencode-go` as the provider name for model requests.
+
+Use the login with `--provider opencode-go --model glm-5.3-flash`, or keep your
+existing OpenCode Go subagent configuration. OAuth credentials take priority over
+API keys in the environment and config file. An explicit `--api-key` selects
+API-key authentication instead. `zerostack auth set-key opencode-go <key>`
+replaces the stored OAuth login with a service-account key.
+
+Credentials are stored in the same private `auth.json` file as Codex credentials.
+Requests reload the credentials and refresh expiring tokens automatically.
+Concurrent refreshes share a file lock and save rotated refresh tokens.
+Logging out removes the local credentials; it does not revoke the Console
+session. Any configured API key can still be used after logout.
+
+OAuth requests apply the Console's `/api/v2/config` overrides to the normal Go
+catalog and API URLs. An empty or missing model override means unchanged, not
+unavailable. Explicitly disabled models remain unavailable. The model list merges
+the live Go catalog with these overrides. Zen (`opencode`) overrides never apply
+to Go (`opencode-go`). Requests stop if Console configuration or authentication
+fails. Configuration is cached for up to one minute per client. Only HTTPS
+inference URLs on `opencode.ai` are accepted.
+Models that require a different API protocol from zerostack's model routing
+return an error. Console organizations with nonempty managed policies are not
+yet supported; requests stop rather than ignore those policies.
+
+After installing a new zerostack binary, restart existing persistent sessions to
+load OAuth support. A new login then takes effect on the next OAuth request.
 
 ## Context Files
 

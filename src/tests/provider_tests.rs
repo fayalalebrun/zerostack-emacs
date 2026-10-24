@@ -363,16 +363,43 @@ fn deepseek_client_builds_as_openai_compatible() {
 }
 
 #[tokio::test]
-async fn deepseek_lists_static_zerostack_defaults() {
-    let client = create_client("deepseek", Some("sk-test"), &HashMap::new(), None, None).unwrap();
+async fn deepseek_lists_live_models_instead_of_static_defaults() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            headers.push_str(&line);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let body = r#"{"object":"list","data":[{"id":"new-deepseek-model","object":"model","created":0,"owned_by":"deepseek"}]}"#;
+        reader.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        headers
+    });
+    let custom: CustomProviderConfig =
+        serde_json::from_value(serde_json::json!({"provider_type":"deepseek","base_url":base}))
+            .unwrap();
+    let client = create_client(
+        "deepseek-test",
+        Some("test-key"),
+        &HashMap::from([("deepseek-test".into(), custom)]),
+        None,
+        None,
+    )
+    .unwrap();
     let models = client.list_models().await.unwrap();
-    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
-    let flash = models.iter().find(|m| m.id == "deepseek-v4-flash").unwrap();
-    assert_eq!(flash.display, "DeepSeek V4 Flash");
-    assert_eq!(flash.context_length, Some(1_000_000));
-    let pro = models.iter().find(|m| m.id == "deepseek-v4-pro").unwrap();
-    assert_eq!(pro.context_length, Some(1_000_000));
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "new-deepseek-model");
+    let headers = server.await.unwrap().to_ascii_lowercase();
+    assert!(headers.starts_with("get /models "));
+    assert!(headers.contains("authorization: bearer test-key"));
 }
 
 #[test]
@@ -389,26 +416,18 @@ fn openai_codex_client_builds_without_static_api_key() {
     assert!(matches!(client, AnyClient::OpenAI(OpenAiClient::Codex(_))));
 }
 
-#[tokio::test]
-async fn openai_codex_lists_static_zerostack_defaults() {
-    let client = create_client("openai-codex", None, &HashMap::new(), None, None).unwrap();
-    let models = client.list_models().await.unwrap();
-    let openai_catalog = crate::models_catalog::catalog_entries("openai").unwrap();
-    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
-    let openai_ids: Vec<_> = openai_catalog.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, openai_ids);
-    let gpt55 = models.iter().find(|m| m.id == "gpt-5.5").unwrap();
-    assert_eq!(gpt55.display, "GPT-5.5");
-    assert_eq!(gpt55.context_length, Some(1_050_000));
-    for id in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
-        let model = models.iter().find(|m| m.id == id).unwrap();
-        assert_eq!(model.context_length, Some(372_000));
-    }
-    let spark = models
-        .iter()
-        .find(|m| m.id == "gpt-5.3-codex-spark")
-        .unwrap();
-    assert_eq!(spark.context_length, Some(128_000));
+#[test]
+fn codex_parses_account_model_listing_without_adding_static_models() {
+    let models = crate::provider::parse_codex_models(r#"{"models":[
+        {"slug":"new-codex","display_name":"New Codex","context_window":500000,"visibility":"list","supported_in_api":true},
+        {"slug":"hidden","visibility":"hide"},
+        {"slug":"not-supported","supported_in_api":false}
+    ]}"#).unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "new-codex");
+    assert_eq!(models[0].display, "New Codex");
+    assert_eq!(models[0].context_length, Some(500000));
+    assert!(crate::provider::parse_codex_models(r#"{"data":[]}"#).is_err());
 }
 
 #[test]

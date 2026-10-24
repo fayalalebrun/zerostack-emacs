@@ -29,10 +29,48 @@ The model is set with `--model` or `ZS_MODEL`:
 zerostack --provider openai --model gpt-4o
 ```
 
+## Model discovery
+
+Model choices come from provider queries, not the embedded model snapshot.
+This includes DeepSeek's `/models` endpoint and the authenticated Codex model
+catalog for your ChatGPT account. OpenCode Go queries its live catalog and
+applies Console overrides when OAuth is active. Custom OpenAI-compatible
+providers use their configured `/models` endpoint.
+
+The TUI shows the last successful cached list immediately and refreshes stale
+lists in the background. With no cache, the provider group starts empty and
+updates when discovery completes, including an open model picker. Quick models
+and manual model IDs remain usable while discovery runs.
+
+Successful lists are cached for six hours under
+`$XDG_CACHE_HOME/zerostack/model-discovery/` (normally `~/.cache/zerostack/`).
+Each cache scope includes the provider, endpoint, authentication identity, and
+custom headers. API keys, account/workspace identifiers, and header values are
+hashed into the filename; they are not stored in the cache record. OAuth token
+rotation does not invalidate a cache for the same account and workspace.
+
+Use `/models refresh` or `zerostack config models [provider] --refresh` to force
+a query. Normal CLI queries reuse fresh cached lists and wait for discovery
+when the list is stale or missing. This is also the source for Emacs completion.
+Queries time out after 15 seconds. Failed refreshes keep the last successful
+list. Explicit refresh failures report an error. Automatic background retries
+have a one-minute cooldown. Successful empty lists replace older results.
+
+If the provider has no usable model-list endpoint and there is no successful
+cache, discovery reports an error; model IDs can still be entered manually.
+zerostack does not substitute a guessed list of available models.
+
+The embedded snapshot remains a metadata source for known context limits.
+Discovery can fill missing metadata from it, but never adds models from it to
+a provider result. Context budgeting still uses explicit configuration and the
+metadata snapshot. Model-specific reasoning controls, default models, and API
+compatibility rules remain separate from model discovery; a new model ID alone
+does not describe its API protocol or capabilities.
+
 ## OpenCode Go
 
-Subscribe to OpenCode Go, copy its API key, then set `OPENCODE_GO_API_KEY` or
-store it locally:
+Subscribe to OpenCode Go, then run `zerostack auth login opencode-go` for Console
+OAuth login. Service-account API keys are also supported:
 
 ```bash
 zerostack auth set-key opencode-go <key>
@@ -46,10 +84,9 @@ UUID retained across requests and client clones.
 
 OpenCode Go serves some models through OpenAI Chat Completions, OpenAI
 Responses, or Anthropic Messages. zerostack selects the documented API style
-for each bundled model automatically. The embedded 45-model snapshot combines
-the published endpoint table with the live catalog and is used at startup; run
-`/models refresh` in the TUI to replace it with the current
-live `/models` catalog. The snapshot is also available with:
+for known models automatically. Model choices come from the live catalog and
+its account-scoped cache. The embedded snapshot supplies metadata, not model
+availability. Query or refresh the current list with:
 
 ```bash
 zerostack config models opencode-go

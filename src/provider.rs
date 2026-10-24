@@ -28,7 +28,7 @@ use crate::sandbox::Sandbox;
 use crate::session::SessionMessage;
 
 const OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+pub(crate) const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 pub struct ProviderConfig {
@@ -173,6 +173,7 @@ pub struct OpenCodeGoClient {
     http_client: reqwest::Client,
     api_key: String,
     headers: HeaderMap,
+    oauth: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,17 +228,137 @@ pub struct OpenCodeGoHttpClient {
     inner: rig::http_client::ReqwestClient,
     headers: HeaderMap,
     patch_reasoning: bool,
+    oauth_config: Option<std::sync::Arc<tokio::sync::Mutex<Option<OpenCodeOAuthConfig>>>>,
 }
 
+#[derive(Debug)]
+struct OpenCodeOAuthConfig {
+    loaded_at: std::time::Instant,
+    account_id: String,
+    org_id: Option<String>,
+    value: serde_json::Value,
+}
 impl OpenCodeGoHttpClient {
     fn new(inner: reqwest::Client) -> Self {
         Self {
             inner: inner.into(),
             headers: HeaderMap::new(),
             patch_reasoning: true,
+            oauth_config: None,
         }
     }
 
+    async fn authorize(
+        &self,
+        parts: &mut http::request::Parts,
+        body: bytes::Bytes,
+    ) -> http_client::Result<bytes::Bytes> {
+        let Some(cache) = &self.oauth_config else {
+            return Ok(body);
+        };
+        let auth = crate::auth::opencode::request_auth()
+            .await
+            .map_err(to_http_error)?;
+        let mut cache = cache.lock().await;
+        if cache.as_ref().is_none_or(|cached| {
+            cached.loaded_at.elapsed().as_secs() >= 60
+                || cached.account_id != auth.account_id
+                || cached.org_id != auth.org_id
+        }) {
+            *cache = Some(OpenCodeOAuthConfig {
+                loaded_at: std::time::Instant::now(),
+                account_id: auth.account_id.clone(),
+                org_id: auth.org_id.clone(),
+                value: crate::auth::opencode::config(&auth)
+                    .await
+                    .map_err(to_http_error)?,
+            });
+        }
+        let config = &cache.as_ref().expect("loaded Console config").value;
+        Self::apply_oauth(&auth, config, parts, body)
+    }
+
+    fn apply_oauth(
+        auth: &crate::auth::opencode::Credential,
+        config: &serde_json::Value,
+        parts: &mut http::request::Parts,
+        body: bytes::Bytes,
+    ) -> http_client::Result<bytes::Bytes> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|e| to_http_error(e.into()))?;
+        let model = value["model"]
+            .as_str()
+            .ok_or_else(|| to_http_error(anyhow::anyhow!("OpenCode request has no model")))?;
+        let endpoint = if parts.uri.path().ends_with("/chat/completions") {
+            "chat/completions"
+        } else if parts.uri.path().ends_with("/responses") {
+            "responses"
+        } else if parts.uri.path().ends_with("/messages") {
+            "v1/messages"
+        } else {
+            return Err(to_http_error(anyhow::anyhow!(
+                "unsupported OpenCode OAuth endpoint"
+            )));
+        };
+        let (url, model_id) =
+            crate::auth::opencode::route(config, model, endpoint).map_err(to_http_error)?;
+        let provider = crate::auth::opencode::provider_config(config).map_err(to_http_error)?;
+        for headers in [
+            provider.get("headers"),
+            provider["models"][model].get("headers"),
+        ] {
+            let Some(headers) = headers.and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for (name, value) in headers {
+                let name =
+                    HeaderName::from_bytes(name.as_bytes()).map_err(|e| to_http_error(e.into()))?;
+                // Console routing headers may change, but credentials and client identity
+                // always come from the local login and session.
+                if matches!(
+                    name.as_str(),
+                    "authorization"
+                        | "x-api-key"
+                        | "x-org-id"
+                        | "host"
+                        | "content-length"
+                        | "x-opencode-session"
+                        | "user-agent"
+                ) {
+                    continue;
+                }
+                if value.is_null() {
+                    parts.headers.remove(&name);
+                } else {
+                    let value = value.as_str().ok_or_else(|| {
+                        to_http_error(anyhow::anyhow!(
+                            "OpenCode Console returned a non-string header"
+                        ))
+                    })?;
+                    parts.headers.insert(name, HeaderValue::from_str(value)?);
+                }
+            }
+        }
+        parts.uri = url
+            .parse()
+            .map_err(|e: http::uri::InvalidUri| to_http_error(e.into()))?;
+        parts.headers.remove("x-api-key");
+        parts.headers.remove(reqwest::header::HOST);
+        parts.headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", auth.access))?,
+        );
+        parts.headers.remove("x-org-id");
+        if let Some(org) = &auth.org_id {
+            parts
+                .headers
+                .insert("x-org-id", HeaderValue::from_str(org)?);
+        }
+        value["model"] = serde_json::Value::String(model_id);
+        Ok(serde_json::to_vec(&value)
+            .map_err(|e| to_http_error(e.into()))?
+            .into())
+    }
     fn patch_reasoning_content(body: bytes::Bytes) -> http_client::Result<bytes::Bytes> {
         let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
             return Ok(body);
@@ -299,18 +420,77 @@ impl OpenCodeGoClient {
         }
     }
 
+    fn apply_model_overlay(
+        mut models: Vec<ModelEntry>,
+        config: &serde_json::Value,
+    ) -> anyhow::Result<Vec<ModelEntry>> {
+        let provider = crate::auth::opencode::provider_config(config)?;
+        if provider["disabled"] == true {
+            return Ok(Vec::new());
+        }
+        let Some(overrides) = provider["models"].as_object() else {
+            return Ok(models);
+        };
+        models.retain(|model| {
+            overrides
+                .get(&model.id)
+                .is_none_or(|entry| entry["disabled"] != true)
+        });
+        for (id, entry) in overrides {
+            if entry["disabled"] == true {
+                continue;
+            }
+            if !models.iter().any(|model| model.id == *id) {
+                models.extend(parse_opencode_go_models(
+                    &serde_json::json!({"data":[{"id":id}]}).to_string(),
+                )?);
+            }
+            let model = models
+                .iter_mut()
+                .find(|model| model.id == *id)
+                .expect("overlay model exists");
+            if let Some(name) = entry["name"].as_str() {
+                model.display = name.to_string();
+            }
+            if let Some(context) = entry
+                .pointer("/limit/context")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                model.context_length = Some(context);
+            }
+        }
+        Ok(models)
+    }
     async fn list_models(&self) -> anyhow::Result<Vec<ModelEntry>> {
-        let body = self
+        let oauth = if self.oauth {
+            let auth = crate::auth::opencode::request_auth().await?;
+            let config = crate::auth::opencode::config(&auth).await?;
+            Some((auth, config))
+        } else {
+            None
+        };
+        let mut request = self
             .http_client
             .get(&self.models_url)
-            .headers(self.headers.clone())
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-        parse_opencode_go_models(&body)
+            .headers(self.headers.clone());
+        request = if let Some((auth, _)) = &oauth {
+            let request = request.bearer_auth(&auth.access);
+            if let Some(org) = &auth.org_id {
+                request.header("x-opencode-org-id", org)
+            } else {
+                request
+            }
+        } else {
+            request.bearer_auth(&self.api_key)
+        };
+        let body = request.send().await?.error_for_status()?.text().await?;
+        let models = parse_opencode_go_models(&body)?;
+        if let Some((_, config)) = oauth {
+            Self::apply_model_overlay(models, &config)
+        } else {
+            Ok(models)
+        }
     }
 }
 
@@ -330,6 +510,7 @@ impl HttpClientExt for OpenCodeGoHttpClient {
         let body = body.into();
         async move {
             parts.headers.extend(this.headers.clone());
+            let body = this.authorize(&mut parts, body).await?;
             let body = if this.patch_reasoning {
                 Self::patch_reasoning_content(body)?
             } else {
@@ -366,6 +547,7 @@ impl HttpClientExt for OpenCodeGoHttpClient {
         let body = body.into();
         async move {
             parts.headers.extend(this.headers.clone());
+            let body = this.authorize(&mut parts, body).await?;
             let body = if this.patch_reasoning {
                 Self::patch_reasoning_content(body)?
             } else {
@@ -961,7 +1143,7 @@ pub struct CompressionResult {
     pub provider_call: Option<crate::event::ProviderCall>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub id: String,
     pub display: String,
@@ -1038,13 +1220,14 @@ impl AnyClient {
             AnyClient::Ollama(c) => c.list_models().await?,
             // If any arm above does NOT impl ModelListingClient it won't compile —
             // move it down here to the manual fallback.
-            AnyClient::OpenAI(OpenAiClient::Completions(_)) => {
-                anyhow::bail!("rig model listing unavailable for this client")
+            AnyClient::OpenAI(OpenAiClient::Completions(c) | OpenAiClient::DeepSeek(c)) => {
+                c.list_models().await?
             }
-            AnyClient::OpenAI(OpenAiClient::DeepSeek(_)) => {
-                return Ok(catalog_model_entries("deepseek"));
+            AnyClient::OpenAI(OpenAiClient::Codex(_)) => {
+                let auth = crate::auth::codex_request_auth().await?;
+                return fetch_codex_models(&reqwest::Client::new(), OPENAI_CODEX_BASE_URL, &auth)
+                    .await;
             }
-            AnyClient::OpenAI(OpenAiClient::Codex(_)) => return Ok(codex_model_entries()),
             AnyClient::OpenCodeGo(c) => return c.list_models().await,
             #[cfg(test)]
             AnyClient::Test(_) => return Ok(Vec::new()),
@@ -1053,14 +1236,57 @@ impl AnyClient {
     }
 }
 
-fn codex_model_entries() -> Vec<ModelEntry> {
-    catalog_model_entries("openai-codex")
+async fn fetch_codex_models(
+    http: &reqwest::Client,
+    base: &str,
+    auth: &crate::auth::CodexRequestAuth,
+) -> anyhow::Result<Vec<ModelEntry>> {
+    let body = http
+        .get(format!(
+            "{}/models?client_version={}",
+            base.trim_end_matches('/'),
+            env!("CARGO_PKG_VERSION")
+        ))
+        .bearer_auth(&auth.access_token)
+        .header("chatgpt-account-id", &auth.account_id)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("zerostack/", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    parse_codex_models(&body)
 }
 
-fn catalog_model_entries(provider: &str) -> Vec<ModelEntry> {
-    crate::models_catalog::catalog_entries(provider)
-        .unwrap_or(&[])
-        .to_vec()
+pub(crate) fn parse_codex_models(body: &str) -> anyhow::Result<Vec<ModelEntry>> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        models: Vec<Model>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Model {
+        slug: String,
+        display_name: Option<String>,
+        context_window: Option<u32>,
+        visibility: Option<String>,
+        supported_in_api: Option<bool>,
+    }
+    Ok(serde_json::from_str::<Response>(body)?
+        .models
+        .into_iter()
+        .filter(|model| {
+            model.visibility.as_deref() != Some("hide") && model.supported_in_api != Some(false)
+        })
+        .map(|model| ModelEntry {
+            display: model.display_name.unwrap_or_else(|| model.slug.clone()),
+            id: model.slug,
+            context_length: model.context_window,
+            kind: None,
+        })
+        .collect())
 }
 
 /// Custom / OpenAI-compatible gateway: best-effort GET {base}/models.
@@ -1098,16 +1324,22 @@ pub async fn list_models_manual(
     #[derive(serde::Deserialize)]
     struct Item {
         id: String,
+        #[serde(alias = "display_name")]
+        name: Option<String>,
+        #[serde(alias = "context_window")]
+        context_length: Option<u32>,
+        #[serde(rename = "type")]
+        kind: Option<String>,
     }
     let resp: Resp = req.send().await?.error_for_status()?.json().await?;
     Ok(resp
         .data
         .into_iter()
         .map(|i| ModelEntry {
-            display: i.id.clone(),
+            display: i.name.unwrap_or_else(|| i.id.clone()),
             id: i.id,
-            context_length: None,
-            kind: None,
+            context_length: i.context_length,
+            kind: i.kind,
         })
         .collect())
 }
@@ -1567,6 +1799,21 @@ fn create_client_inner(
     }
 
     let auth_api_keys = crate::auth::stored_api_keys().ok();
+    if config.kind == ProviderKind::OpenCodeGo
+        && api_key.is_none()
+        && crate::auth::opencode::configured()?
+    {
+        let custom = custom_providers.get(provider_name);
+        let http_client =
+            build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+        return Ok(AnyClient::OpenCodeGo(build_opencode_go_client_inner(
+            "dynamic-opencode-auth",
+            None,
+            http_client,
+            session_id,
+            true,
+        )?));
+    }
     let resolver = AuthResolver::new(config.kind)
         .with_cli_key(api_key)
         .with_env_override(config.api_key_env.as_deref())
@@ -1645,6 +1892,16 @@ fn build_opencode_go_client(
     http_client: reqwest::Client,
     session_id: Option<&str>,
 ) -> anyhow::Result<OpenCodeGoClient> {
+    build_opencode_go_client_inner(key, base_url, http_client, session_id, false)
+}
+
+fn build_opencode_go_client_inner(
+    key: &str,
+    base_url: Option<&str>,
+    http_client: reqwest::Client,
+    session_id: Option<&str>,
+    oauth: bool,
+) -> anyhow::Result<OpenCodeGoClient> {
     let session_id = session_id
         .filter(|id| !id.trim().is_empty())
         .map(ToOwned::to_owned)
@@ -1665,12 +1922,14 @@ fn build_opencode_go_client(
         inner: http_client.clone().into(),
         headers: headers.clone(),
         patch_reasoning: false,
+        oauth_config: oauth.then(|| std::sync::Arc::new(tokio::sync::Mutex::new(None))),
     };
     Ok(OpenCodeGoClient {
         models_url: format!("{openai_base_url}/models"),
         http_client,
         api_key: key.to_string(),
         headers,
+        oauth,
         completions: openai::OpenAIConfig::new(key)
             .with_base_url(openai_base_url)
             .connect(OpenCodeGoHttpClient {

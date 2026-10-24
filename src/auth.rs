@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub mod opencode;
 pub const OPENAI_CODEX_PROVIDER: &str = "openai-codex";
 
 const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -214,6 +215,8 @@ pub enum StoredCredential {
     ApiKey { key: String },
     #[serde(rename = "oauth")]
     OAuth(CodexOAuthCredential),
+    #[serde(rename = "opencode_oauth")]
+    OpenCodeOAuth(opencode::Credential),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,7 +240,10 @@ struct AuthFile(HashMap<String, StoredCredential>);
 pub fn normalize_auth_provider(provider: &str) -> anyhow::Result<&'static str> {
     match provider.to_lowercase().as_str() {
         "codex" | "openai-codex" => Ok(OPENAI_CODEX_PROVIDER),
-        other => anyhow::bail!("unsupported auth provider '{other}' (try 'codex')"),
+        "opencode-go" | "opencode" => Ok(opencode::PROVIDER),
+        other => {
+            anyhow::bail!("unsupported auth provider '{other}' (try 'codex' or 'opencode-go')")
+        }
     }
 }
 
@@ -245,6 +251,9 @@ fn credential_provider_key(provider: &str) -> anyhow::Result<String> {
     let provider = provider.trim();
     if provider.is_empty() {
         anyhow::bail!("provider cannot be empty");
+    }
+    if provider.eq_ignore_ascii_case("opencode") {
+        return Ok(opencode::PROVIDER.to_string());
     }
     let key = match ProviderKind::from_name(provider) {
         Some(ProviderKind::OpenRouter) => "openrouter".to_string(),
@@ -266,8 +275,14 @@ pub fn auth_path() -> PathBuf {
 
 pub async fn login_provider(provider: &str, device: bool) -> anyhow::Result<()> {
     let provider = normalize_auth_provider(provider)?;
-    if provider != OPENAI_CODEX_PROVIDER {
-        anyhow::bail!("unsupported auth provider '{provider}'");
+    if provider == opencode::PROVIDER {
+        let credential = opencode::login().await?;
+        set_stored_credential(provider, StoredCredential::OpenCodeOAuth(credential))?;
+        println!(
+            "logged in to {provider}; credentials saved to {}",
+            auth_path().display()
+        );
+        return Ok(());
     }
 
     let credential = if device {
@@ -320,7 +335,7 @@ pub fn unset_api_key(provider: &str) -> anyhow::Result<()> {
             println!("removed API key for {provider}");
             Ok(())
         }
-        Some(StoredCredential::OAuth(_)) => {
+        Some(StoredCredential::OAuth(_) | StoredCredential::OpenCodeOAuth(_)) => {
             anyhow::bail!(
                 "{provider} is configured with subscription auth; use 'zerostack auth logout {provider}'"
             )
@@ -339,6 +354,7 @@ pub fn print_auth_status(provider: Option<&str>) -> anyhow::Result<()> {
     } else {
         let mut providers = BTreeSet::new();
         providers.insert(OPENAI_CODEX_PROVIDER.to_string());
+        providers.insert(opencode::PROVIDER.to_string());
         providers.extend(data.0.keys().cloned());
         providers.into_iter().collect()
     };
@@ -346,6 +362,18 @@ pub fn print_auth_status(provider: Option<&str>) -> anyhow::Result<()> {
     println!("auth file: {}", auth_path().display());
     for provider in providers {
         match data.0.get(&provider) {
+            Some(StoredCredential::OpenCodeOAuth(cred)) => {
+                let status = if cred.expires <= now_millis() {
+                    "expired (refresh on next request)"
+                } else {
+                    "valid"
+                };
+                println!(
+                    "{provider}: Console OAuth configured ({status}, account {}, expires {})",
+                    cred.account_id,
+                    format_millis(cred.expires)
+                );
+            }
             Some(StoredCredential::OAuth(cred)) => {
                 let status = if cred.expires <= now_millis() {
                     "expired"
@@ -478,12 +506,16 @@ struct AuthFileLock {
 
 impl AuthFileLock {
     fn acquire(auth_path: &Path) -> anyhow::Result<Self> {
+        Self::acquire_with_attempts(auth_path, 100)
+    }
+
+    fn acquire_with_attempts(auth_path: &Path, attempts: usize) -> anyhow::Result<Self> {
         if let Some(parent) = auth_path.parent() {
             fs::create_dir_all(parent)?;
             set_private_dir(parent)?;
         }
         let lock_path = auth_path.with_extension("json.lock");
-        for _ in 0..100 {
+        for _ in 0..attempts {
             match OpenOptions::new()
                 .write(true)
                 .create_new(true)

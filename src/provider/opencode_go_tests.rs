@@ -373,3 +373,174 @@ async fn opencode_go_wire_replays_reasoning_after_session_roundtrip() {
         assert!(body["messages"][0].get("reasoning_content").is_none());
     }
 }
+
+#[test]
+fn opencode_oauth_rewrites_all_request_protocols_without_leaking_static_credentials() {
+    let mut auth = crate::auth::opencode::Credential {
+        access: "oauth-access".into(),
+        refresh: "oauth-refresh".into(),
+        expires: u64::MAX,
+        account_id: "account".into(),
+        org_id: Some("org-scoped".into()),
+    };
+    let config = json!({"providers":{"opencode-go":{
+        "settings":{"baseURL":"https://opencode.ai/console/inference/v1"},
+        "headers":{"x-route":"provider", "x-remove":"old", "x-opencode-session":"wrong", "Authorization":"Bearer wrong"},
+        "models":{"model":{"modelID":"upstream-model", "headers":{"x-route":"model", "x-remove":null}}}
+    }}});
+    for (old, new) in [
+        (
+            "/zen/go/v1/chat/completions",
+            "/console/inference/v1/chat/completions",
+        ),
+        ("/zen/go/v1/responses", "/console/inference/v1/responses"),
+        ("/zen/go/v1/messages", "/console/inference/v1/messages"),
+    ] {
+        let request = http::Request::builder()
+            .uri(format!("https://opencode.ai{old}"))
+            .header("authorization", "Bearer expired-key")
+            .header("x-api-key", "expired-key")
+            .header("x-org-id", "stale-org")
+            .header("host", "old-host")
+            .header("x-opencode-session", "session")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let body = OpenCodeGoHttpClient::apply_oauth(
+            &auth,
+            &config,
+            &mut parts,
+            serde_json::to_vec(&json!({"model":"model", "stream":true, "messages":[]}))
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(parts.uri.path(), new);
+        assert_eq!(parts.headers["authorization"], "Bearer oauth-access");
+        assert_eq!(parts.headers["x-org-id"], "org-scoped");
+        assert_eq!(parts.headers["x-opencode-session"], "session");
+        assert_eq!(parts.headers["x-route"], "model");
+        assert!(!parts.headers.contains_key("x-remove"));
+        assert!(!parts.headers.contains_key("x-api-key"));
+        assert!(!parts.headers.contains_key("host"));
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["model"], "upstream-model");
+        assert_eq!(value["stream"], true);
+        // Reusing a request without organization scope must clear the old scope.
+        auth.org_id = None;
+        let body = serde_json::to_vec(&json!({"model":"model"}))
+            .unwrap()
+            .into();
+        OpenCodeGoHttpClient::apply_oauth(&auth, &config, &mut parts, body).unwrap();
+        assert!(!parts.headers.contains_key("x-org-id"));
+        auth.org_id = Some("org-scoped".into());
+    }
+}
+
+#[test]
+fn opencode_oauth_model_list_merges_sparse_go_overrides_with_live_catalog() {
+    let base = || {
+        parse_opencode_go_models(
+            r#"{"data":[{"id":"deepseek-v4.1-flash"},{"id":"glm-5.3-flash"}]}"#,
+        )
+        .unwrap()
+    };
+    let config = json!({"providers":{
+        "opencode":{"models":{"deepseek-v4.1-flash":{"disabled":true}}},
+        "opencode-go":{"models":{}}
+    }});
+    let models = OpenCodeGoClient::apply_model_overlay(base(), &config).unwrap();
+    assert_eq!(models.len(), 2);
+    assert!(models.iter().any(|model| model.id == "deepseek-v4.1-flash"));
+    assert_eq!(models[0].context_length, base()[0].context_length);
+    let models = OpenCodeGoClient::apply_model_overlay(base(), &json!({"providers":{}})).unwrap();
+    assert_eq!(models.len(), 2);
+    let config = json!({"providers":{"opencode-go":{"models":{
+        "glm-5.3-flash":{"disabled":true},
+        "deepseek-v4.1-flash":{"name":"DeepSeek", "limit":{"context":12345}},
+        "new-model":{"modelID":"upstream-new"}
+    }}}});
+    let models = OpenCodeGoClient::apply_model_overlay(base(), &config).unwrap();
+    assert_eq!(models.len(), 2);
+    assert!(!models.iter().any(|model| model.id == "glm-5.3-flash"));
+    let deepseek = models
+        .iter()
+        .find(|model| model.id == "deepseek-v4.1-flash")
+        .unwrap();
+    assert_eq!(deepseek.display, "DeepSeek");
+    assert_eq!(deepseek.context_length, Some(12345));
+    assert!(models.iter().any(|model| model.id == "new-model"));
+}
+
+#[test]
+fn opencode_oauth_sparse_overlay_keeps_go_url_and_console_org_header() {
+    let auth = crate::auth::opencode::Credential {
+        access: "access".into(),
+        refresh: "refresh".into(),
+        expires: u64::MAX,
+        account_id: "account".into(),
+        org_id: Some("workspace".into()),
+    };
+    let config = json!({"providers":{"opencode-go":{"headers":{"x-opencode-org-id":"workspace"},"models":{}}}});
+    let (mut parts, _) = http::Request::builder()
+        .uri("https://opencode.ai/zen/go/v1/chat/completions")
+        .body(())
+        .unwrap()
+        .into_parts();
+    let body = OpenCodeGoHttpClient::apply_oauth(
+        &auth,
+        &config,
+        &mut parts,
+        serde_json::to_vec(&json!({"model":"deepseek-v4.1-flash","stream":true,"messages":[]}))
+            .unwrap()
+            .into(),
+    )
+    .unwrap();
+    assert_eq!(
+        parts.uri.to_string(),
+        "https://opencode.ai/zen/go/v1/chat/completions"
+    );
+    assert_eq!(parts.headers["x-opencode-org-id"], "workspace");
+    assert_eq!(parts.headers["authorization"], "Bearer access");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["model"],
+        "deepseek-v4.1-flash"
+    );
+}
+
+#[tokio::test]
+#[ignore = "uses stored OpenCode OAuth credentials and makes billed model requests"]
+async fn live_opencode_go_oauth_sparse_config_smoke() {
+    use futures::StreamExt;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let client = build_opencode_go_client_inner(
+        "dynamic-opencode-auth",
+        None,
+        http,
+        Some("zerostack-oauth-overlay-smoke"),
+        true,
+    )
+    .unwrap();
+    let models = client.list_models().await.expect("OAuth model listing");
+    assert!(models.iter().any(|model| model.id == "deepseek-v4.1-flash"));
+    let AnyModel::OpenAI(OpenAiModel::OpenCodeGoCompletions(model, _)) =
+        client.completion_model("deepseek-v4.1-flash".into())
+    else {
+        panic!("Go completions")
+    };
+    let request = || rig::completion::CompletionRequest::new("Reply OK.").max_tokens(32);
+    model
+        .call(request())
+        .await
+        .expect("non-streaming OAuth inference");
+    let mut stream = model.stream(request()).expect("OAuth stream");
+    let mut count = 0;
+    while let Some(item) = stream.next().await {
+        item.expect("streaming OAuth inference");
+        count += 1;
+    }
+    assert!(count > 0);
+}

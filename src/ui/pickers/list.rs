@@ -25,6 +25,7 @@ const BASE_COMMANDS: &[&str] = &[
     "/mode",
     "/model",
     "/models",
+    "/models refresh",
     "/models-add",
     "/new",
     "/provider",

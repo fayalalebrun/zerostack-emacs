@@ -463,10 +463,15 @@ pub enum WorkspaceCommand {
 pub enum ConfigCommand {
     #[command(about = "List configured provider names")]
     Providers,
-    #[command(about = "List known model ids for a provider")]
+    #[command(about = "List provider models using account-scoped live discovery and its cache")]
     Models {
         #[arg(help = "Provider name; defaults to the configured provider")]
         provider: Option<String>,
+        #[arg(
+            long,
+            help = "Query the provider even when the cached model list is fresh"
+        )]
+        refresh: bool,
     },
     #[command(about = "List configured quick-model names")]
     QuickModels,
@@ -513,19 +518,19 @@ pub enum ConfigCommand {
 pub enum AuthCommand {
     #[command(about = "Log in to a provider")]
     Login {
-        #[arg(help = "Provider to log in to: codex or openai-codex")]
+        #[arg(help = "Provider to log in to: codex, openai-codex, or opencode-go")]
         provider: String,
         #[arg(long = "device", help = "Use the device-code login flow")]
         device: bool,
     },
     #[command(about = "Log out from a provider")]
     Logout {
-        #[arg(help = "Provider to log out from: codex or openai-codex")]
+        #[arg(help = "Provider to log out from: codex, openai-codex, or opencode-go")]
         provider: String,
     },
     #[command(about = "Show stored authentication status")]
     Status {
-        #[arg(help = "Optional provider to show: codex or openai-codex")]
+        #[arg(help = "Optional provider to show, for example codex or opencode-go")]
         provider: Option<String>,
     },
     #[command(about = "Store an API key for a provider")]

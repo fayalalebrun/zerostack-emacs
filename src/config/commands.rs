@@ -63,15 +63,6 @@ pub fn validate_provider(cfg: &Config, provider: &str) -> anyhow::Result<()> {
     }
 }
 
-pub fn model_ids_for_provider(provider: &str) -> Vec<String> {
-    crate::models_catalog::catalog_entries(provider)
-        .unwrap_or(&[])
-        .iter()
-        .filter(|entry| crate::provider::is_agent_model(entry))
-        .map(|entry| entry.id.clone())
-        .collect()
-}
-
 pub fn set_default_provider(cfg: &mut Config, provider: &str) -> anyhow::Result<(String, String)> {
     validate_provider(cfg, provider)?;
     let provider = canonical_provider_name(provider);
@@ -269,23 +260,6 @@ mod tests {
 
         assert_eq!(provider, "local");
         assert_eq!(model, "llama-local");
-    }
-
-    #[test]
-    fn model_ids_for_opencode_go_include_each_api_style() {
-        let ids = model_ids_for_provider("opencode-go");
-        for model in ["kimi-k2.7-code", "gpt-5.6-luna", "minimax-m3"] {
-            assert!(ids.iter().any(|id| id == model));
-        }
-    }
-
-    #[test]
-    fn model_ids_for_codex_use_openai_catalog() {
-        let ids = model_ids_for_provider("openai-codex");
-        assert!(ids.iter().any(|id| id == "gpt-5.5"));
-        for model in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
-            assert!(ids.iter().any(|id| id == model));
-        }
     }
 
     #[test]

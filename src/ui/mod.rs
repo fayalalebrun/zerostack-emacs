@@ -912,12 +912,12 @@ pub async fn run_interactive(
         return Ok(());
     }
 
+    let mut model_updates = crate::model_discovery::subscribe();
     // pre-warm the current provider's live models into the picker (best-effort)
     // Moved after first paint so the TUI is visible while the network call completes.
     {
         let provider = session.provider.to_string();
-        let is_custom = cfg.custom_providers_map().contains_key(&provider);
-        let ids = crate::ui::slash::warm_model_cache(&provider, is_custom, &client, cli, cfg).await;
+        let ids = crate::ui::slash::warm_model_cache(&provider, cli, cfg);
         input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
             cfg, &provider,
         ));
@@ -1588,8 +1588,7 @@ pub async fn run_interactive(
                                 // provider may have changed via /provider or /models — re-warm the picker's live list
                                 {
                                     let provider = session.provider.to_string();
-                                    let is_custom = cfg.custom_providers_map().contains_key(&provider);
-                                    let ids = crate::ui::slash::warm_model_cache(&provider, is_custom, &client, cli, cfg).await;
+                                    let ids = crate::ui::slash::warm_model_cache(&provider, cli, cfg);
                                     input.set_quick_model_names(crate::ui::slash::quick_model_names_for_provider(
                                         cfg, &provider,
                                     ));
@@ -2183,6 +2182,12 @@ pub async fn run_interactive(
                         renderer.write_line(&format!("[btw #{}] error: {}", id, sanitize_output(&message)), C_ERROR)?;
                     }
                 }
+                refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), perm_mode().as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
+            }
+            _ = model_updates.changed() => {
+                input.set_live_model_names(crate::model_discovery::cached_ids(
+                    &session.provider, cli.api_key.as_deref(), cfg,
+                ));
                 refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), perm_mode().as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)), if is_running => {

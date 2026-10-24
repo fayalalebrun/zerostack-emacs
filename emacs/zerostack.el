@@ -873,11 +873,21 @@ The root is resolved with Projectile when available, then `project.el', then
       (user-error "No zerostack providers available"))
     (completing-read (or prompt "Provider: ") providers nil t nil nil default)))
 
+(defun zerostack--model-choices (&optional provider)
+  "Return discovered models for PROVIDER, or nil if discovery fails.
+Keep manual model entry available without credentials or a listing endpoint."
+  (condition-case err
+      (if (and provider (not (string-empty-p provider)))
+          (zerostack--config-lines "models" provider)
+        (zerostack--config-lines "models"))
+    (error
+     (message "Model discovery unavailable; enter a model ID manually: %s"
+              (error-message-string err))
+     nil)))
+
 (defun zerostack--read-model (&optional provider default)
   "Read a model id for PROVIDER, allowing manual entry."
-  (let ((models (if (and provider (not (string-empty-p provider)))
-                    (zerostack--config-lines "models" provider)
-                  (zerostack--config-lines "models"))))
+  (let ((models (zerostack--model-choices provider)))
     (completing-read (if (and provider (not (string-empty-p provider)))
                          (format "Model for %s: " provider)
                        "Model: ")
@@ -919,7 +929,7 @@ The root is resolved with Projectile when available, then `project.el', then
 (defun zerostack--read-subagent-models (provider defaults)
   "Read permissible subagent models for PROVIDER, initially DEFAULTS."
   (let* ((quick (zerostack--config-lines "quick-models"))
-         (models (zerostack--config-lines "models" provider))
+         (models (zerostack--model-choices provider))
          (choices (delete-dups (append quick models defaults)))
          (initial (and defaults (concat (string-join defaults ",") ","))))
     (completing-read-multiple

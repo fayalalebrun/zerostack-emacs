@@ -84,6 +84,12 @@ impl InputEditor {
 
     pub fn set_live_model_names(&mut self, names: Vec<String>) {
         self.live_model_names = names;
+        if let Some(Picker::Models(picker)) = &mut self.picker {
+            picker.set_groups(
+                self.quick_model_names.clone(),
+                self.live_model_names.clone(),
+            );
+        }
     }
 
     pub fn set_provider_names(&mut self, names: Vec<String>) {

@@ -40,8 +40,22 @@ impl ModelsPicker {
     }
 
     pub fn set_groups(&mut self, quick: Vec<String>, provider: Vec<String>) {
+        let previous = self.matches.get(self.selected).cloned();
         self.quick = quick;
         self.provider = provider;
+        if self.active {
+            if self.quick.is_empty() && !self.provider.is_empty() {
+                self.group = 1;
+            }
+            self.filter();
+            if let Some(previous) = previous {
+                self.selected = self
+                    .matches
+                    .iter()
+                    .position(|name| *name == previous)
+                    .unwrap_or(0);
+            }
+        }
     }
 
     fn color(&self, color: Color) -> Color {
@@ -178,5 +192,37 @@ impl ModelsPicker {
         }
 
         draw_picker_list(&self.matches, self.selected, self.monochrome, None, 5)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_model_update_keeps_query_and_selection() {
+        let mut picker = ModelsPicker::new();
+        picker.set_groups(Vec::new(), vec!["model-a".into(), "model-b".into()]);
+        picker.activate();
+        picker.char_input('m');
+        picker.select_next();
+        let selected = picker.selected_name().map(str::to_string);
+        picker.set_groups(
+            Vec::new(),
+            vec!["model-a".into(), "model-b".into(), "model-c".into()],
+        );
+        assert_eq!(picker.query, "m");
+        assert_eq!(picker.selected_name().map(str::to_string), selected);
+        assert_eq!(picker.matches.len(), 3);
+    }
+
+    #[test]
+    fn open_cold_picker_receives_new_provider_models() {
+        let mut picker = ModelsPicker::new();
+        picker.activate();
+        assert!(picker.matches.is_empty());
+        picker.set_groups(Vec::new(), vec!["live-model".into()]);
+        assert_eq!(picker.group, 1);
+        assert_eq!(picker.matches, vec!["live-model"]);
     }
 }
