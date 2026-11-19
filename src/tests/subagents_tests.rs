@@ -26,6 +26,7 @@ mod tests {
         assert_eq!(args.timeout, 120);
         assert_eq!(args.model.as_deref(), Some("fast"));
         assert_eq!(args.reasoning.as_deref(), Some("high"));
+        assert!(!args.worktree);
     }
 
     #[test]
@@ -39,6 +40,39 @@ mod tests {
         );
         assert!(args.model.is_none());
         assert!(args.reasoning.is_none());
+    }
+
+    #[test]
+    fn task_worktree_is_optional_and_explicit() {
+        use crate::extras::subagents::task_tool::{Access, SpawnRequest, prepare_workspace};
+
+        let root =
+            std::env::temp_dir().join(format!("zs-subagent-shared-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for access in ["read", "write"] {
+            for worktree in [None, Some(false), Some(true)] {
+                let mut request = serde_json::json!({
+                    "task": "inspect", "access": access, "timeout": 30
+                });
+                if let Some(worktree) = worktree {
+                    request["worktree"] = worktree.into();
+                }
+                let args: SpawnRequest = serde_json::from_value(request).unwrap();
+                assert_eq!(args.worktree, worktree.unwrap_or(false));
+                if args.access == Access::Write && args.worktree {
+                    continue;
+                }
+                let workspace =
+                    prepare_workspace(args.access, args.worktree, &root, "unused").unwrap();
+                assert_eq!(workspace, root.canonicalize().unwrap());
+                std::fs::write(workspace.join("shared.txt"), "shared edit").unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(root.join("shared.txt")).unwrap(),
+                    "shared edit"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -300,8 +334,14 @@ mod tests {
         };
 
         let previous = crate::session::storage::set_test_data_dir(Some(data));
-        let workspace =
-            crate::extras::subagents::workspace::create(&repo, "snapshot-test").unwrap();
+        let workspace = crate::extras::subagents::task_tool::prepare_workspace(
+            crate::extras::subagents::task_tool::Access::Write,
+            true,
+            &repo,
+            "snapshot-test",
+        )
+        .unwrap();
+        assert_ne!(workspace, repo.canonicalize().unwrap());
         assert_eq!(
             std::fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
             "edited\n"
@@ -331,5 +371,216 @@ mod tests {
                 .success()
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    struct ReuseFixture {
+        root: std::path::PathBuf,
+        previous_data: Option<std::path::PathBuf>,
+        session: crate::session::Session,
+        args: crate::extras::subagents::task_tool::SpawnRequest,
+        models: Vec<crate::extras::subagents::ModelOption>,
+    }
+
+    impl ReuseFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("zs-subagent-reuse-{}", uuid::Uuid::new_v4()));
+            let workspace = root.join("saved-workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            let previous_data = crate::session::storage::set_test_data_dir(Some(root.join("data")));
+            let mut session = crate::session::Session::new("test-provider", "test-model", 1000);
+            session.parent_session_id = Some("parent".into());
+            session.subagent_access = Some("write".into());
+            session.working_dir = workspace.to_str().unwrap().into();
+            session.add_message(crate::session::MessageRole::User, "Remember the auth fix");
+            session.add_message(
+                crate::session::MessageRole::Assistant,
+                "The fix is in auth.rs",
+            );
+            crate::session::storage::save_session(&session).unwrap();
+            let args = serde_json::from_value(serde_json::json!({
+                "task": "Now test that fix", "session_id": session.id,
+                "access": "write", "timeout": 30
+            }))
+            .unwrap();
+            let models = vec![
+                crate::extras::subagents::ModelOption {
+                    name: "new-default".into(),
+                    provider: "test-provider".into(),
+                    model: "other-model".into(),
+                },
+                crate::extras::subagents::ModelOption {
+                    name: "saved-model".into(),
+                    provider: "test-provider".into(),
+                    model: "test-model".into(),
+                },
+            ];
+            Self {
+                root,
+                previous_data,
+                session,
+                args,
+                models,
+            }
+        }
+
+        fn prepare(
+            &self,
+        ) -> Result<crate::extras::subagents::task_tool::PreparedTask, crate::agent::tools::ToolError>
+        {
+            crate::extras::subagents::task_tool::prepare_task(
+                &self.args,
+                "parent",
+                &self.models,
+                &self.root,
+            )
+        }
+
+        fn save(&self) {
+            crate::session::storage::save_session(&self.session).unwrap();
+        }
+    }
+
+    impl Drop for ReuseFixture {
+        fn drop(&mut self) {
+            crate::session::storage::set_test_data_dir(self.previous_data.take());
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn reuse_keeps_session_workspace_model_and_history() {
+        let mut fixture = ReuseFixture::new();
+        // A worktree request must not snapshot the workspace again during reuse.
+        fixture.args.worktree = true;
+        let prepared = fixture.prepare().unwrap();
+        assert_eq!(prepared.session_id, fixture.session.id.as_str());
+        assert_eq!(
+            prepared.workspace,
+            std::path::Path::new(fixture.session.working_dir.as_str())
+        );
+        assert_eq!(prepared.model_name, "saved-model");
+        let sessions =
+            crate::session::storage::find_sessions_by_prefix(&prepared.session_id).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let history = crate::agent::runner::convert_history(&sessions[0]);
+        assert_eq!(history.len(), 2);
+        assert!(format!("{history:?}").contains("The fix is in auth.rs"));
+        assert_eq!(sessions[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn reuse_rejects_busy_sessions_and_releases_lock_after_completion() {
+        let fixture = ReuseFixture::new();
+        let prepared = fixture.prepare().unwrap();
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("already running")
+        );
+        drop(prepared);
+        assert!(fixture.prepare().is_ok());
+    }
+
+    #[test]
+    fn reuse_rejects_foreign_sessions_and_access_changes() {
+        let mut fixture = ReuseFixture::new();
+        fixture.session.parent_session_id = Some("other-parent".into());
+        fixture.save();
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("does not belong")
+        );
+        fixture.session.parent_session_id = None;
+        fixture.save();
+        assert!(fixture.prepare().is_err());
+        fixture.session.parent_session_id = Some("parent".into());
+        fixture.session.subagent_access = Some("read".into());
+        fixture.save();
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("access level")
+        );
+    }
+
+    #[test]
+    fn reuse_enforces_saved_model_and_current_allowlist() {
+        let mut fixture = ReuseFixture::new();
+        fixture.args.model = Some("saved-model".into());
+        assert!(fixture.prepare().is_ok());
+        fixture.args.model = Some("new-default".into());
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("model and provider")
+        );
+        fixture.args.model = Some("not-allowed".into());
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("not permitted")
+        );
+        fixture.args.model = None;
+        fixture.models.pop();
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("no longer permitted")
+        );
+    }
+
+    #[test]
+    fn reuse_rejects_invalid_missing_or_unavailable_sessions() {
+        let mut fixture = ReuseFixture::new();
+        for id in [
+            "../../outside".to_string(),
+            fixture.session.id[..8].to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ] {
+            fixture.args.session_id = Some(id);
+            assert!(fixture.prepare().is_err());
+        }
+        fixture.args.session_id = Some(fixture.session.id.to_string());
+        std::fs::remove_dir(fixture.session.working_dir.as_str()).unwrap();
+        assert!(
+            fixture
+                .prepare()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("workspace is unavailable")
+        );
+    }
+
+    #[test]
+    fn fresh_tasks_still_create_a_new_session_in_the_current_workspace() {
+        let mut fixture = ReuseFixture::new();
+        fixture.args.session_id = None;
+        let first = fixture.prepare().unwrap();
+        let second = fixture.prepare().unwrap();
+        assert_ne!(first.session_id, second.session_id);
+        assert_ne!(first.session_id, fixture.session.id.as_str());
+        assert_eq!(first.workspace, fixture.root.canonicalize().unwrap());
+        assert_eq!(first.model_name, "new-default");
     }
 }

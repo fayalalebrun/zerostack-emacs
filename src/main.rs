@@ -984,10 +984,11 @@ async fn run_subagent_child(
 ) -> anyhow::Result<()> {
     use std::io::Write;
 
+    let history = agent::runner::convert_history(session);
     session.name = format!("subagent: {}", prompt.chars().take(64).collect::<String>()).into();
     session.add_message(MessageRole::User, prompt);
     session::storage::save_session(session)?;
-    let mut runner = agent.spawn_runner(prompt.to_string(), Vec::new());
+    let mut runner = agent.spawn_runner(prompt.to_string(), history);
     let mut response_buf = String::new();
     while let Some(event) = runner.event_rx.recv().await {
         match event {

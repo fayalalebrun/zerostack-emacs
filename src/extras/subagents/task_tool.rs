@@ -24,10 +24,13 @@ pub enum Access {
     Write,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct SpawnRequest {
     pub task: String,
+    pub session_id: Option<String>,
     pub access: Access,
+    #[serde(default)]
+    pub worktree: bool,
     pub timeout: u64,
     pub model: Option<String>,
     pub reasoning: Option<String>,
@@ -52,7 +55,7 @@ impl Tool for TaskTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Spawn a fresh zerostack process for an isolated task. Read access uses the current workspace. Write access creates a persistent copy-on-write workspace containing all in-progress edits. The result includes the child response, session transcript, and workspace paths. The parent can access both paths. The soft deadline interrupts active work and starts one tool-free final turn; that final turn has no timeout."
+        "Run a task in a separate zerostack process. Omit session_id for a new subagent, or pass a returned session ID to continue a finished subagent with its saved conversation and workspace. Reuse is limited to this parent's children and preserves their access level and model. Both access modes use the current workspace by default for new subagents. For write access, set worktree to true to create a persistent copy-on-write workspace containing all in-progress edits. Shared-workspace writes affect the parent directly; coordinate concurrent edits. Results include the response, session ID, transcript, workspace, and socket paths. The soft deadline interrupts active work and starts one tool-free final turn without a hard timeout."
                 .to_string()
     }
 
@@ -68,12 +71,14 @@ impl Tool for TaskTool {
             "type": "object",
             "properties": {
                 "task": { "type": "string", "description": "Standalone task for the subagent." },
+                "session_id": { "type": "string", "description": "Optional full session ID returned by an earlier task call. Continue that finished child with its saved conversation and workspace. Keep the same access and model. Omit for a new child." },
                 "access": { "type": "string", "enum": ["read", "write"], "description": "Filesystem access level." },
+                "worktree": { "type": "boolean", "default": false, "description": "For a new write subagent, create an isolated persistent Git worktree (or directory copy outside Git). Defaults to false: use the current workspace. Ignored for read access and session reuse." },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Soft deadline in seconds. When elapsed, active work is interrupted and exactly one tool-free final turn begins without a hard timeout." },
                 "model": {
                     "type": "string",
                     "enum": model_options,
-                    "description": format!("Optional permitted subagent model. Omit to use the default: {default_model}.")
+                    "description": format!("Optional permitted subagent model. For a new child, omit to use the default: {default_model}. For reuse, omit to keep the saved model; changing it is not supported.")
                 },
                 "reasoning": { "type": "string", "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Optional reasoning effort." }
             },
@@ -84,7 +89,7 @@ impl Tool for TaskTool {
     async fn call(
         &self,
         _context: &mut rig::tool::ToolContext,
-        args: SpawnRequest,
+        mut args: SpawnRequest,
     ) -> Result<String, ToolError> {
         if !crate::extras::subagents::is_enabled() {
             return Err(ToolError::Msg(
@@ -101,27 +106,34 @@ impl Tool for TaskTool {
         }
         check_perm(&self.permission, &self.ask_tx, Self::NAME, &args.task).await?;
 
-        let session_id = Uuid::new_v4().to_string();
         let source = std::env::current_dir()
             .map_err(|e| ToolError::Msg(format!("task: failed to get current directory: {e}")))?;
-        let workspace_path = match args.access {
-            Access::Read => source
-                .canonicalize()
-                .map_err(|e| ToolError::Msg(format!("task: failed to resolve workspace: {e}")))?,
-            Access::Write => {
-                let source = source.clone();
-                let id = session_id.clone();
-                tokio::task::spawn_blocking(move || workspace::create(&source, &id))
-                    .await
-                    .map_err(|e| ToolError::Msg(format!("task: workspace creation panicked: {e}")))?
-                    .map_err(|e| ToolError::Msg(format!("task: {e}")))?
-            }
-        };
-        let transcript_path = crate::session::storage::session_path(&session_id);
+        let (parent, models) =
+            with_config(|cfg| (cfg.parent_session_id.clone(), cfg.model_options.clone()));
+        let request = args.clone();
+        let prepared =
+            tokio::task::spawn_blocking(move || prepare_task(&request, &parent, &models, &source))
+                .await
+                .map_err(|e| {
+                    ToolError::Msg(format!("task: workspace preparation panicked: {e}"))
+                })??;
+        let session_id = prepared.session_id.as_str();
+        let workspace_path = prepared.workspace.as_path();
+        args.model = Some(prepared.model_name.clone());
+        #[cfg(unix)]
+        if tokio::net::UnixStream::connect(crate::extras::emacs::session_socket_path(session_id))
+            .await
+            .is_ok()
+        {
+            return Err(ToolError::Msg(
+                "task: subagent session is already running".into(),
+            ));
+        }
+        let transcript_path = crate::session::storage::session_path(session_id);
         allow_parent_access(
             &self.permission,
             args.access,
-            &workspace_path,
+            workspace_path,
             &transcript_path,
         );
 
@@ -132,13 +144,13 @@ impl Tool for TaskTool {
             .saturating_add(finalize_after_ms(args.timeout) as u128)
             .min(u64::MAX as u128) as u64;
         let (mut command, selected_model) =
-            child_command(&args, &session_id, &workspace_path, finalize_at_unix_ms)?;
+            child_command(&args, session_id, workspace_path, finalize_at_unix_ms)?;
         let mut child = command
             .spawn()
             .map_err(|e| ToolError::Msg(format!("task: failed to start subagent process: {e}")))?;
         let mut process_guard = ProcessGroupGuard::new(child.id());
         let timeout = Duration::from_secs(args.timeout);
-        let socket_path = crate::extras::emacs::session_socket_path(&session_id);
+        let socket_path = crate::extras::emacs::session_socket_path(session_id);
         let socket_ready = wait_for_socket(
             &mut child,
             &socket_path,
@@ -202,6 +214,118 @@ impl Tool for TaskTool {
     }
 }
 
+pub(crate) struct PreparedTask {
+    pub session_id: String,
+    pub workspace: std::path::PathBuf,
+    pub model_name: String,
+    // Keep the lock until the child exits, including its final summary turn.
+    _lock: std::fs::File,
+}
+
+pub(crate) fn prepare_task(
+    args: &SpawnRequest,
+    parent: &str,
+    models: &[crate::extras::subagents::ModelOption],
+    source: &Path,
+) -> Result<PreparedTask, ToolError> {
+    let session_id = match args.session_id.as_deref() {
+        Some(id) => Uuid::parse_str(id)
+            .map_err(|_| ToolError::Msg("task: session_id must be a full UUID".into()))?
+            .to_string(),
+        None => Uuid::new_v4().to_string(),
+    };
+    let directory = crate::session::storage::data_dir()
+        .join("subagents")
+        .join(&session_id);
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| ToolError::Msg(format!("task: failed to create session directory: {e}")))?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join("run.lock"))
+        .map_err(|e| ToolError::Msg(format!("task: failed to open session lock: {e}")))?;
+    lock.try_lock().map_err(|e| {
+        ToolError::Msg(format!(
+            "task: subagent session is already running or cannot be locked: {e}"
+        ))
+    })?;
+
+    let (workspace, selected) = if args.session_id.is_some() {
+        let json = std::fs::read(crate::session::storage::session_path(&session_id))
+            .map_err(|e| ToolError::Msg(format!("task: cannot load subagent session: {e}")))?;
+        let session: crate::session::Session = serde_json::from_slice(&json)
+            .map_err(|e| ToolError::Msg(format!("task: invalid subagent session: {e}")))?;
+        if session.id.as_str() != session_id || session.parent_session_id.as_deref() != Some(parent)
+        {
+            return Err(ToolError::Msg(
+                "task: session does not belong to this parent".into(),
+            ));
+        }
+        if session.subagent_access.as_deref() != Some(access_name(args.access)) {
+            return Err(ToolError::Msg(
+                "task: reuse must keep the subagent's access level".into(),
+            ));
+        }
+        let selected = match args.model.as_deref() {
+            Some(name) => select_model_option(models, Some(name))?,
+            None => models
+                .iter()
+                .find(|option| {
+                    option.provider == session.provider.as_str()
+                        && option.model == session.model.as_str()
+                })
+                .ok_or_else(|| {
+                    ToolError::Msg("task: saved subagent model is no longer permitted".into())
+                })?,
+        };
+        if selected.provider != session.provider.as_str()
+            || selected.model != session.model.as_str()
+        {
+            return Err(ToolError::Msg(
+                "task: reuse must keep the subagent's model and provider".into(),
+            ));
+        }
+        let workspace = Path::new(session.working_dir.as_str())
+            .canonicalize()
+            .map_err(|e| ToolError::Msg(format!("task: saved workspace is unavailable: {e}")))?;
+        if !workspace.is_dir() {
+            return Err(ToolError::Msg(
+                "task: saved workspace is not a directory".into(),
+            ));
+        }
+        (workspace, selected)
+    } else {
+        let selected = select_model_option(models, args.model.as_deref())?;
+        (
+            prepare_workspace(args.access, args.worktree, source, &session_id)?,
+            selected,
+        )
+    };
+    Ok(PreparedTask {
+        session_id,
+        workspace,
+        model_name: selected.name.clone(),
+        _lock: lock,
+    })
+}
+
+pub(crate) fn prepare_workspace(
+    access: Access,
+    worktree: bool,
+    source: &Path,
+    session_id: &str,
+) -> Result<std::path::PathBuf, ToolError> {
+    if access == Access::Write && worktree {
+        workspace::create(source, session_id).map_err(|e| ToolError::Msg(format!("task: {e}")))
+    } else {
+        source
+            .canonicalize()
+            .map_err(|e| ToolError::Msg(format!("task: failed to resolve workspace: {e}")))
+    }
+}
+
 fn child_command(
     args: &SpawnRequest,
     session_id: &str,
@@ -239,6 +363,9 @@ fn child_command(
         .arg("--subagent-live")
         .arg("--subagent-finalize-at-unix-ms")
         .arg(finalize_at_unix_ms.to_string());
+    if args.session_id.is_some() {
+        command.arg("--session").arg(session_id);
+    }
     match args.access {
         Access::Read => {
             command.arg("--read-only");
@@ -253,6 +380,14 @@ fn child_command(
     let prompt = match args.access {
         Access::Read => format!(
             "Work as a read-only subagent. Investigate and report a concise, verified answer. Do not modify files.\n\n{}",
+            args.task
+        ),
+        Access::Write if args.session_id.is_some() => format!(
+            "Continue as a write subagent in your saved workspace, using the conversation history. Other agents may edit files here; preserve their work and limit edits to your assigned task. Complete the follow-up task, test the result, and report what changed.\n\n{}",
+            args.task
+        ),
+        Access::Write if !args.worktree => format!(
+            "Work as a write subagent in the parent's shared workspace. Changes affect the parent directly. Other agents may edit files here; preserve their work and limit edits to your assigned task. Complete the task, test the result, and report what changed.\n\n{}",
             args.task
         ),
         Access::Write => format!(

@@ -377,12 +377,7 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
         .collect::<HashMap<_, _>>();
     let subagent_workspaces = sessions
         .iter()
-        .filter(|session| {
-            owns_subagent_workspace(
-                session.parent_session_id.as_deref(),
-                session.subagent_access.as_deref(),
-            )
-        })
+        .filter(|session| owns_subagent_workspace(session))
         .map(|session| {
             let dir = Path::new(session.working_dir.as_str());
             git_session_info(dir)
@@ -542,8 +537,20 @@ fn workspace_path(dir: &Path) -> PathBuf {
     canonicalize_existing(dir).unwrap_or_else(|| dir.to_path_buf())
 }
 
-fn owns_subagent_workspace(parent_session_id: Option<&str>, access: Option<&str>) -> bool {
-    parent_session_id.is_some() && access == Some("write")
+fn owns_subagent_workspace(session: &StoredBoardSession) -> bool {
+    if session.parent_session_id.is_none()
+        || session.subagent_access.as_deref() != Some("write")
+        || uuid::Uuid::parse_str(&session.id).is_err()
+    {
+        return false;
+    }
+    // Shared-workspace children do not own the parent's worktree. Only hide
+    // snapshots stored in the child's dedicated workspace directory.
+    let isolated = storage::data_dir()
+        .join("subagents")
+        .join(&session.id)
+        .join("workspace");
+    workspace_path(Path::new(&session.working_dir)).starts_with(workspace_path(&isolated))
 }
 
 fn project_from_builder(
@@ -1423,10 +1430,109 @@ mod tests {
     }
 
     #[test]
-    fn only_write_subagents_own_hidden_workspaces() {
-        assert!(owns_subagent_workspace(Some("parent"), Some("write")));
-        assert!(!owns_subagent_workspace(Some("parent"), Some("read")));
-        assert!(!owns_subagent_workspace(None, Some("write")));
+    fn only_isolated_write_subagents_own_hidden_workspaces() {
+        let mut session = crate::session::Session::new("test", "model", 1000);
+        session.parent_session_id = Some("parent".into());
+        session.subagent_access = Some("write".into());
+        let isolated = storage::data_dir()
+            .join("subagents")
+            .join(session.id.as_str())
+            .join("workspace");
+        let owns_workspace = |session: &crate::session::Session| {
+            let stored: StoredBoardSession =
+                serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
+            owns_subagent_workspace(&stored)
+        };
+        session.working_dir = "/shared/repo".into();
+        assert!(!owns_workspace(&session));
+        session.working_dir = isolated.to_str().unwrap().into();
+        assert!(owns_workspace(&session));
+        session.working_dir = isolated.join("subdirectory").to_str().unwrap().into();
+        assert!(owns_workspace(&session));
+        session.working_dir = isolated
+            .with_file_name("workspace-other")
+            .to_str()
+            .unwrap()
+            .into();
+        assert!(!owns_workspace(&session));
+        session.working_dir = isolated.to_str().unwrap().into();
+        session.subagent_access = Some("read".into());
+        assert!(!owns_workspace(&session));
+        session.subagent_access = Some("write".into());
+        session.parent_session_id = None;
+        assert!(!owns_workspace(&session));
+    }
+
+    #[test]
+    fn board_keeps_shared_worktree_and_hides_isolated_child_worktree() {
+        let root = std::env::temp_dir().join(format!("zs-board-shared-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "base",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let previous = storage::set_test_data_dir(Some(root.join("data")));
+        let mut parent = crate::session::Session::new("test", "model", 1000);
+        parent.working_dir = repo.canonicalize().unwrap().to_str().unwrap().into();
+        let mut shared = crate::session::Session::new("test", "model", 1000);
+        shared.working_dir = parent.working_dir.clone();
+        shared.parent_session_id = Some(parent.id.clone());
+        shared.subagent_access = Some("write".into());
+        let mut isolated = shared.clone();
+        isolated.id = uuid::Uuid::new_v4().to_string().into();
+        let snapshot = storage::data_dir()
+            .join("subagents")
+            .join(isolated.id.as_str())
+            .join("workspace");
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "add", "--detach", "-q"])
+                .arg(&snapshot)
+                .status()
+                .unwrap()
+                .success()
+        );
+        isolated.working_dir = snapshot.canonicalize().unwrap().to_str().unwrap().into();
+        for session in [&parent, &shared, &isolated] {
+            storage::save_session(session).unwrap();
+        }
+        let board = collect_board().unwrap();
+        storage::set_test_data_dir(previous);
+        assert_eq!(board.projects.len(), 1);
+        assert_eq!(board.projects[0].worktrees.len(), 1);
+        assert_eq!(
+            board.projects[0].worktrees[0].path,
+            repo.canonicalize().unwrap()
+        );
+        assert_eq!(board.projects[0].worktrees[0].sessions.len(), 3);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

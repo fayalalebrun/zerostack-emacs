@@ -3,11 +3,18 @@
 ## Overview
 
 The `task` tool starts a separate zerostack process with its own persisted
-session transcript. Read subagents operate in the current workspace. Write
-subagents operate in a persistent Git worktree (or a copied directory outside a
-Git repository) containing the parent's tracked, staged, unstaged, and untracked
-edits at spawn time. File copies use CoW reflinks when the filesystem supports
-them.
+session transcript. Both read and write subagents use the current workspace by
+default. Write subagents change the parent's files directly. Coordinate parallel
+tasks to avoid conflicting edits.
+
+Set `worktree: true` for a write subagent to create a persistent Git worktree
+(or a copied directory outside a Git repository). This workspace contains the
+parent's tracked, staged, unstaged, and untracked edits at spawn time. File
+copies use CoW reflinks when the filesystem supports them.
+
+The board groups child sessions under the parent's workspace. It hides isolated
+subagent worktrees from the workspace list. Shared-workspace write subagents do
+not hide the parent's worktree.
 
 The tool returns when the child agent loop or child process exits. The requested
 `timeout` is a soft deadline: when it expires, active work is interrupted and
@@ -45,18 +52,46 @@ The main agent has a tool called `task` with this request:
 `task`, `access`, and `timeout` (soft-deadline seconds) are required. `model`
 accepts either a model ID or a configured quick-model name. `reasoning` accepts
 the same effort values as `--reasoning-effort`.
+`worktree` is an optional boolean and defaults to `false`. Set it to `true`
+with `access: "write"` to use an isolated workspace. Read access ignores it.
+
+### Reuse a subagent
+
+Pass the full `Session:` ID from an earlier result as `session_id` to send a
+follow-up task to that child:
+
+```json
+{
+  "task": "Add a regression test for the auth fix you just made",
+  "session_id": "8dd7f1a0-9d68-4f2e-9fb2-bdc732e5a853",
+  "access": "write",
+  "timeout": 300
+}
+```
+
+Omit `session_id` to create a new child. Reuse starts a new process with the same
+session ID, saved conversation, and workspace. An isolated worktree is reused,
+not copied again. `worktree` is ignored during reuse. The child must belong to
+the current parent session and must have finished its previous task. Concurrent
+calls for the same child are rejected.
+
+Keep the original `access` value. Omit `model` to keep the saved model, which must
+still be in the parent's current model allowlist. If you specify `model`, it must
+resolve to the same model and provider. Each follow-up has its own required
+`timeout`. To change access or model, start a new child instead.
 
 ## Access modes
 
 - `read`: runs in the current workspace under read-only permissions.
-- `write`: snapshots the current state into a persistent workspace, runs with
-  normal write tools there, and sandboxes shell writes to that workspace when a
-  supported sandbox backend is available.
+- `write`: runs with normal write tools in the current workspace by default.
+  With `worktree: true`, it snapshots the current state into a persistent
+  workspace instead. Shell writes are sandboxed to the selected workspace when
+  a supported sandbox backend is available.
 
 The parent `task` call still passes through normal permission checks. Child
 sessions cannot recursively spawn subagents. The parent receives read/list
-access to read workspaces, read/write/edit/list access to isolated write
-workspaces, and read access to the session transcript.
+access to read workspaces, read/write/edit/list access to write workspaces,
+and read access to the session transcript.
 
 ## Configuration
 
@@ -143,7 +178,7 @@ allowlist for future sessions.
 ## Architecture
 
 ```
-parent agent ──task──> workspace snapshot ──spawn──> zerostack -p
+parent agent ──task──> shared workspace or snapshot ──spawn──> zerostack -p
      │                                                    │
      ├── live child-session link ─── Emacs socket ────────┤
      ├── workspace access                                 ├── agent loop
