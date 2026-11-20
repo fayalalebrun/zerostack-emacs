@@ -2476,6 +2476,38 @@ LIMIT defaults to 50."
   (unless (zerostack-add-clipboard t)
     (call-interactively #'yank)))
 
+(defun zerostack--copy-image-file (path mime)
+  "Copy local image PATH to the clipboard with type MIME."
+  (or (and (getenv "WAYLAND_DISPLAY") (executable-find "wl-copy")
+           (equal 0 (call-process "wl-copy" path nil nil "--type" mime)))
+      (and (getenv "DISPLAY") (executable-find "xclip")
+           (equal 0 (call-process "xclip" path nil nil
+                                  "-selection" "clipboard" "-t" mime "-i")))))
+
+(defun zerostack-copy-image ()
+  "Copy the original file for the inline image at or just before point."
+  (interactive)
+  (let ((image (get-char-property (point) 'display)))
+    ;; Emacs can place point just after an image when clicking it.
+    (when (and (not (eq (car-safe image) 'image)) (> (point) (point-min)))
+      (setq image (get-char-property (1- (point)) 'display)))
+    (unless (eq (car-safe image) 'image)
+      (user-error "No inline image at point"))
+    (let* ((path (plist-get (cdr image) :file))
+           (mime (alist-get (plist-get (cdr image) :type)
+                            '((png . "image/png") (jpeg . "image/jpeg")
+                              (gif . "image/gif") (webp . "image/webp")
+                              (svg . "image/svg+xml") (tiff . "image/tiff")
+                              (bmp . "image/bmp")))))
+      (unless (and path mime)
+        (user-error "This inline image has no supported source file"))
+      (unless (and (not (file-remote-p path)) (file-regular-p path)
+                   (file-readable-p path))
+        (user-error "Image file is not readable"))
+      (unless (zerostack--copy-image-file path mime)
+        (user-error "Cannot copy image: check wl-copy on Wayland or xclip on X11"))
+      (message "Image copied to clipboard"))))
+
 (defun zerostack-add-clipboard (&optional quiet)
   "Attach image data from the clipboard to the current zerostack session.
 

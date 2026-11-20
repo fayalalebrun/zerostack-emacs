@@ -895,6 +895,11 @@ an Emacs `yank-media` handler for image MIME types, so `M-x yank-media` and
 `C-c / -> attach -> clipboard` use the native Emacs media clipboard path before
 falling back to lower-level image target and command probing.
 
+To copy an inline image out of a session or archive, place point on the image
+and run `M-x zerostack-copy-image`. No selection is necessary. This copies the
+original image bytes with `wl-copy` on Wayland or `xclip` on X11. `M-w` remains
+normal Emacs text copy.
+
 Other operations use direct keys instead: `C-c C-c` aborts, `C-c C-a` attaches or
 rerenders the full snapshot, `C-c C-s` requests status, and `C-c C-o` opens the
 artifact at point.

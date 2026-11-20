@@ -3350,6 +3350,30 @@
        (zerostack--command-menu-fallback))
      (should (eq (caar (zerostack-test--sent-forms sent)) 'fork)))))
 
+(ert-deftest zerostack-test-copy-inline-image-at-point ()
+  (let ((path (make-temp-file "zerostack-copy-" nil ".png"))
+        copies)
+    (unwind-protect
+        (dolist (mode '(zerostack-mode zerostack-archive-mode))
+          (with-temp-buffer
+            (funcall mode)
+            (let ((inhibit-read-only t)
+                  (start (point)))
+              (insert (propertize "preview" 'display `(image :type png :file ,path)))
+              (should (eq (key-binding (kbd "M-w")) #'kill-ring-save))
+              (cl-letf (((symbol-function 'zerostack--copy-image-file)
+                         (lambda (&rest args) (push args copies))))
+                (call-interactively #'zerostack-copy-image)
+                (goto-char start)
+                (call-interactively #'zerostack-copy-image)))))
+      (delete-file path))
+    (should (equal copies (make-list 4 (list path "image/png"))))))
+
+(ert-deftest zerostack-test-copy-image-rejects-text ()
+  (with-temp-buffer
+    (insert "Caption")
+    (should-error (zerostack-copy-image) :type 'user-error)))
+
 (provide 'zerostack-test)
 
 ;;; zerostack-test.el ends here
