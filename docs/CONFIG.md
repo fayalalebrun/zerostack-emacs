@@ -46,6 +46,36 @@ data files.
 All config keys are optional. CLI flags and their environment-backed values
 (such as `ZS_PROVIDER` and `ZS_MODEL`) take precedence where both exist.
 
+### Default reasoning effort
+
+Set the top-level `reasoning-effort` key to choose a default for supported
+models. For example, in `config.toml`:
+
+```toml
+reasoning-effort = "high"
+```
+
+Use `"reasoning-effort": "high"` in JSON. A matching quick model's
+`reasoning-effort` overrides the top-level value. The `--reasoning-effort`
+flag overrides both. The supported levels depend on the provider and model.
+
+On the Emacs board, select the `effort` button next to the model on the `Main:`
+row to set the default for new Emacs sessions. The button shows the current
+default. Select `Use zerostack defaults` to clear the Emacs override. Emacs
+saves your choice in Customize. You can also use
+`M-x customize-option RET zerostack-default-reasoning-effort RET`, or add this
+to your Emacs configuration:
+
+```elisp
+(setq zerostack-default-reasoning-effort "high")
+```
+
+The Emacs setting supplies `--reasoning-effort` for new sessions. To override it
+for one session, use `C-u M-x zerostack` and enter `--reasoning-effort low`.
+Set the option to `nil` to use the zerostack configuration instead. This option
+does not change the effort of an existing session.
+
+### Configuration examples
 Example (JSON):
 
 ```json

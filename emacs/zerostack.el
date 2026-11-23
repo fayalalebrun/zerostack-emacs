@@ -31,6 +31,17 @@
   "Initial markdown render width sent to zerostack."
   :type 'integer)
 
+(defconst zerostack--default-reasoning-effort-levels
+  '("off" "none" "minimal" "low" "medium" "high" "xhigh" "max"))
+(defcustom zerostack-default-reasoning-effort nil
+  "Reasoning effort for new sessions started from Emacs.
+Nil uses zerostack's configuration and model defaults.  An explicit
+`--reasoning-effort' argument takes precedence.  This option does not
+apply when opening an existing session.  The model must support the level."
+  :type `(choice (const :tag "Use zerostack defaults" nil)
+                 ,@(mapcar (lambda (level) (list 'const level))
+                           zerostack--default-reasoning-effort-levels)))
+
 (defcustom zerostack-buffer-name "*zerostack*"
   "Default zerostack chat buffer name."
   :type 'string)
@@ -500,6 +511,17 @@ stale buffer and keep the current connection."
       (kill-buffer duplicate)
       nil)))
 
+(defun zerostack--new-session-args (args)
+  "Add the default reasoning effort to ARGS for a fresh session."
+  (if (or (not zerostack-default-reasoning-effort)
+          (cl-loop for arg in args
+                   until (equal arg "--")
+                   thereis (or (member arg '("--session" "--continue" "-c"
+                                             "--resume" "-r" "--reasoning-effort"))
+                               (string-prefix-p "--session=" arg)
+                               (string-prefix-p "--reasoning-effort=" arg))))
+      args
+    (cons "--reasoning-effort" (cons zerostack-default-reasoning-effort args))))
 ;;;###autoload
 (defun zerostack (&optional args title cwd worktree-dir session-id)
   "Start `zerostack --emacs' and connect to its native socket.
@@ -529,7 +551,7 @@ With prefix argument, read extra command-line ARGS."
           (setq zerostack--session session-id)
           (zerostack--set-session-metadata title cwd worktree-dir)
           (zerostack--append-local-line "starting zerostack --emacs" 'zs-muted)
-          (zerostack--start-server args))
+          (zerostack--start-server (if session-id args (zerostack--new-session-args args))))
         (pop-to-buffer buffer)
         buffer))))
 
@@ -909,6 +931,23 @@ Keep manual model entry available without credentials or a listing endpoint."
     (zerostack-board-refresh)
     (message "zerostack default %s" (replace-regexp-in-string "\n" ", " output))))
 
+(defun zerostack-board-set-default-reasoning-effort ()
+  "Save the reasoning effort for new sessions started from Emacs."
+  (interactive)
+  (let* ((fields (cdr zerostack-board--snapshot))
+         (levels (if (plist-member fields :reasoning-efforts)
+                     (plist-get fields :reasoning-efforts)
+                   zerostack--default-reasoning-effort-levels))
+         (inherit "Use zerostack defaults")
+         (current zerostack-default-reasoning-effort)
+         (default (cond ((member current levels) current)
+                        ((and (equal current "off") (member "none" levels)) "none")
+                        (t inherit)))
+         (choice (completing-read "Default reasoning effort for new Emacs sessions: "
+                                  (cons inherit levels) nil t nil nil default)))
+    (customize-save-variable 'zerostack-default-reasoning-effort
+                             (unless (equal choice inherit) choice))
+    (zerostack-board-refresh)))
 (defun zerostack-board-set-default-subagent-provider ()
   "Switch the persisted default zerostack subagent provider."
   (interactive)
@@ -963,8 +1002,23 @@ Keep manual model entry available without credentials or a listing endpoint."
                       'face 'zerostack-link-face
                       'help-echo "RET selects this zerostack default"))
 
+(defun zerostack-board--reasoning-effort-label (fields)
+  "Return the new-session reasoning effort label for board FIELDS."
+  (let ((override zerostack-default-reasoning-effort)
+        (configured (plist-get fields :reasoning-effort))
+        (levels (plist-get fields :reasoning-efforts)))
+    (concat "effort "
+            (cond (override
+                   (concat override
+                           (when (and (plist-member fields :reasoning-efforts)
+                                      (not (member (if (equal override "off") "none" override)
+                                                   levels)))
+                             " (unsupported)")))
+                  (configured (concat configured " (config)"))
+                  ((and (plist-member fields :reasoning-efforts) (not levels)) "unsupported")
+                  (t "auto")))))
 (defun zerostack-board--insert-config-controls (snapshot)
-  "Insert clickable provider/model controls for main and subagent defaults."
+  "Insert clickable default settings for main sessions and subagents."
   (let ((fields (cdr snapshot)))
     (insert "Main: ")
     (zerostack-board--insert-config-button
@@ -974,6 +1028,10 @@ Keep manual model entry available without credentials or a listing endpoint."
     (zerostack-board--insert-config-button
      (zerostack-board--config-label (plist-get fields :model) "model")
      #'zerostack-board-set-default-model)
+    (insert " / ")
+    (zerostack-board--insert-config-button
+     (zerostack-board--reasoning-effort-label fields)
+     #'zerostack-board-set-default-reasoning-effort)
     (insert "\nSubagents: ")
     (zerostack-board--insert-config-button
      (if (plist-get fields :subagents-enabled) "on" "off")

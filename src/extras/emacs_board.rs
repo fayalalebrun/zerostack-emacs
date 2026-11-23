@@ -99,6 +99,8 @@ struct BoardProject {
 struct BoardSnapshot {
     provider: String,
     model: String,
+    reasoning_effort: Option<String>,
+    reasoning_efforts: &'static [&'static str],
     subagent_provider: String,
     subagent_model: String,
     subagent_models: Vec<String>,
@@ -465,9 +467,15 @@ fn collect_board() -> anyhow::Result<BoardSnapshot> {
     let subagents_enabled = cfg.task_enabled.unwrap_or(true);
     #[cfg(not(feature = "subagents"))]
     let subagents_enabled = false;
+    let reasoning_effort =
+        config::resolve_reasoning_effort(&crate::cli::Cli::default(), &cfg, &provider, &model)
+            .map(|effort| effort.to_string());
+    let reasoning_efforts = crate::provider::supported_reasoning_efforts(&provider, &model);
     Ok(BoardSnapshot {
         provider,
         model,
+        reasoning_effort,
+        reasoning_efforts,
         subagent_provider,
         subagent_model,
         subagent_models,
@@ -941,9 +949,20 @@ fn socket_alive(path: &Path) -> bool {
 
 fn board_to_sexp(snapshot: &BoardSnapshot) -> String {
     format!(
-        "(zerostack-board :version 1 :provider {} :model {} :subagent-provider {} :subagent-model {} :subagent-models ({}) :subagents-enabled {} :needs-attention ({}) :projects ({}) :loose-workspaces ({}))",
+        "(zerostack-board :version 1 :provider {} :model {} :reasoning-effort {} :reasoning-efforts ({}) :subagent-provider {} :subagent-model {} :subagent-models ({}) :subagents-enabled {} :needs-attention ({}) :projects ({}) :loose-workspaces ({}))",
         sexp_quote(&snapshot.provider),
         sexp_quote(&snapshot.model),
+        snapshot
+            .reasoning_effort
+            .as_deref()
+            .map(sexp_quote)
+            .unwrap_or_else(|| "nil".into()),
+        snapshot
+            .reasoning_efforts
+            .iter()
+            .map(|effort| sexp_quote(effort))
+            .collect::<Vec<_>>()
+            .join(" "),
         sexp_quote(&snapshot.subagent_provider),
         sexp_quote(&snapshot.subagent_model),
         snapshot
@@ -1135,6 +1154,8 @@ mod tests {
         BoardSnapshot {
             provider: "test".into(),
             model: "model".into(),
+            reasoning_effort: None,
+            reasoning_efforts: &[],
             subagent_provider: "test".into(),
             subagent_model: "model".into(),
             subagent_models: vec!["model".into()],
@@ -1661,6 +1682,8 @@ mod tests {
         let snapshot = BoardSnapshot {
             provider: "openai-codex".to_string(),
             model: "gpt-5.5".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            reasoning_efforts: &["low", "high"],
             subagent_provider: "openrouter".to_string(),
             subagent_model: "deepseek/deepseek-chat-v3.1".to_string(),
             subagent_models: vec!["deepseek-v4-pro".to_string()],
@@ -1678,6 +1701,7 @@ mod tests {
         let sexp = board_to_sexp(&snapshot);
         assert!(sexp.starts_with("(zerostack-board :version 1 :provider \"openai-codex\""));
         assert!(sexp.contains(":model \"gpt-5.5\""));
+        assert!(sexp.contains(":reasoning-effort \"high\" :reasoning-efforts (\"low\" \"high\")"));
         assert!(sexp.contains(":subagent-provider \"openrouter\""));
         assert!(sexp.contains(":subagent-model \"deepseek/deepseek-chat-v3.1\""));
         assert!(sexp.contains(":subagents-enabled nil"));

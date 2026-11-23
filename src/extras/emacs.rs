@@ -821,7 +821,8 @@ mod imp {
     ) -> anyhow::Result<(Arc<Server>, Registration, UnixListener)> {
         session.initialize_service_tier(&cli, &cfg);
         let initial_reasoning_enabled = session.reasoning_enabled;
-        let initial_reasoning_effort = session.reasoning_effort.clone();
+        let initial_reasoning_effort = initial_reasoning_effort(&session, &cli);
+        session.reasoning_effort = initial_reasoning_effort.clone();
         let (registration, listener) = Registration::create(&session)?;
         let socket_path = registration.socket_path.clone();
         let registry_dir = registration.dir.clone();
@@ -1161,7 +1162,7 @@ mod imp {
             }
             meta.activity = Some(session_activity(&mutable).to_string());
             meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
-            apply_reasoning_effort_meta(&mut meta, &self.cfg, &mutable);
+            apply_reasoning_effort_meta(&mut meta, &self.cli, &self.cfg, &mutable);
             if let Err(e) = write_meta_atomic(&self.registry_dir, &meta) {
                 tracing::warn!("failed to update Emacs session metadata: {e}");
             }
@@ -3573,7 +3574,7 @@ mod imp {
             let mutable = server.mutable.lock().await;
             meta.activity = Some(session_activity(&mutable).to_string());
             meta.thinking = thinking_label(mutable.reasoning_enabled).to_string();
-            apply_reasoning_effort_meta(&mut meta, &server.cfg, &mutable);
+            apply_reasoning_effort_meta(&mut meta, &server.cli, &server.cfg, &mutable);
         }
         out.send(format!(
             "(status :request {} :session {})",
@@ -7255,7 +7256,24 @@ mod imp {
         if enabled { "on" } else { "off" }
     }
 
-    fn apply_reasoning_effort_meta(meta: &mut SessionMeta, cfg: &Config, mutable: &MutableState) {
+    fn initial_reasoning_effort(session: &Session, cli: &Cli) -> Option<CompactString> {
+        session.reasoning_effort.clone().or_else(|| {
+            let effort = cli.reasoning_effort.as_deref()?;
+            crate::provider::normalize_reasoning_effort_value(
+                &session.provider,
+                &session.model,
+                effort,
+            )
+            .map(CompactString::new)
+        })
+    }
+
+    fn apply_reasoning_effort_meta(
+        meta: &mut SessionMeta,
+        cli: &Cli,
+        cfg: &Config,
+        mutable: &MutableState,
+    ) {
         meta.reasoning_efforts =
             crate::provider::supported_reasoning_efforts(&meta.provider, &meta.model)
                 .iter()
@@ -7268,13 +7286,8 @@ mod imp {
                 .as_ref()
                 .map(ToString::to_string)
                 .or_else(|| {
-                    crate::config::resolve_reasoning_effort(
-                        &Cli::default(),
-                        cfg,
-                        &meta.provider,
-                        &meta.model,
-                    )
-                    .map(|s| s.to_string())
+                    crate::config::resolve_reasoning_effort(cli, cfg, &meta.provider, &meta.model)
+                        .map(|s| s.to_string())
                 })
         } else {
             None
@@ -7844,6 +7857,29 @@ mod imp {
             assert!(string_list_to_sexp(&["goal_update", "todo_write"]).contains("goal_update"));
         }
 
+        #[test]
+        fn initial_reasoning_effort_keeps_saved_choice_and_validates_startup_choice() {
+            let cli = Cli {
+                reasoning_effort: Some("high".into()),
+                ..Cli::default()
+            };
+            let mut session = Session::new("openai-codex", "gpt-5.6-sol", 1_000);
+            assert_eq!(
+                initial_reasoning_effort(&session, &cli).as_deref(),
+                Some("high")
+            );
+            session.reasoning_effort = Some("low".into());
+            assert_eq!(
+                initial_reasoning_effort(&session, &cli).as_deref(),
+                Some("low")
+            );
+            let unsupported = Session::new("openai", "gpt-4o", 1_000);
+            assert_eq!(initial_reasoning_effort(&unsupported, &cli), None);
+            assert_eq!(
+                initial_reasoning_effort(&session, &Cli::default()).as_deref(),
+                Some("low")
+            );
+        }
         #[test]
         fn reasoning_effort_fields_advertise_model_specific_choices() {
             let fields = reasoning_effort_fields("openai-codex", "gpt-5.6-sol", Some("max"));
