@@ -225,11 +225,26 @@ mod tests {
 
         async fn call_tool(
             &self,
-            _request: CallToolRequestParams,
+            request: CallToolRequestParams,
             _context: RequestContext<RoleServer>,
         ) -> Result<CallToolResult, ErrorData> {
             if self.stall_call {
                 return future::pending().await;
+            }
+            if request
+                .arguments
+                .as_ref()
+                .is_some_and(|args| args.contains_key("image"))
+            {
+                // A static PNG produced by the test fixture.
+                return Ok(CallToolResult::success(vec![
+                    Content::text("before"),
+                    Content::image(
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+                        "image/png",
+                    ),
+                    Content::text("after"),
+                ]));
             }
             Ok(CallToolResult::success(vec![Content::text("done")]))
         }
@@ -343,6 +358,52 @@ mod tests {
 
         let error = handle.list_tools().await.unwrap_err();
         assert!(error.to_string().contains("list_tools timed out"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_receives_image_result_over_transport() {
+        use rig::message::ToolResultContent;
+
+        let client = connected_server(StallingServer {
+            stall_list: false,
+            stall_call: false,
+        })
+        .await;
+        let definition = client.peer().list_all_tools().await.unwrap().remove(0);
+        let output = super::tool::McpTool {
+            server_name: CompactString::new("test-server"),
+            definition,
+            peer: client.peer().clone(),
+            permission: None,
+            ask_tx: None,
+            timeout: None,
+        }
+        .into_dynamic()
+        .unwrap()
+        .execute(serde_json::json!({"image": true}))
+        .await
+        .unwrap();
+        let [before, image, after] = output.as_content() else {
+            panic!("expected three content blocks: {output:?}");
+        };
+        assert_eq!(*before, ToolResultContent::text("before"));
+        assert_eq!(*after, ToolResultContent::text("after"));
+        #[cfg(feature = "multimodal")]
+        {
+            let ToolResultContent::Image(image) = image else {
+                panic!("expected a typed image result: {output:?}");
+            };
+            assert_eq!(image.media_type, Some(rig::message::ImageMediaType::PNG));
+            assert!(matches!(
+                &image.data,
+                rig::message::DocumentSourceKind::Base64(_)
+            ));
+        }
+        #[cfg(not(feature = "multimodal"))]
+        assert_eq!(
+            *image,
+            ToolResultContent::text("[MCP image omitted: multimodal support is disabled]")
+        );
     }
 
     #[tokio::test]

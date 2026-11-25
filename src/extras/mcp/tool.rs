@@ -2,8 +2,9 @@ use std::borrow::Cow;
 
 use compact_str::CompactString;
 use rig::completion::ToolDefinition;
+use rig::message::ToolResultContent;
 use rig::tool::{DynamicTool, ToolExecutionError, ToolOutput};
-use rmcp::model::{CallToolRequestParams, JsonObject, RawContent};
+use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, RawContent};
 use rmcp::service::{Peer, RoleClient};
 
 use crate::agent::tools::check_perm;
@@ -72,6 +73,49 @@ fn normalize_schema(schema: &mut serde_json::Value) {
 mod tests {
     use super::normalize_schema;
     use serde_json::json;
+
+    #[test]
+    fn text_only_results_keep_existing_format_and_errors() {
+        use rmcp::model::{CallToolResult, Content};
+
+        let result = CallToolResult::success(vec![Content::text("first"), Content::text("second")]);
+        let output = super::convert_result(result, Some("coaching".into())).unwrap();
+        assert_eq!(output.as_text(), Some("coaching\n\nfirstsecond"));
+        let result = CallToolResult::error(vec![Content::text("message"), Content::text("detail")]);
+        let error = super::convert_result(result, None).unwrap_err();
+        assert!(error.to_string().contains("message\ndetail"));
+    }
+
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn invalid_images_keep_other_tool_result_content() {
+        use base64::{Engine, prelude::BASE64_STANDARD};
+        use rig::message::ToolResultContent;
+        use rmcp::model::{CallToolResult, Content};
+
+        let png = BASE64_STANDARD.encode(crate::extras::image_validate::test_png());
+        let result = CallToolResult::success(vec![
+            Content::image("not base64", "image/png"),
+            Content::image(png, "image/jpeg"),
+            Content::text("still available"),
+        ]);
+        let output = super::convert_result(result, None).unwrap();
+        assert_eq!(
+            output.as_content(),
+            &[
+                ToolResultContent::text("[MCP image omitted: invalid base64 data]"),
+                ToolResultContent::text(
+                    "[MCP image omitted: image data does not match its declared MIME type]"
+                ),
+                ToolResultContent::text("still available"),
+            ]
+        );
+        assert!(
+            super::image_block("AAAA".into(), "image/png", &mut 3)
+                .unwrap_err()
+                .contains("size limit")
+        );
+    }
 
     #[test]
     fn linear_responses_serialization_preserves_optional_fields_and_non_strict_mode() {
@@ -190,12 +234,12 @@ impl McpTool {
             definition.parameters,
             move |args| {
                 let tool = tool.clone();
-                Box::pin(async move { tool.call(args).await.map(ToolOutput::text) })
+                Box::pin(async move { tool.call(args).await })
             },
         ))
     }
 
-    async fn call(&self, args: serde_json::Value) -> Result<String, ToolExecutionError> {
+    async fn call(&self, args: serde_json::Value) -> Result<ToolOutput, ToolExecutionError> {
         let server_name = self.server_name.clone();
         let tool_name = self.definition.name.to_string();
         let peer = self.peer.clone();
@@ -229,47 +273,102 @@ impl McpTool {
             .map_err(|e| ToolExecutionError::other(e.to_string()))?
             .map_err(|e| ToolExecutionError::other(format!("MCP tool error: {e}")))?;
 
-            if result.is_error.unwrap_or(false) {
-                let error_msg = result
-                    .content
-                    .iter()
-                    .filter_map(|c| match &c.raw {
-                        RawContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let msg = if error_msg.is_empty() {
-                    "MCP tool returned an error".to_string()
-                } else {
-                    error_msg
-                };
-                return Err(ToolExecutionError::other(msg));
-            }
-
-            let mut content = String::new();
-            for item in result.content {
-                match item.raw {
-                    RawContent::Text(t) => content.push_str(&t.text),
-                    RawContent::Image(img) => {
-                        content.push_str(&format!("data:{};base64,{}", img.mime_type, img.data));
-                    }
-                    RawContent::Resource(r) => match r.resource {
-                        rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
-                            content.push_str(&text);
-                        }
-                        rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
-                            content.push_str(&blob);
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            if let Some(msg) = coaching {
-                content = format!("{}\n\n{}", msg, content);
-            }
-            Ok(content)
+            convert_result(result, coaching)
         }
         .await
     }
+}
+
+fn convert_result(
+    result: CallToolResult,
+    coaching: Option<String>,
+) -> Result<ToolOutput, ToolExecutionError> {
+    if result.is_error.unwrap_or(false) {
+        let message = result
+            .content
+            .into_iter()
+            .filter_map(|item| match item.raw {
+                RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(ToolExecutionError::other(if message.is_empty() {
+            "MCP tool returned an error".to_string()
+        } else {
+            message
+        }));
+    }
+
+    let mut content = Vec::new();
+    let mut text = coaching.map_or_else(String::new, |message| format!("{message}\n\n"));
+    #[cfg(feature = "multimodal")]
+    let mut image_budget = (crate::extras::multimodal::MAX_MEDIA_BYTES as usize).div_ceil(3) * 4;
+    for item in result.content {
+        match item.raw {
+            RawContent::Text(block) => text.push_str(&block.text),
+            RawContent::Resource(resource) => match resource.resource {
+                rmcp::model::ResourceContents::TextResourceContents { text: value, .. } => {
+                    text.push_str(&value);
+                }
+                rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
+                    text.push_str(&blob);
+                }
+            },
+            RawContent::Image(image) => {
+                if !text.is_empty() {
+                    content.push(ToolResultContent::text(std::mem::take(&mut text)));
+                }
+                #[cfg(feature = "multimodal")]
+                let block = image_block(image.data, &image.mime_type, &mut image_budget)
+                    .unwrap_or_else(|error| {
+                        ToolResultContent::text(format!("[MCP image omitted: {error}]"))
+                    });
+                #[cfg(not(feature = "multimodal"))]
+                let block = {
+                    drop(image);
+                    ToolResultContent::text("[MCP image omitted: multimodal support is disabled]")
+                };
+                content.push(block);
+            }
+            _ => {}
+        }
+    }
+    if !text.is_empty() || content.is_empty() {
+        content.push(ToolResultContent::text(text));
+    }
+    ToolOutput::content(content)
+}
+
+#[cfg(feature = "multimodal")]
+fn image_block(
+    data: String,
+    mime: &str,
+    encoded_budget: &mut usize,
+) -> Result<ToolResultContent, String> {
+    use base64::{Engine, prelude::BASE64_STANDARD};
+    use rig::message::UserContent;
+
+    *encoded_budget = encoded_budget
+        .checked_sub(data.len())
+        .ok_or("image data exceeds the MCP result size limit")?;
+    let bytes = BASE64_STANDARD
+        .decode(&data)
+        .map_err(|_| "invalid base64 data")?;
+    if bytes.len() as u64 > crate::extras::multimodal::MAX_MEDIA_BYTES {
+        return Err("image data exceeds the size limit".into());
+    }
+    let info =
+        crate::extras::image_validate::validate(&bytes)?.ok_or("unsupported image format")?;
+    if info.mime != mime {
+        return Err("image data does not match its declared MIME type".into());
+    }
+    let UserContent::Image(image) = UserContent::image_base64(
+        data,
+        Some(crate::agent::runner::image_media_type(info.mime)),
+        None,
+    ) else {
+        unreachable!()
+    };
+    Ok(ToolResultContent::Image(image))
 }

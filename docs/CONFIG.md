@@ -707,6 +707,12 @@ suffix to distinguish tools with the same name across servers. Calls still use
 the original MCP tool name and retain existing permission rules, OAuth, and
 timeouts. Search results contain brief descriptions, not copies of schemas.
 
+With the `multimodal` feature, MCP tools can return PNG, JPEG, WebP, and static
+GIF images as image content for models that accept images. Zerostack validates
+and limits image payloads. It replaces invalid or oversized images with a short
+text notice. Builds without `multimodal` also return a notice instead of image
+data.
+
 MCP tool schemas with missing types are normalized before being sent to the
 model, including schema-valued `additionalProperties` used by Notion tools.
 An explicit union of all JSON types preserves unrestricted values; existing
